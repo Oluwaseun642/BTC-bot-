@@ -1,3 +1,4 @@
+Pybit==5.7.0
+flask
 requests
-pybit==5.7.0
-Flask
+pycryptodome
