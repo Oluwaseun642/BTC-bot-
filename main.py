@@ -1,5 +1,6 @@
 """
-BTC-BOT V4.3.2 FINAL - $10->$1000 - 6 EXCHANGES - USA BAN FIXED - NO ERROR
+BTC-BOT V4.3.3 FINAL - $10->$1000 - 6 EXCHANGES - USA BAN FIXED - ADAPTIVE BANK MIRROR
+ADAPTIVE TP/SL: Calm $300 wick = small TP, Big $2000 wick = big TP but tight SL!
 """
 import os, time, threading, requests
 from flask import Flask
@@ -25,6 +26,7 @@ STATE = {
     "entry_price": 0,
     "predicted_wick": 0,
     "our_tp": 0,
+    "our_sl": 0,
     "in_trade": False,
     "exchange_prices": {}
 }
@@ -35,7 +37,7 @@ def home():
     progress = (STATE["balance"]/STATE["target"]*100)
     ex = STATE["exchange_prices"]
     ex_str = " | ".join([f"{k}:${v:.0f}" for k,v in ex.items()]) if ex else "Loading 6 exchanges..."
-    return f"<h1>V4.3.2 $10->$1000 LIVE 🚀</h1><p>Phase:{STATE['phase']}|{elapsed}m|Bal ${STATE['balance']:.2f}/${STATE['target']} {progress:.1f}%|Median ${STATE['last_price']:.0f}|TP ${STATE['our_tp']:.0f}</p><p>{ex_str}</p><p>Paper:{STATE['paper_trades']}|Real:{STATE['real_trades']}|Safe:{STATE['safe_checks']}|Err:{STATE['errors']}</p>"
+    return f"<h1>V4.3.3 ADAPTIVE $10->$1000 LIVE 🚀</h1><p>Phase:{STATE['phase']}|{elapsed}m|Bal ${STATE['balance']:.2f}/${STATE['target']} {progress:.1f}%|Median ${STATE['last_price']:.0f}|TP ${STATE['our_tp']:.0f} SL ${STATE['our_sl']:.0f} | Pred ${STATE['predicted_wick']:.0f}</p><p>{ex_str}</p><p>Paper:{STATE['paper_trades']}|Real:{STATE['real_trades']}|Safe:{STATE['safe_checks']}|Err:{STATE['errors']}</p>"
 
 @app.route('/health')
 def health(): return "OK",200
@@ -49,15 +51,13 @@ API_KEY=os.getenv("BYBIT_API_KEY","").strip()
 API_SECRET=os.getenv("BYBIT_API_SECRET","").strip()
 
 print("="*80, flush=True)
-print("BTC-BOT V4.3.2 $10->$1000 USA-BAN FIXED 🌍", flush=True)
-print(f"START {datetime.now()} | API {'YES ✅' if API_KEY else 'NO ❌'} | 6 Exchanges Median", flush=True)
+print("BTC-BOT V4.3.3 ADAPTIVE BANK MIRROR $10->$1000 🌍", flush=True)
+print(f"START {datetime.now()} | API {'YES ✅' if API_KEY else 'NO ❌'} | Adaptive TP/SL based on bank wick", flush=True)
 print("="*80, flush=True)
 
 def get_btc():
-    prices=[]; vols=[]; exchange_prices={}; headers={"User-Agent":"Mozilla/5.0 V4.3.2"}
+    prices=[]; vols=[]; exchange_prices={}; headers={"User-Agent":"Mozilla/5.0 V4.3.3"}
     bybit_banned=False
-    
-    # 1. BYBIT AUTH - USA IP Handling
     try:
         from pybit.unified_trading import HTTP
         if API_KEY and API_SECRET:
@@ -73,8 +73,6 @@ def get_btc():
             print(f"[Bybit 🌍] US IP blocked by Bybit - SKIP (Normal for Render US) - Using 5 other exchanges ✅", flush=True)
         else:
             print(f"[Bybit ❌] {str(e)[:80]}", flush=True)
-    
-    # 2. BINANCE
     try:
         r=requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",timeout=8,headers=headers)
         if r.status_code==200:
@@ -83,16 +81,12 @@ def get_btc():
         elif r.status_code in [403,451,418]:
             print(f"[Binance 🌍] US blocked - skip", flush=True)
     except: print(f"[Binance ❌] fail", flush=True)
-    
-    # 3. COINBASE - US Friendly!
     try:
         r=requests.get("https://api.exchange.coinbase.com/products/BTC-USD/ticker",timeout=8,headers=headers)
         if r.status_code==200:
             d=r.json(); p=float(d['price']); exchange_prices["Coinbase"]=p; prices.append(p); vols.append(15000)
             print(f"[Coinbase ✅] ${p:.0f} US-Friendly!", flush=True)
     except: print(f"[Coinbase ❌] fail", flush=True)
-    
-    # 4. OKX
     try:
         r=requests.get("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",timeout=8,headers=headers)
         if r.status_code==200:
@@ -101,8 +95,6 @@ def get_btc():
                 p=float(d['data'][0]['last']); exchange_prices["OKX"]=p; prices.append(p); vols.append(float(d['data'][0].get('vol24h',15000)))
                 print(f"[OKX ✅] ${p:.0f}", flush=True)
     except: print(f"[OKX ❌] fail", flush=True)
-    
-    # 5. KRAKEN - US Friendly!
     try:
         r=requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",timeout=8,headers=headers)
         if r.status_code==200:
@@ -111,18 +103,14 @@ def get_btc():
                 key=list(d['result'].keys())[0]; p=float(d['result'][key]['c'][0]); exchange_prices["Kraken"]=p; prices.append(p); vols.append(float(d['result'][key]['v'][1]))
                 print(f"[Kraken ✅] ${p:.0f} US-Friendly!", flush=True)
     except: print(f"[Kraken ❌] fail", flush=True)
-    
-    # 6. BITSTAMP - US Friendly!
     try:
         r=requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd/",timeout=8,headers=headers)
         if r.status_code==200:
             d=r.json(); p=float(d['last']); exchange_prices["Bitstamp"]=p; prices.append(p); vols.append(float(d['volume']))
             print(f"[Bitstamp ✅] ${p:.0f} US-Friendly!", flush=True)
     except: print(f"[Bitstamp ❌] fail", flush=True)
-    
     if not prices:
         print(f"[RETRY] All feeds down - wait 15s", flush=True); time.sleep(15); return None,None,None,None
-    
     prices_sorted=sorted(prices); n=len(prices_sorted); median_price=prices_sorted[n//2] if n%2==1 else (prices_sorted[n//2-1]+prices_sorted[n//2])/2
     avg_vol=sum(vols)/len(vols) if vols else 15000; avg_turnover=median_price*avg_vol; max_wick=400
     try:
@@ -134,7 +122,6 @@ def get_btc():
                 wicks=[float(k[2])-float(k[3]) for k in kline['result']['list'] if len(k)>3]
                 max_wick=max(wicks) if wicks else 400
     except: pass
-    
     STATE["exchange_prices"]=exchange_prices; STATE["safe_checks"]+=1
     spread=max(prices)-min(prices) if prices else 0
     status=f"{len(prices)}/6"
@@ -144,10 +131,33 @@ def get_btc():
 
 def estimate_bank_money_and_wick(turnover, etf_m=137.3):
     try:
-        bank_inflow=turnover+(etf_m*1e6); pred=(bank_inflow/1e9)*800; pred=max(500,min(pred,3000)); tp=pred*0.8; buf=pred-tp
-        print(f"[BANK MIRROR 💰] Inflow ~${bank_inflow/1e6:.0f}M | Pred ${pred:.0f} | TP ${tp:.0f} SL ${tp*0.5:.0f} Buf ${buf:.0f} | $10->$1000 🛡️", flush=True)
+        bank_inflow=turnover+(etf_m*1e6)
+        pred=(bank_inflow/1e9)*800
+        pred=max(300,min(pred,3000))  # Min $300 wick, Max $3000
+        
+        # === NEW ADAPTIVE PROTOCOL - BASED ON BANK FRIENDS WICK ===
+        if pred <= 600:
+            # CALM MARKET - Small $300-$600 wick only
+            tp = pred * 0.70  # TP small $210-$420
+            sl = tp * 0.50    # SL tight
+            mode = f"CALM ${pred:.0f} wick - Small run"
+        elif pred <= 1500:
+            # NORMAL - Bank normal $600-$1500
+            tp = pred * 0.80
+            sl = tp * 0.40    # SL tighter!
+            mode = f"NORMAL ${pred:.0f} wick - Medium"
+        else:
+            # BIG PUMP/DUMP - Bank friends wick $1500-$3000!
+            tp = pred * 0.85  # IMPROVISE BIG TP $1275-$2550!
+            sl = tp * 0.35    # SL STAY TIGHT $446-$892 - Protect $10!
+            mode = f"BIG MOVE ${pred:.0f} wick - BIG TP, TIGHT SL!"
+
+        buf = pred - tp
+        STATE["our_sl"]=sl
+        print(f"[BANK MIRROR 💰] Inflow ~${bank_inflow/1e6:.0f}M | {mode} | Pred ${pred:.0f} | TP ${tp:.0f} SL ${sl:.0f} Buf ${buf:.0f} | $10->$1000 🛡️", flush=True)
         return bank_inflow,pred,tp,buf
-    except: return 0,1000,800,200
+    except: 
+        return 0,1000,800,200
 
 def check_all_protocols(price, vol, turnover, max_wick):
     STATE["price_history"].append(price)
@@ -186,15 +196,23 @@ def place_order(side, phase, lot=0.005):
     elif bal<500: lot=0.020; stage="STAGE4 $200-$500 ACCEL 0.020"
     elif bal<1000: lot=0.050; stage="STAGE5 $500-$1000 FINAL 0.050"
     else: lot=0.050; stage="TARGET REACHED!"
-    lev="20x"; sl=STATE["our_tp"]*0.5
+    lev="20x"
+    # === ADAPTIVE SL - TIGHT ALWAYS ===
+    pred = STATE["predicted_wick"]
+    tp = STATE["our_tp"]
+    if pred <= 600: sl = tp * 0.50
+    elif pred <= 1500: sl = tp * 0.40
+    else: sl = tp * 0.35  # BIG wick but SL tight!
+    STATE["our_sl"]=sl
+
     if phase.startswith("PAPER"):
         STATE["paper_trades"]+=1
-        print(f"[PAPER #{STATE['paper_trades']}] {side} {lot} {lev} | {stage} | Bal ${bal:.2f}/1000 | Entry ${STATE['last_price']:.0f} TP ${STATE['our_tp']:.0f} SL ${sl:.0f}", flush=True)
+        print(f"[PAPER #{STATE['paper_trades']}] {side} {lot} {lev} | {stage} | Bal ${bal:.2f}/1000 | Entry ${STATE['last_price']:.0f} TP ${tp:.0f} SL ${sl:.0f} Pred ${pred:.0f}", flush=True)
         STATE["in_trade"]=True; STATE["entry_price"]=STATE["last_price"]; return True
     else:
         if not API_KEY: print(f"[REAL SKIP] No API Would {side} {lot}", flush=True); return False
         STATE["real_trades"]+=1; STATE["balance"]=min(1000, STATE["balance"]+2)
-        print(f"[REAL #{STATE['real_trades']}] LIVE {side} {lot} {lev} | {stage} | Bal ${STATE['balance']:.2f}/1000", flush=True)
+        print(f"[REAL #{STATE['real_trades']}] LIVE {side} {lot} {lev} | {stage} | Bal ${STATE['balance']:.2f}/1000 | TP ${tp:.0f} SL ${sl:.0f}", flush=True)
         STATE["in_trade"]=True; STATE["entry_price"]=STATE["last_price"]; return True
 
 def bot_loop():
@@ -216,7 +234,7 @@ def bot_loop():
                 should_exit,profit=vigilant_exit(STATE["entry_price"],price,bank_signal,pred_wick,our_tp)
                 if should_exit: print(f"[{now}] EXIT Profit ${profit:.0f} Bal ${STATE['balance']:.2f}/1000", flush=True); STATE["in_trade"]=False; STATE["entry_price"]=0
             if STATE["spectator"]:
-                print(f"[{now}] {STATE['phase']} | SPECTATOR 🛡️ NOT DESPERATE | Median ${price:.0f} Any | Wick ${biggest_wick:.0f} | {reason} | Bal ${STATE['balance']:.2f}/1000 {STATE['balance']/STATE['target']*100:.1f}% | TP ${our_tp:.0f} SL ${our_tp*0.5:.0f}", flush=True)
+                print(f"[{now}] {STATE['phase']} | SPECTATOR 🛡️ NOT DESPERATE | Median ${price:.0f} Any | Wick ${biggest_wick:.0f} | {reason} | Bal ${STATE['balance']:.2f}/1000 {STATE['balance']/STATE['target']*100:.1f}% | TP ${our_tp:.0f} SL ${STATE['our_sl']:.0f}", flush=True)
             else:
                 if big_money and bank_signal!="WAIT" and biggest_wick>=(price*0.005) and not shield and not STATE["in_trade"]:
                     print(f"[{now}] HUNTER 🎯 | {bank_signal} | Median ${price:.0f} | {reason}", flush=True)
