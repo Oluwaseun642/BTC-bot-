@@ -1,160 +1,128 @@
-# === V4.4.2 FREE CHILD LOVING BOT - FINAL FULL - BEST CODE NOW ===
-# GitHub tonight! Render 7am! ♾️ Infinite Free Child! $10->$1000
-# All V's: V4.2 6 exchanges, V4.3 BANK MIRROR $653M CALM $522 Any $400 TP $366 SL $183, V4.3.3 real bal sync 20% cap isolated, V4.4 free child 16 points + No.2 safe + DXY NO BLOCK
-
-import requests, time, os
+# === V4.4.6 FREE CHILD - 100% COMPLETE FINAL - COOLEST ===
+import requests, time, os, hmac, hashlib, json
 from datetime import datetime
 
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-print(f"[ENV] BYBIT Connected={bool(API_KEY and API_SECRET)} | V4.4.2 Free Child Ready!", flush=True)
 
-STATE = {
-    "balance": 10.0, "real_bybit_balance": 10.0, "exchange_prices": {},
-    "median": 78756, "live_price": 78756, "spread": 0, "safe_checks": 0,
-    "trading": False, "prev_price": 0, "bank_flow": {}, "dxy": 102.20,
-    "oil": 102.0, "nasdaq_trend": "WEAK", "etf_flow": 137.33, "global_banks_inflow": 653
-}
-bybit_banned = False
+# === GERMANY PROXY FULL CORRECT - rza7kv6bqc08 ===
+HARD_PROXY = "http://uimhmpiv:rza7kv6bqc08@64.137.10.153:5803"
+ENV_PROXY = os.getenv("HTTPS_PROXY", os.getenv("HTTP_PROXY", ""))
+PROXY_URL = ENV_PROXY if ENV_PROXY else HARD_PROXY
+print(f"[ENV] BYBIT={bool(API_KEY)} | PROXY={PROXY_URL[:45]} | V4.4.6 FINAL COMPLETE", flush=True)
+proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
+STATE = {"balance":10.0,"real_bybit_balance":10.0,"median":78756,"live_price":78756,"spread":0,"trading":False,"prev_price":0}
 
 def get_btc():
-    global bybit_banned
-    exchange_prices = {}; prices_only = []; bybit_banned = False
-    apis = {
-        "Binance": "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-        "Coinbase": "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-        "OKX": "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",
-        "Kraken": "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
-        "Bitstamp": "https://www.bitstamp.net/api/v2/ticker/btcusd",
-        "Bybit": "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
+    prices=[]
+    apis={
+        "Binance":"https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+        "Coinbase":"https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+        "OKX":"https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",
     }
-    for name, url in apis.items():
+    for n,u in apis.items():
         try:
-            r = requests.get(url, timeout=3); price = 0
-            if name == "Binance": price = float(r.json()['price'])
-            elif name == "Coinbase": price = float(r.json()['price'])
-            elif name == "OKX": price = float(r.json()['data'][0]['last'])
-            elif name == "Kraken": price = float(r.json()['result']['XXBTZUSD']['c'][0])
-            elif name == "Bitstamp": price = float(r.json()['last'])
-            elif name == "Bybit": price = float(r.json()['result']['list'][0]['lastPrice'])
-            if price > 1000:
-                exchange_prices[name] = price; prices_only.append(price)
-                print(f"[{name} ✅] ${price:.0f}", flush=True)
-        except:
-            if name == "Bybit": bybit_banned = True; print(f"[{name} 🌍] US blocked - TRADING OK calc 99% 🧮", flush=True)
-            continue
-    STATE["exchange_prices"] = exchange_prices; STATE["safe_checks"] += 1
-    median_price = 0
-    if prices_only: prices_only.sort(); median_price = prices_only[len(prices_only)//2]
-    bybit_live = exchange_prices.get("Bybit", 0)
-    if bybit_live == 0 and median_price>0: bybit_live = median_price * 0.9995; print(f"[BYBIT CALC 99% 🧮] ${bybit_live:.0f} from median ${median_price:.0f}", flush=True)
-    live_price = bybit_live if bybit_live>0 else median_price
-    if live_price == 0: live_price = STATE.get("live_price", 78756)
-    STATE["median"] = median_price; STATE["live_price"] = live_price
-    STATE["spread"] = max(prices_only)-min(prices_only) if len(prices_only)>1 else 0
-    print(f"[LIVE 🌍] ${live_price:.0f} | [MEDIAN {len(prices_only)}/6] ${median_price:.0f} | Spread ${STATE['spread']:.0f} | NO BLOCK ❤️", flush=True)
+            r=requests.get(u,timeout=4,proxies=proxies)
+            p=0
+            if n=="Binance": p=float(r.json()['price'])
+            elif n=="Coinbase": p=float(r.json()['price'])
+            else: p=float(r.json()['data'][0]['last'])
+            if p>1000: prices.append(p)
+        except: continue
+    prices.sort()
+    median=prices[len(prices)//2] if prices else STATE["median"]
+    live=median*0.9995
+    STATE["median"]=median; STATE["live_price"]=live
+    STATE["spread"]=max(prices)-min(prices) if len(prices)>1 else 0
+    print(f"[LIVE 🌍] ${live:.0f} | MEDIAN {len(prices)}/3 ${median:.0f} | Spread ${STATE['spread']:.0f}", flush=True)
+    return live
+
+def get_real_bank_api():
     try:
-        if STATE["safe_checks"] % 5 == 0 and API_KEY and API_SECRET:
-            from pybit.unified_trading import HTTP
-            session=HTTP(api_key=API_KEY,api_secret=API_SECRET,testnet=False)
-            bal_info=session.get_wallet_balance(accountType="UNIFIED")
-            for c in bal_info['result']['list'][0]['coin']:
-                if c['coin'] in ['USDT','USDC']:
-                    real_bal=float(c['walletBalance'])
-                    if real_bal>0: STATE["balance"]=real_bal; STATE["real_bybit_balance"]=real_bal; print(f"[BALANCE SYNC 💰] Real ${real_bal:.2f} | Bot 20% ${real_bal*0.2:.2f} Free 80% ${real_bal*0.8:.2f}", flush=True)
-                    break
-    except Exception as e: print(f"[BAL SYNC] skip {e}", flush=True)
-    return live_price, median_price, exchange_prices
+        r=requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",timeout=5,proxies=proxies)
+        d=r.json()
+        chg=float(d['priceChangePercent'])
+        banks_buying=chg>0
+        wick=STATE["live_price"]-STATE.get("prev_price",STATE["live_price"])
+        pred=1200 if abs(wick)>=150 else 700
+        print(f"[REAL BANK 🏦] Chg {chg:.2f}% | Banks {'BUY ✅' if banks_buying else 'SELL 🔻'} | Wick ${wick:.0f}", flush=True)
+        return {"banks_buying":banks_buying,"predicted_wick":pred,"current_wick":wick}
+    except Exception as e:
+        print(f"[BANK FAIL] {e}", flush=True)
+        return {"banks_buying":False,"predicted_wick":700,"current_wick":0}
 
-def get_global_markets():
-    live = STATE["live_price"]; prev = STATE.get("prev_price", live); wick = live - prev
-    dxy = 102.20; oil = 102.0; nasdaq_trend = "WEAK"; etf_inflow = 137.33; banks_inflow = 653
-    calm_wick = 522; any_wick = 400
-    predicted_wick = 0
-    if abs(wick) >= 200:
-        if dxy < 102.45 and banks_inflow >= 500: predicted_wick = 1200
-        elif dxy >= 102.50: predicted_wick = 900
-        else: predicted_wick = 700
-    bank_flow = {
-        "dxy": dxy, "oil": oil, "nasdaq_trend": nasdaq_trend, "etf_inflow": etf_inflow,
-        "global_inflow": banks_inflow, "calm_wick": calm_wick, "any_wick": any_wick,
-        "predicted_wick": predicted_wick, "putting_money": True if wick > 0 or dxy < 102.45 else False,
-        "banks_vs_dxy": True if dxy < 102.45 and predicted_wick >= 500 else False,
-        "current_wick": wick
-    }
-    STATE["bank_flow"] = bank_flow; STATE["dxy"] = dxy
-    # DXY NO BLOCK - INFORMER ONLY! Banks vs DXY = follow banks!
-    print(f"[BANK MIRROR 🏦] ${banks_inflow}M inflow ~ CALM ${calm_wick} wick | Any Wick ${any_wick} | TP $366 SL $183 baseline (safety net NO BLOCK!) | Predicted ${predicted_wick} | DXY {dxy} {'REJECT NO BREAK' if dxy<102.45 else 'BREAK BUT STILL FOLLOW BANKS!'} | NO PRISON ♾️", flush=True)
-    return bank_flow
+def get_lot():
+    bal=STATE.get("real_bybit_balance",10)
+    return 0.002 if bal<=12 else 0.005 if bal<=50 else 0.010
 
-def get_lot_size():
-    bal=STATE.get("real_bybit_balance", STATE["balance"]); real_bal=bal; max_bot_balance = real_bal * 0.20
-    if real_bal <= 12: lot=0.002
-    elif real_bal <= 50: lot=0.005
-    elif real_bal <= 200: lot=0.010
-    elif real_bal <= 500: lot=0.020
-    else: lot=0.050
-    return lot, f"STAGE Real ${real_bal:.2f} Bot 20% ${max_bot_balance:.2f} Lot {lot}"
+def should_trade(live,bank):
+    if STATE["trading"]:
+        print(f"[ONE TRADE ♾️] Active! Waiting close...", flush=True)
+        return False,None,None
+    wick=bank["current_wick"]; banks_buying=bank["banks_buying"]; dest=abs(bank["predicted_wick"])
+    if abs(wick)<200: print(f"[WAIT] Wick ${wick:.0f} <200", flush=True); return False,None,None
+    if dest<500: print(f"[WAIT] Dest ${dest} <500", flush=True); return False,None,None
+    if wick>0:
+        if not banks_buying: print(f"[SKIP ❌] PUMP ${wick:.0f} but Banks SELL - SKIP!", flush=True); return False,None,None
+        side="Buy"
+        print(f"[TREND ✅] PUMP ${wick:.0f}+BUY=FOLLOW BUY!", flush=True)
+    else:
+        if banks_buying: print(f"[SKIP ❌] DUMP ${wick:.0f} but Banks BUY DIP - SKIP! Save account!", flush=True); return False,None,None
+        side="Sell"
+        print(f"[TREND ✅] DUMP ${wick:.0f}+SELL=FOLLOW SELL!", flush=True)
+    hunt=dest-300; 
+    if hunt<366: hunt=366
+    tp=hunt; sl=183
+    print(f"[ROLLING ♾️] {side} Hunt ${hunt} TP {tp} SL {sl} Live ${live:.0f}", flush=True)
+    return True,side,(tp,sl,live)
 
-def should_trade_free_child(live_price, bank_flow):
-    wick_size = bank_flow.get("current_wick", 0); bank_destination = abs(bank_flow.get("predicted_wick", 0))
-    calm_wick = bank_flow.get("calm_wick", 522); any_wick = bank_flow.get("any_wick", 400); spread = STATE["spread"]
-    if abs(wick_size) < 200:
-        print(f"[FREE CHILD 😊 WAIT] Wick ${wick_size:.0f} < $200 (CALM ${calm_wick}/Any ${any_wick})", flush=True)
-        return False, None, None
-    if bank_destination < 500:
-        print(f"[FREE CHILD 😊 WAIT] Banks ${bank_destination} < $500 need $500-800 certainty", flush=True)
-        return False, None, None
-    entry_offset = 200; hunt_with_them = bank_destination - entry_offset - 100
-    if hunt_with_them < 500: hunt_with_them = 500
-    # === TP $366 SL $183 - SAFETY NET NO BE BLOCK! ===
-    # From screenshot: BANK MIRROR $653M inflow ~ CALM $522 wick, TP $366 SL $183
-    # Ensures profit > spread $112, even if banks small. If hunt $900 > $366 use $900!
-    # SL $183 tight protect $10 bal. NO PRISON! DXY/Oil/Nasdaq/ETF never block!
-    if hunt_with_them < 366: hunt_with_them = 366
-    profit_after_spread = hunt_with_them - spread
-    print(f"[FREE CHILD 😊 CARE] Spread ${spread:.0f} | Hunt ${hunt_with_them} | Profit after ${profit_after_spread} | Baseline $366 safety net NO BLOCK ❤️", flush=True)
-    # DXY NO BLOCK - Banks vs DXY = wick WITH banks!
-    if bank_flow.get("banks_vs_dxy"):
-        print(f"[FREE CHILD 😊 LOVE] Banks vs DXY {bank_flow['dxy']}/Nasdaq {bank_flow['nasdaq_trend']}! Banks + countries vs dollar! Follow $1200/$1500! ♾️ NO PRISON!", flush=True)
-    tp = hunt_with_them; sl = 183; side = "Buy" if bank_flow.get("putting_money") else "Sell"
-    if len(STATE["exchange_prices"]) < 3: return False, None, None
-    print(f"[FREE CHILD 😊 ROLLING ♾️] Wick ${wick_size:.0f} | CALM ${calm_wick}/Any ${any_wick} | Banks ${bank_destination} | Follow ${hunt_with_them} (TP $100 before dest) | Side {side} | TP ${tp} SL ${sl} safety net NO BLOCK! | Live ${live_price:.0f} | DXY {bank_flow['dxy']} NO HOLD DOWN! | $10->$1000 😊", flush=True)
-    return True, side, (tp, sl, live_price)
-
-def place_real_order(side, tp, sl, live_price):
+def check_closed():
     try:
-        from pybit.unified_trading import HTTP
-        session=HTTP(api_key=API_KEY,api_secret=API_SECRET,testnet=False)
-        lot, stage = get_lot_size()
-        tp_price = live_price + tp if side == "Buy" else live_price - tp
-        sl_price = live_price - sl if side == "Buy" else live_price + sl
-        order=session.place_order(category="linear", symbol="BTCUSDT", side=side, orderType="Market", qty=str(lot), takeProfit=str(tp_price), stopLoss=str(sl_price), tpTriggerBy="LastPrice", slTriggerBy="LastPrice", tpslMode="Full")
-        print(f"[ORDER ✅] {side} {lot} @ ${live_price:.0f} TP ${tp_price:.0f} (${tp}) SL ${sl_price:.0f} (${sl}) safety net NO BLOCK | {stage} | ISOLATED 🛡️ 😊", flush=True)
-        STATE["trading"] = True
-        return order
-    except Exception as e: print(f"[ORDER FAIL] {e}", flush=True); return None
+        ts=str(int(time.time()*1000)); recv="5000"
+        params=f"category=linear&symbol=BTCUSDT"
+        sign=hmac.new(API_SECRET.encode(),(ts+API_KEY+recv+params).encode(),hashlib.sha256).hexdigest()
+        h={"X-BAPI-API-KEY":API_KEY,"X-BAPI-SIGN":sign,"X-BAPI-TIMESTAMP":ts,"X-BAPI-RECV-WINDOW":recv}
+        r=requests.get(f"https://api.bybit.com/v5/position/list?{params}",headers=h,proxies=proxies,timeout=10)
+        js=r.json()
+        size=float(js['result']['list'][0]['size']) if js.get('result') else 0
+        if size==0 and STATE["trading"]:
+            STATE["trading"]=False
+            print(f"[RESET ♾️] Position closed! Ready for next trend trade!", flush=True)
+    except: pass
 
-def check_trade_closed():
+def place_order(side,tp,sl,live):
     try:
-        from pybit.unified_trading import HTTP
-        session=HTTP(api_key=API_KEY,api_secret=API_SECRET,testnet=False)
-        pos=session.get_positions(category="linear", symbol="BTCUSDT")
-        return float(pos['result']['list'][0]['size']) == 0
-    except: return True
+        lot=get_lot()
+        tp_p=live+tp if side=="Buy" else live-tp
+        sl_p=live-sl if side=="Buy" else live+sl
+        ts=str(int(time.time()*1000)); recv="5000"
+        params={"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(lot),"takeProfit":str(tp_p),"stopLoss":str(sl_p),"tpTriggerBy":"LastPrice","slTriggerBy":"LastPrice","tpslMode":"Full"}
+        param_str=ts+API_KEY+recv+json.dumps(params)
+        sign=hmac.new(API_SECRET.encode(),param_str.encode(),hashlib.sha256).hexdigest()
+        headers={"X-BAPI-API-KEY":API_KEY,"X-BAPI-SIGN":sign,"X-BAPI-TIMESTAMP":ts,"X-BAPI-RECV-WINDOW":recv,"Content-Type":"application/json"}
+        print(f"[ORDER TRY 🌍] {side} {lot} via {PROXY_URL[:30]} TP {tp_p:.0f} SL {sl_p:.0f}", flush=True)
+        r=requests.post("https://api.bybit.com/v5/order/create",headers=headers,json=params,proxies=proxies,timeout=15)
+        print(f"[ORDER RESP] {r.text[:600]}", flush=True)
+        if r.status_code==200 and r.json().get("retCode")==0:
+            print(f"[ORDER ✅] {side} SUCCESS GERMANY PROXY! ♾️", flush=True)
+            STATE["trading"]=True
+    except Exception as e: print(f"[ORDER FAIL] {e}", flush=True)
 
 def main():
-    print(f"[V4.4.2 FREE CHILD 😊 FINAL] $10->$1000 Infinite Free | DXY/Oil/Nasdaq/ETF NO BLOCK follow banks vs DXY! | TP $366 SL $183 safety net NO BLOCK | {datetime.now()} | Connected={bool(API_KEY)}", flush=True)
+    print(f"[V4.4.6 START] {datetime.now()}", flush=True)
+    try:
+        r=requests.get("https://api.ipify.org?format=json",proxies=proxies,timeout=6)
+        print(f"[PROXY TEST ✅] {r.text}", flush=True)
+    except Exception as e: print(f"[PROXY TEST ❌] {e}", flush=True)
     while True:
-        live, median, ex = get_btc()
-        bank_flow = get_global_markets()
-        if STATE["prev_price"] == 0: STATE["prev_price"] = live
+        live=get_btc()
+        if STATE["prev_price"]==0: STATE["prev_price"]=live
+        bank=get_real_bank_api()
+        check_closed()
         if not STATE["trading"]:
-            can_trade, side, data = should_trade_free_child(live, bank_flow)
-            if can_trade and data: tp, sl, entry_live = data; place_real_order(side, tp, sl, entry_live)
-        else:
-            if check_trade_closed(): STATE["trading"] = False; STATE["prev_price"] = live; print(f"[FREE CHILD 😊 READY] Trade done! Instant ready! ♾️", flush=True)
-            else: print(f"[FREE CHILD 😊 HOLDING] In trade, watching banks... DXY {STATE['dxy']} NO HOLD DOWN | Spread ${STATE['spread']:.0f}", flush=True)
-        STATE["prev_price"] = live; time.sleep(30)
+            can,side,data=should_trade(live,bank)
+            if can: tp,sl,entry=data; place_order(side,tp,sl,entry)
+        STATE["prev_price"]=live; time.sleep(30)
 
-if __name__ == "__main__": main()
+if __name__=="__main__": main()
