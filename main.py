@@ -1,9 +1,8 @@
-# V4.4.19 FINAL - RENDER LOGS FIXED - PORT BINDS INSTANT
-import os, sys, time, threading, requests
+# V4.4.20 FINAL - QTY FIXED 0.001 STEP - RENDER LOGS FIXED - BALANCE GROWS
+import os, sys, time, threading, requests, math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pybit.unified_trading import HTTP
 
-# FORCE UNBUFFERED LOGS FOR RENDER
 os.environ["PYTHONUNBUFFERED"] = "1"
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -14,7 +13,7 @@ def keep_alive():
             self.send_response(200)
             self.send_header("Content-type","text/plain")
             self.end_headers()
-            self.wfile.write(b"V4.4.19 ALIVE - BALANCE BASED - LOGS FIXED")
+            self.wfile.write(b"V4.4.20 ALIVE - QTY FIXED - BALANCE BASED")
         def do_HEAD(self):
             self.send_response(200)
             self.send_header("Content-type","text/plain")
@@ -22,16 +21,15 @@ def keep_alive():
         def log_message(self,*a): return
     def run():
         port = int(os.getenv("PORT", 10000))
-        print(f"[PORT] Binding to 0.0.0.0:{port} for Render...", flush=True)
+        print(f"[PORT] Binding 0.0.0.0:{port}...", flush=True)
         HTTPServer(("0.0.0.0", port), H).serve_forever()
     threading.Thread(target=run, daemon=True).start()
     print("[PORT] Keep alive started!", flush=True)
 
-# START PORT IMMEDIATELY - BEFORE BYBIT!
 keep_alive()
-time.sleep(1)  # Give Render 1s to see port
+time.sleep(1)
 
-print("=== V4.4.19 FINAL - BALANCE BASED - READY ===", flush=True)
+print("=== V4.4.20 FINAL - QTY FIXED - READY ===", flush=True)
 
 SYMBOL = "BTCUSDT"
 CATEGORY = "linear"
@@ -51,7 +49,7 @@ STATE = {
     "last_premium_time": 0
 }
 
-print("[INIT] Connecting to Bybit...", flush=True)
+print("[INIT] Connecting Bybit...", flush=True)
 client = HTTP(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
 
 try:
@@ -153,7 +151,10 @@ def place_order(direction, scan):
         usable = balance * pct
         position_usdt = usable * LEVERAGE
         qty_raw = position_usdt / price
-        qty = str(round(max(qty_raw, 0.001), 4))
+        # FIXED: Bybit BTCUSDT qty must be 0.001 step with 3 decimals!
+        qty_step = 0.001
+        qty_floored = math.floor(max(qty_raw, qty_step) / qty_step) * qty_step
+        qty = f"{qty_floored:.3f}"
         print(f"[ORDER] Bal ${balance:.2f} ({pct*100:.0f}%) -> ${position_usdt:.2f} Qty {qty} | {direction} | {scan['driver']}", flush=True)
         client.place_order(category=CATEGORY, symbol=SYMBOL, side=side, orderType="Market", qty=qty,
                            takeProfit=str(tp2), stopLoss=str(sl), tpTriggerBy="LastPrice", slTriggerBy="LastPrice", positionIdx=0)
@@ -169,8 +170,8 @@ def check_partial():
         if hit:
             pos=client.get_positions(category=CATEGORY, symbol=SYMBOL); size=float(pos["result"]["list"][0]["size"])
             if size>0:
-                close_qty=str(round(size*0.5,4))
-                client.place_order(category=CATEGORY, symbol=SYMBOL, side="Sell" if side=="LONG" else "Buy", orderType="Market", qty=close_qty, reduceOnly=True, positionIdx=0)
+                close_qty_str = f"{(size*0.5):.3f}"
+                client.place_order(category=CATEGORY, symbol=SYMBOL, side="Sell" if side=="LONG" else "Buy", orderType="Market", qty=close_qty_str, reduceOnly=True, positionIdx=0)
             client.set_trading_stop(category=CATEGORY, symbol=SYMBOL, stopLoss=str(entry), slTriggerBy="LastPrice", positionIdx=0)
             print(f"[BREAKEVEN] SL->{entry}", flush=True); STATE["tp1_done"]=True
     except Exception as e: print(f"[TP ERR] {e}", flush=True)
@@ -183,7 +184,7 @@ def check_closed():
     except: pass
 
 def main():
-    print("[V4.4.19 FINAL] Logs fixed, Port binds instant, Balance based", flush=True)
+    print("[V4.4.20 FINAL QTY FIXED] No more Qty invalid, Balance based, Logs fixed", flush=True)
     while True:
         try:
             should,direction,scan=soldier_decision()
