@@ -1,4 +1,3 @@
-Pybit==5.7.0
-flask
+ccxt
 requests
-pycryptodome
+flask
