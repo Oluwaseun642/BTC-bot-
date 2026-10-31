@@ -1,195 +1,298 @@
-# V4.4.20 FINAL - QTY FIXED 0.001 STEP - RENDER LOGS FIXED - BALANCE GROWS
-import os, sys, time, threading, requests, math
+# HANDSOME BOY V4.4.32 - DXY BRAIN + MARKET DRIVER - FINAL MASTER
+# Gee's $5 to $1000 - 0.001 + 20x-60x + DXY Filter + No Error
+
+import time, random, ccxt, os, requests
+from datetime import datetime
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pybit.unified_trading import HTTP
 
-os.environ["PYTHONUNBUFFERED"] = "1"
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
+# ===== CONFIG =====
+API_KEY = os.environ.get("BYBIT_KEY", "YOUR_BYBIT_KEY")
+API_SECRET = os.environ.get("BYBIT_SECRET", "YOUR_BYBIT_SECRET")
+SYMBOL = "BTC/USDT:USDT"
+SYMBOL_RAW = "BTCUSDT"
+MIN_SL = 600
+MAX_SL = 800
 
-def keep_alive():
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type","text/plain")
-            self.end_headers()
-            self.wfile.write(b"V4.4.20 ALIVE - QTY FIXED - BALANCE BASED")
-        def do_HEAD(self):
-            self.send_response(200)
-            self.send_header("Content-type","text/plain")
-            self.end_headers()
-        def log_message(self,*a): return
-    def run():
-        port = int(os.getenv("PORT", 10000))
-        print(f"[PORT] Binding 0.0.0.0:{port}...", flush=True)
-        HTTPServer(("0.0.0.0", port), H).serve_forever()
-    threading.Thread(target=run, daemon=True).start()
-    print("[PORT] Keep alive started!", flush=True)
+current_position = None
+pending_trade = None
+last_leverage = None
+last_eur_usd = None  # For DXY proxy
 
-keep_alive()
-time.sleep(1)
+exchange = ccxt.bybit({
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'swap'}
+})
 
-print("=== V4.4.20 FINAL - QTY FIXED - READY ===", flush=True)
-
-SYMBOL = "BTCUSDT"
-CATEGORY = "linear"
-LEVERAGE = 20
-LEVERAGE_STR = "20"
-INITIAL_BAL = 10.0
-
-STATE = {
-    "trading": False,
-    "neural_mode": False,
-    "entry_price": 0,
-    "side": None,
-    "tp1_done": False,
-    "friend": None,
-    "last_random_wick_time": 0,
-    "last_premium": 0,
-    "last_premium_time": 0
-}
-
-print("[INIT] Connecting Bybit...", flush=True)
-client = HTTP(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
+if API_KEY == "YOUR_BYBIT_KEY":
+    print("[WARNING] Set BYBIT_KEY + BYBIT_SECRET in Render Env!")
+else:
+    print(f"[KEYS] Loaded - V4.4.32 DXY Brain Ready")
 
 try:
-    client.set_leverage(category=CATEGORY, symbol=SYMBOL, buyLeverage=LEVERAGE_STR, sellLeverage=LEVERAGE_STR)
-    print(f"[LEVERAGE] {LEVERAGE_STR}x set", flush=True)
+    exchange.set_position_mode(False, SYMBOL_RAW)
+    print("[MODE] One-Way Mode set")
 except Exception as e:
-    print(f"[LEVERAGE] {e}", flush=True)
+    print(f"[MODE] Already One-Way - {e}")
+
+# ===== RENDER HEALTH =====
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Handsome Boy V4.4.32 - DXY + Market Driver - Alive")
+    def log_message(self, format, *args):
+        return
+
+def start_health_server():
+    while True:
+        try:
+            port = int(os.environ.get("PORT", 10000))
+            server = HTTPServer(('0.0.0.0', port), HealthHandler)
+            print(f"[RENDER] Health on {port}")
+            server.serve_forever()
+        except Exception as e:
+            print(f"[HEALTH ERR] {e} - restart 5sec")
+            time.sleep(5)
+
+threading.Thread(target=start_health_server, daemon=True).start()
 
 def get_balance():
     try:
-        bal = client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        data = bal["result"]["list"][0]
-        coins = data.get("coin", [])
-        if coins:
-            usdt = coins[0]
-            total = float(usdt.get("walletBalance") or usdt.get("equity") or usdt.get("availableToWithdraw") or 10)
+        bal_data = exchange.fetch_balance()
+        try:
+            if 'USDT' in bal_data and isinstance(bal_data['USDT'], dict):
+                if 'free' in bal_data['USDT'] and bal_data['USDT']['free'] is not None:
+                    return float(bal_data['USDT']['free'])
+        except: pass
+        try:
+            if 'free' in bal_data and 'USDT' in bal_data['free']:
+                if bal_data['free']['USDT'] is not None:
+                    return float(bal_data['free']['USDT'])
+        except: pass
+        try:
+            if 'total' in bal_data and 'USDT' in bal_data['total']:
+                if bal_data['total']['USDT'] is not None:
+                    return float(bal_data['total']['USDT'])
+        except: pass
+        return 5.0
+    except Exception as e:
+        print(f"[BAL ERR] {e} - using $5 default")
+        return 5.0
+
+def get_smart_lot_and_leverage(balance, price):
+    global last_leverage
+    try:
+        if balance <= 10: lev, qty = 60, 0.001
+        elif balance <= 25: lev, qty = 50, 0.001
+        elif balance <= 50: lev, qty = 40, 0.001
+        elif balance <= 100: lev, qty = 30, 0.002
         else:
-            total = float(data.get("totalWalletBalance") or 10)
-        total = max(total, 1.0)
-        growth = ((total - INITIAL_BAL)/INITIAL_BAL*100) if INITIAL_BAL>0 else 0
-        print(f"[BALANCE] ${total:.2f} | Growth: {growth:+.1f}% from $10", flush=True)
-        return total
-    except Exception as e:
-        print(f"[BALANCE ERR] {e} -> $10 fallback", flush=True)
-        return 10.0
-
-def get_coinbase_premium_cached():
-    now = time.time()
-    if now - STATE["last_premium_time"] < 10:
-        return None, None, STATE["last_premium"]
-    try:
-        cb = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=3).json()
-        cb_price = float(cb["data"]["amount"])
-        bybit_price = float(client.get_tickers(category=CATEGORY, symbol=SYMBOL)["result"]["list"][0]["lastPrice"])
-        premium = cb_price - bybit_price
-        STATE["last_premium"] = premium
-        STATE["last_premium_time"] = now
-        return cb_price, bybit_price, premium
+            lev = 20
+            qty = max(0.001, round((balance * 0.15 / price), 4))
+        margin = (qty * price) / lev
+        if margin > balance * 0.8:
+            qty = 0.001
+            lev = 60
+        if last_leverage != lev:
+            try:
+                exchange.set_leverage(lev, SYMBOL_RAW)
+                time.sleep(0.5)
+                last_leverage = lev
+                print(f"[LEV SET] {lev}x + 0.5s safe")
+            except:
+                try:
+                    exchange.set_leverage(lev, SYMBOL)
+                    time.sleep(0.5)
+                    last_leverage = lev
+                except Exception as e:
+                    print(f"[LEV] Keep {lev}x - {e}")
+                    last_leverage = lev
+        print(f"[SMART] Bal ${balance:.2f} -> Qty {qty} Lev {lev}x")
+        return qty, lev
     except:
-        return None, None, STATE["last_premium"]
+        return 0.001, 60
 
-def scan_world():
+# ===== NEW DXY BRAIN - FOLLOW DXY OR MARKET =====
+def get_dxy_bias():
+    global last_eur_usd
     try:
-        klines = client.get_kline(category=CATEGORY, symbol=SYMBOL, interval="5", limit=200)
-        closes = [float(c[4]) for c in klines["result"]["list"]][::-1]
-        vols = [float(c[5]) for c in klines["result"]["list"]][::-1]
-        ema50 = sum(closes[-50:])/50
-        ema200 = sum(closes[-200:])/200 if len(closes)>=200 else sum(closes)/len(closes)
-        current = closes[-1]
-        vol_now = vols[-1]
-        vol_avg = sum(vols[-20:])/20 if sum(vols[-20:])>0 else 1
-        if current > ema50 > ema200 and current > closes[-2]: real_dir="LONG"
-        elif current < ema50 < ema200 and current < closes[-2]: real_dir="SHORT"
-        else: real_dir="NEUTRAL"
-        last = klines["result"]["list"][0]
-        high,low,open_p,close_p = float(last[2]),float(last[3]),float(last[1]),float(last[4])
-        wick_up = high-max(open_p,close_p); wick_down=min(open_p,close_p)-low; body=abs(close_p-open_p)+0.1
-        is_hunt=False; hunt_type=None; is_real=False
-        if wick_up>body*1.8 and vol_now>vol_avg*1.3: is_hunt=True; hunt_type="HUNT_UP"
-        elif wick_down>body*1.8 and vol_now>vol_avg*1.3: is_hunt=True; hunt_type="HUNT_DOWN"
-        elif body>wick_up and body>wick_down and vol_now>vol_avg*1.2: is_real=True
-        _,_,premium = get_coinbase_premium_cached()
-        if real_dir=="LONG" and premium>5: driver="USA_COINBASE_STRONG_LONG"
-        elif real_dir=="LONG": driver="USA_COINBASE_LONG"
-        elif real_dir=="SHORT" and premium<-5: driver="USA_COINBASE_STRONG_SHORT"
-        elif real_dir=="SHORT": driver="ASIA_BANKS_SHORT"
-        else: driver="NONE"
-        dynamic_sl = 800 if is_hunt else 450
-        return {"real_direction":real_dir,"current_price":current,"driver":driver,"is_hunt":is_hunt,"hunt_type":hunt_type,"is_real":is_real,"wick_up":wick_up,"wick_down":wick_down,"dynamic_sl":dynamic_sl,"premium":premium,"vol_ratio":vol_now/vol_avg}
+        # Use EUR/USD as DXY proxy (57% of DXY) - EUR up = DXY down
+        resp = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=4)
+        data = resp.json()
+        eur_usd = float(data['rates']['USD'])
+        
+        if last_eur_usd is None:
+            last_eur_usd = eur_usd
+            print(f"[DXY] Init EUR/USD {eur_usd:.5f} -> NEUTRAL")
+            return "NEUTRAL", 0
+        
+        change_pct = ((eur_usd - last_eur_usd) / last_eur_usd) * 100
+        last_eur_usd = eur_usd
+        
+        # DXY logic: EUR up = DXY down
+        if change_pct > 0.15:
+            print(f"[DXY] EUR/USD UP {change_pct:.3f}% => DXY DOWN STRONG -> BTC BULL")
+            return "DXY_DOWN", change_pct  # Dollar weak -> BTC up
+        elif change_pct < -0.15:
+            print(f"[DXY] EUR/USD DOWN {change_pct:.3f}% => DXY UP STRONG -> BTC BEAR")
+            return "DXY_UP", change_pct  # Dollar strong -> BTC down
+        else:
+            print(f"[DXY] EUR/USD {change_pct:.3f}% => DXY NEUTRAL -> FOLLOW MARKET")
+            return "NEUTRAL", change_pct
+            
     except Exception as e:
-        print(f"[SCAN ERR] {e}", flush=True); return {"real_direction":"NEUTRAL","current_price":78000,"is_hunt":False,"is_real":False,"dynamic_sl":800,"premium":STATE["last_premium"],"driver":"NONE"}
+        print(f"[DXY ERR] {e} -> NEUTRAL follow market")
+        return "NEUTRAL", 0
 
-def soldier_decision():
-    if STATE["trading"]:
-        print(f"[LOYAL] In trade {STATE['friend']} {STATE['side']} - Staying!", flush=True)
-        return False,None,None
-    scan=scan_world()
-    print(f"[SCAN] Real:{scan['real_direction']} Driver:{scan['driver']} Price:{scan['current_price']:.1f} Premium:{scan['premium']:.2f} Vol:{scan['vol_ratio']:.1f}x", flush=True)
-    if scan["real_direction"]=="NEUTRAL":
-        if not STATE["neural_mode"]: print("[NEURAL ON] No driver - Sitting vigilant...", flush=True); STATE["neural_mode"]=True
-        return False,None,scan
-    else:
-        if STATE["neural_mode"]: print(f"[NEURAL OFF] {scan['driver']} JOINING!", flush=True); STATE["neural_mode"]=False
-    if not scan["is_hunt"] and not scan["is_real"] and (scan["wick_up"]>150 or scan["wick_down"]>150):
-        now=time.time()
-        if STATE["last_random_wick_time"]==0: STATE["last_random_wick_time"]=now
-        if now-STATE["last_random_wick_time"]<60: return False,None,scan
-        else: STATE["last_random_wick_time"]=0
-    else: STATE["last_random_wick_time"]=0
-    return True, scan["real_direction"], scan
-
-def place_order(direction, scan):
+def world_dominance_check(curr, entry_price):
     try:
-        price=scan["current_price"]; sl_dist=scan["dynamic_sl"]
-        if direction=="LONG": sl=price-sl_dist; tp1=price+(sl_dist*0.8); tp2=price+(sl_dist*1.8); side="Buy"
-        else: sl=price+sl_dist; tp1=price-(sl_dist*0.8); tp2=price-(sl_dist*1.8); side="Sell"
-        balance = get_balance()
-        pct = 0.80 if balance >= 100 else 0.95
-        usable = balance * pct
-        position_usdt = usable * LEVERAGE
-        qty_raw = position_usdt / price
-        # FIXED: Bybit BTCUSDT qty must be 0.001 step with 3 decimals!
-        qty_step = 0.001
-        qty_floored = math.floor(max(qty_raw, qty_step) / qty_step) * qty_step
-        qty = f"{qty_floored:.3f}"
-        print(f"[ORDER] Bal ${balance:.2f} ({pct*100:.0f}%) -> ${position_usdt:.2f} Qty {qty} | {direction} | {scan['driver']}", flush=True)
-        client.place_order(category=CATEGORY, symbol=SYMBOL, side=side, orderType="Market", qty=qty,
-                           takeProfit=str(tp2), stopLoss=str(sl), tpTriggerBy="LastPrice", slTriggerBy="LastPrice", positionIdx=0)
-        STATE.update({"trading":True,"entry_price":price,"side":direction,"tp1_done":False,"tp1_price":tp1,"friend":scan["driver"],"sl_dist":sl_dist})
-    except Exception as e: print(f"[ORDER ERR] {e}", flush=True)
+        ticker = exchange.fetch_ticker(SYMBOL)
+        vol = ticker['quoteVolume'] or 0
+        move = abs(curr - entry_price) if entry_price else 0
+        if vol > 50000000 and move > 200:
+            return random.randint(1000, 2500)
+        return 0
+    except:
+        return 0
 
-def check_partial():
-    if not STATE["trading"] or STATE["tp1_done"]: return
+def close_position(direction, qty):
     try:
-        current=float(client.get_tickers(category=CATEGORY, symbol=SYMBOL)["result"]["list"][0]["lastPrice"])
-        tp1,entry,side=STATE["tp1_price"],STATE["entry_price"],STATE["side"]
-        hit=(side=="LONG" and current>=tp1) or (side=="SHORT" and current<=tp1)
-        if hit:
-            pos=client.get_positions(category=CATEGORY, symbol=SYMBOL); size=float(pos["result"]["list"][0]["size"])
-            if size>0:
-                close_qty_str = f"{(size*0.5):.3f}"
-                client.place_order(category=CATEGORY, symbol=SYMBOL, side="Sell" if side=="LONG" else "Buy", orderType="Market", qty=close_qty_str, reduceOnly=True, positionIdx=0)
-            client.set_trading_stop(category=CATEGORY, symbol=SYMBOL, stopLoss=str(entry), slTriggerBy="LastPrice", positionIdx=0)
-            print(f"[BREAKEVEN] SL->{entry}", flush=True); STATE["tp1_done"]=True
-    except Exception as e: print(f"[TP ERR] {e}", flush=True)
+        side = 'sell' if direction == "LONG" else 'buy'
+        exchange.create_order(SYMBOL, 'market', side, qty)
+        print(f"[LEFT HAND] Closed {direction} {qty}")
+        return True
+    except:
+        time.sleep(0.5)
+        try:
+            exchange.create_order(SYMBOL, 'market', side, qty)
+            return True
+        except:
+            return False
 
-def check_closed():
-    if not STATE["trading"]: return
-    try:
-        if float(client.get_positions(category=CATEGORY, symbol=SYMBOL)["result"]["list"][0]["size"])==0:
-            print("[RESET] Closed! Vigilant!", flush=True); STATE.update({"trading":False,"tp1_done":False,"side":None})
-    except: pass
-
-def main():
-    print("[V4.4.20 FINAL QTY FIXED] No more Qty invalid, Balance based, Logs fixed", flush=True)
+def monitor_trade(entry_price, sl_price, tp_price, destination, direction, qty):
+    global pending_trade
+    print(f"[MONITOR] Dest ${destination}")
     while True:
         try:
-            should,direction,scan=soldier_decision()
-            if should: place_order(direction,scan)
-            check_partial(); check_closed(); time.sleep(5)
-        except Exception as e: print(f"[MAIN ERR] {e}", flush=True); time.sleep(5)
+            curr = exchange.fetch_ticker(SYMBOL)['last']
+            bal = get_balance()
+            new_impulse = world_dominance_check(curr, entry_price)
+            if new_impulse >= 1000 and new_impulse > destination:
+                print(f"[ALERT] NEW WINNER ${new_impulse} > ${destination}")
+                pending_trade = ("LONG" if curr > entry_price else "SHORT", new_impulse)
+                print(f"[RIGHT HAND] ${new_impulse} behind back")
+                if close_position(direction, qty):
+                    time.sleep(5)
+                    return True
+            elif new_impulse and new_impulse < 800:
+                print(f"[WORLD] Small ${new_impulse} IGNORE")
+            pnl = curr - entry_price if direction=="LONG" else entry_price - curr
+            if bal < 100:
+                if pnl > 100:
+                    print("[BE SKIP] <$100 mental only")
+            else:
+                if pnl > 100 and sl_price != entry_price:
+                    sl_price = entry_price
+                    print("[BE LOCKED] >=$100 SL->Entry")
+            if (direction=="LONG" and curr >= tp_price) or (direction=="SHORT" and curr <= tp_price):
+                print(f"[TP] ${destination} hit!")
+                close_position(direction, qty)
+                return False
+            if (direction=="LONG" and curr <= sl_price) or (direction=="SHORT" and curr >= sl_price):
+                print(f"[SL] {MIN_SL}-{MAX_SL} hit")
+                close_position(direction, qty)
+                return False
+            time.sleep(1)
+        except Exception as e:
+            print(f"[MONITOR ERR] {e}")
+            time.sleep(1)
 
-if __name__=="__main__": main()
+def open_trade(direction, destination):
+    global current_position, pending_trade
+    if datetime.utcnow().weekday() >= 5:
+        print("[NEURAL WEEKEND] Sat/Sun - 1hr check")
+        time.sleep(3600)
+        return False
+    if current_position is not None and pending_trade is None:
+        pending_trade = (direction, destination)
+        print(f"[RIGHT HAND] In {current_position}, keeping {direction} ${destination} behind")
+        return False
+    try:
+        # ===== DXY + MARKET DRIVER LOGIC =====
+        dxy_bias, dxy_change = get_dxy_bias()
+        
+        # If DXY strongly up and we want LONG -> block, follow DXY (only SHORT)
+        if dxy_bias == "DXY_UP" and direction == "LONG":
+            print(f"[DXY FILTER] DXY UP STRONG - BLOCK LONG {destination} - Follow DXY, SHORT only")
+            # If market driver strong (high vol), allow override
+            price_tmp = exchange.fetch_ticker(SYMBOL)['last']
+            vol_tmp = exchange.fetch_ticker(SYMBOL)['quoteVolume'] or 0
+            if vol_tmp > 100000000:  # Very high BTC volume = market bigger than DXY
+                print(f"[MARKET OVERRIDE] BTC Vol ${vol_tmp} > 100M - Market bigger than DXY - ALLOW LONG")
+            else:
+                direction = "SHORT"  # Follow DXY
+                print(f"[DXY FOLLOW] Switched to SHORT ${destination}")
+        
+        # If DXY strongly down and we want SHORT -> block
+        elif dxy_bias == "DXY_DOWN" and direction == "SHORT":
+            print(f"[DXY FILTER] DXY DOWN STRONG - BLOCK SHORT {destination} - Follow DXY, LONG only")
+            price_tmp = exchange.fetch_ticker(SYMBOL)['last']
+            vol_tmp = exchange.fetch_ticker(SYMBOL)['quoteVolume'] or 0
+            if vol_tmp > 100000000:
+                print(f"[MARKET OVERRIDE] BTC Vol ${vol_tmp} > 100M - Market bigger than DXY - ALLOW SHORT")
+            else:
+                direction = "LONG"
+                print(f"[DXY FOLLOW] Switched to LONG ${destination}")
+        else:
+            print(f"[DRIVER] {dxy_bias} - Follow Market: {direction} ${destination}")
+        
+        price = exchange.fetch_ticker(SYMBOL)['last']
+        bal = get_balance()
+        qty, lev = get_smart_lot_and_leverage(bal, price)
+        sl_dist = random.randint(MIN_SL, MAX_SL)
+        sl = price - sl_dist if direction=="LONG" else price + sl_dist
+        tp = price + destination if direction=="LONG" else price - destination
+        side = 'buy' if direction=="LONG" else 'sell'
+        exchange.create_order(SYMBOL, 'market', side, qty)
+        current_position = direction
+        print(f"\n[ENTRY] {direction} @ {price} Qty {qty} Lev {lev}x SL {sl_dist} Dest ${destination} | DXY:{dxy_bias}")
+        should_switch = monitor_trade(price, sl, tp, destination, direction, qty)
+        current_position = None
+        if should_switch or pending_trade:
+            return True
+    except Exception as e:
+        print(f"[OPEN ERR] {e}")
+        time.sleep(2)
+    return False
+
+def start_bot():
+    global pending_trade
+    print("="*60)
+    print("HANDSOME BOY V4.4.32 DXY + MARKET DRIVER")
+    print("0.001 + 20x-60x + DXY Brain + No Error")
+    print("="*60)
+    while True:
+        try:
+            if pending_trade:
+                print("[SWITCH] Right hand 0.5sec fast!")
+                time.sleep(0.5)
+                nd, nDest = pending_trade
+                pending_trade = None
+                open_trade(nd, nDest)
+            else:
+                dest = random.randint(600, 3000)
+                dir = random.choice(["LONG","SHORT"])
+                print(f"\n[SCAN] Dest ${dest} {dir}")
+                switched = open_trade(dir, dest)
+                if switched and pending_trade:
+                    continue
+            time.sleep(5)
+        except Exception as e:
+            print(f"[MAIN ERR] {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    start_bot()
