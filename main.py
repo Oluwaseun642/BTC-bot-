@@ -1,7 +1,6 @@
-# HANDSOME BOY V4.4.36 - FINAL MASTER - V4.4.33 + ANTI-HOLD FIX
-# Based on YOUR main.py - No Hold All Night - No Spin Down
-
-import time, random, ccxt, os, requests
+# HANDSOME BOY V4.4.37 - NO BUFFER - INSTANT LOGS
+import time, random, ccxt, os, requests, sys
+sys.stdout.reconfigure(line_buffering=True)
 from datetime import datetime, timezone
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -12,7 +11,7 @@ SYMBOL = "BTC/USDT:USDT"
 SYMBOL_RAW = "BTCUSDT"
 MIN_SL = 600
 MAX_SL = 800
-MAX_HOLD_HOURS = 12  # NEW - ANTI HOLD
+MAX_HOLD_HOURS = 12
 
 current_position = None
 pending_trade = None
@@ -28,15 +27,15 @@ exchange = ccxt.bybit({
 })
 
 if API_KEY == "YOUR_BYBIT_KEY":
-    print("[WARNING] Set BYBIT_KEY + SECRET in Render Env!")
+    print("[WARNING] Set BYBIT_KEY + SECRET in Render Env!", flush=True)
 else:
-    print(f"[KEYS] V4.4.36 Final Audited Ready - From V4.4.33")
+    print(f"[KEYS] V4.4.37 No-Buffer Ready", flush=True)
 
 try:
     exchange.set_position_mode(False, SYMBOL_RAW)
-    print("[MODE] One-Way Mode set")
+    print("[MODE] One-Way Mode set", flush=True)
 except Exception as e:
-    print(f"[MODE] Already One-Way - {e}")
+    print(f"[MODE] Already One-Way - {e}", flush=True)
 
 def get_balance():
     global current_balance_cache
@@ -63,7 +62,7 @@ def get_balance():
             return val
         return current_balance_cache
     except Exception as e:
-        print(f"[BAL ERR] {e} - using ${current_balance_cache} cache")
+        print(f"[BAL ERR] {e} - using ${current_balance_cache} cache", flush=True)
         return current_balance_cache
 
 def safe_ticker():
@@ -71,7 +70,7 @@ def safe_ticker():
         try:
             return exchange.fetch_ticker(SYMBOL)
         except Exception as e:
-            print(f"[TICKER RETRY {i+1}/3] {e}")
+            print(f"[TICKER RETRY {i+1}/3] {e}", flush=True)
             time.sleep(1.5)
     raise Exception("Ticker failed 3 times")
 
@@ -84,9 +83,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         try:
             bal = current_balance_cache
             pos = current_position if current_position else "No Position"
-            return f"handsome boy ALIVE - V4.4.36 | Bal ${bal:.2f} | {pos} | DXY Brain ON - No Hold Fix"
+            return f"handsome boy ALIVE - V4.4.37 | Bal ${bal:.2f} | {pos} | DXY Brain ON - No Hold Fix"
         except:
-            return "handsome boy ALIVE - V4.4.36 DXY + Market Driver"
+            return "handsome boy ALIVE - V4.4.37"
     def do_GET(self): self._set_headers(200); self.wfile.write(self._get_status_text().encode())
     def do_HEAD(self): self._set_headers(200)
     def do_POST(self): self.do_GET()
@@ -100,10 +99,10 @@ def start_health_server():
         try:
             port = int(os.environ.get("PORT", 10000))
             server = HTTPServer(('0.0.0.0', port), HealthHandler)
-            print(f"[RENDER] Health on {port}")
+            print(f"[RENDER] Health on {port}", flush=True)
             server.serve_forever()
         except Exception as e:
-            print(f"[HEALTH ERR] {e} - restart 5sec")
+            print(f"[HEALTH ERR] {e} - restart 5sec", flush=True)
             time.sleep(5)
 
 def keepalive_ping():
@@ -112,7 +111,7 @@ def keepalive_ping():
         try:
             port = int(os.environ.get("PORT", 10000))
             requests.get(f"http://127.0.0.1:{port}", timeout=3)
-            print(f"[KEEPALIVE] Self-ping {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+            print(f"[KEEPALIVE] Self-ping {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC", flush=True)
         except: pass
 
 threading.Thread(target=start_health_server, daemon=True).start()
@@ -137,16 +136,16 @@ def get_smart_lot_and_leverage(balance, price):
                 exchange.set_leverage(lev, SYMBOL_RAW)
                 time.sleep(0.5)
                 last_leverage = lev
-                print(f"[LEV SET] {lev}x + 0.5s safe")
+                print(f"[LEV SET] {lev}x + 0.5s safe", flush=True)
             except:
                 try:
                     exchange.set_leverage(lev, SYMBOL)
                     time.sleep(0.5)
                     last_leverage = lev
                 except Exception as e:
-                    print(f"[LEV] Keep {lev}x - {e}")
+                    print(f"[LEV] Keep {lev}x - {e}", flush=True)
                     last_leverage = lev
-        print(f"[SMART] Bal ${balance:.2f} -> Qty {qty} Lev {lev}x")
+        print(f"[SMART] Bal ${balance:.2f} -> Qty {qty} Lev {lev}x", flush=True)
         return qty, lev
     except:
         return 0.001, 60
@@ -158,31 +157,29 @@ def get_dxy_bias():
         resp = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=4)
         data = resp.json()
         eur_usd = float(data['rates']['USD'])
-        print(f"[DXY] Frankfurter OK")
     except Exception as e1:
-        print(f"[DXY] Frankfurter fail {e1} -> backup")
         try:
             resp = requests.get("https://api.exchangerate.host/latest?base=EUR&symbols=USD", timeout=4)
             data = resp.json()
             eur_usd = float(data['rates']['USD'])
-            print(f"[DXY] Backup OK")
+            print(f"[DXY] Backup OK", flush=True)
         except Exception as e2:
-            print(f"[DXY ERR] Both failed {e2} -> NEUTRAL")
+            print(f"[DXY ERR] Both failed {e2} -> NEUTRAL", flush=True)
             return "NEUTRAL", 0
     if last_eur_usd is None:
         last_eur_usd = eur_usd
-        print(f"[DXY] Init EUR/USD {eur_usd:.5f} -> NEUTRAL")
+        print(f"[DXY] Init EUR/USD {eur_usd:.5f} -> NEUTRAL", flush=True)
         return "NEUTRAL", 0
     change_pct = ((eur_usd - last_eur_usd) / last_eur_usd) * 100
     last_eur_usd = eur_usd
     if change_pct > 0.15:
-        print(f"[DXY] EUR/USD UP {change_pct:.3f}% => DXY DOWN -> BULL")
+        print(f"[DXY] EUR/USD UP {change_pct:.3f}% => DXY DOWN -> BULL", flush=True)
         return "DXY_DOWN", change_pct
     elif change_pct < -0.15:
-        print(f"[DXY] EUR/USD DOWN {change_pct:.3f}% => DXY UP -> BEAR")
+        print(f"[DXY] EUR/USD DOWN {change_pct:.3f}% => DXY UP -> BEAR", flush=True)
         return "DXY_UP", change_pct
     else:
-        print(f"[DXY] EUR/USD {change_pct:.3f}% => NEUTRAL")
+        print(f"[DXY] EUR/USD {change_pct:.3f}% => NEUTRAL", flush=True)
         return "NEUTRAL", change_pct
 
 def world_dominance_check(curr, entry_price):
@@ -197,115 +194,103 @@ def world_dominance_check(curr, entry_price):
 
 def close_position(direction, qty):
     try:
-        try:
-            exchange.cancel_all_orders(SYMBOL)
+        try: exchange.cancel_all_orders(SYMBOL)
         except: pass
         side = 'sell' if direction == "LONG" else 'buy'
         exchange.create_order(SYMBOL, 'market', side, qty, None, {'reduceOnly': True})
-        print(f"[LEFT HAND] Closed {direction} {qty} reduceOnly")
+        print(f"[LEFT HAND] Closed {direction} {qty} reduceOnly", flush=True)
         return True
     except Exception as e:
-        print(f"[CLOSE RETRY] {e}")
+        print(f"[CLOSE RETRY] {e}", flush=True)
         time.sleep(0.5)
         try:
             side = 'sell' if direction == "LONG" else 'buy'
             exchange.create_order(SYMBOL, 'market', side, qty)
             return True
         except Exception as e2:
-            print(f"[CLOSE FAIL] {e2}")
+            print(f"[CLOSE FAIL] {e2}", flush=True)
             return False
 
 def monitor_trade(entry_price, sl_price, tp_price, destination, direction, qty):
     global pending_trade
-    print(f"[MONITOR] Dest ${destination} SL ${MIN_SL}-{MAX_SL} MaxHold {MAX_HOLD_HOURS}h")
+    print(f"[MONITOR] Dest ${destination} SL ${MIN_SL}-{MAX_SL} MaxHold {MAX_HOLD_HOURS}h", flush=True)
     last_heartbeat = time.time()
     entry_time = time.time()
     while True:
         try:
             curr = safe_ticker()['last']
             elapsed = (time.time() - entry_time) / 3600
-            
-            # FIX 1 - HEARTBEAT EVERY 15 MINS
             if time.time() - last_heartbeat > 900:
                 pnl = curr - entry_price if direction=="LONG" else entry_price - curr
                 bal = get_balance()
-                print(f"[HEARTBEAT] {direction} {elapsed:.1f}h alive | Curr ${curr} Entry ${entry_price} PnL ${pnl:.2f} | Bal ${bal:.2f}")
+                print(f"[HEARTBEAT] {direction} {elapsed:.1f}h alive | Curr ${curr} Entry ${entry_price} PnL ${pnl:.2f} | Bal ${bal:.2f}", flush=True)
                 last_heartbeat = time.time()
-
-            # FIX 2 - AUTO CLOSE AFTER 12 HOURS
             if elapsed >= MAX_HOLD_HOURS:
-                print(f"[MAX HOLD] {elapsed:.1f}h >= {MAX_HOLD_HOURS}h -> FORCE CLOSE NO HOLD ALL NIGHT")
+                print(f"[MAX HOLD] {elapsed:.1f}h >= {MAX_HOLD_HOURS}h -> FORCE CLOSE", flush=True)
                 close_position(direction, qty)
                 return False
-
             bal = get_balance()
             new_impulse = world_dominance_check(curr, entry_price)
             if new_impulse >= 1000 and new_impulse > destination:
-                print(f"[ALERT] NEW WINNER ${new_impulse} > ${destination}")
+                print(f"[ALERT] NEW WINNER ${new_impulse} > ${destination}", flush=True)
                 pending_trade = ("LONG" if curr > entry_price else "SHORT", new_impulse)
-                print(f"[RIGHT HAND] ${new_impulse} behind back")
+                print(f"[RIGHT HAND] ${new_impulse} behind back", flush=True)
                 if close_position(direction, qty):
                     time.sleep(5)
                     return True
-            elif new_impulse and new_impulse < 800:
-                print(f"[WORLD] Small ${new_impulse} IGNORE")
-
             pnl = curr - entry_price if direction=="LONG" else entry_price - curr
-            # FIX 3 - BE LOCK ALWAYS EVEN FOR <$100 - NO MORE SKIP
             if pnl > 100 and sl_price != entry_price:
                 sl_price = entry_price
-                print(f"[BE LOCKED] PnL ${pnl:.2f} >=$100 SL->Entry ${sl_price}")
-
+                print(f"[BE LOCKED] PnL ${pnl:.2f} >=$100 SL->Entry ${sl_price}", flush=True)
             if (direction=="LONG" and curr >= tp_price) or (direction=="SHORT" and curr <= tp_price):
-                print(f"[TP] ${destination} hit! {curr}")
+                print(f"[TP] ${destination} hit! {curr}", flush=True)
                 close_position(direction, qty)
                 return False
             if (direction=="LONG" and curr <= sl_price) or (direction=="SHORT" and curr >= sl_price):
-                print(f"[SL] {MIN_SL}-{MAX_SL} hit {curr} vs {sl_price}")
+                print(f"[SL] {MIN_SL}-{MAX_SL} hit {curr} vs {sl_price}", flush=True)
                 close_position(direction, qty)
                 return False
             time.sleep(1)
         except Exception as e:
-            print(f"[MONITOR ERR] {e}")
+            print(f"[MONITOR ERR] {e}", flush=True)
             time.sleep(1)
 
 def open_trade(direction, destination):
     global current_position, pending_trade
-    now_utc = datetime.now(timezone.utc)  # FIXED - NO MORE utcnow()
+    now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         for i in range(4):
-            print(f"[NEURAL WEEKEND] Sat/Sun Alive {i+1}/4 - {60 - i*15}min left - No trade - {now_utc.strftime('%H:%M UTC')}")
+            print(f"[NEURAL WEEKEND] Sat/Sun Alive {i+1}/4 - {60 - i*15}min left - {now_utc.strftime('%H:%M UTC')}", flush=True)
             time.sleep(900)
         return False
     if current_position is not None and pending_trade is None:
         pending_trade = (direction, destination)
-        print(f"[RIGHT HAND] In {current_position}, keeping {direction} ${destination} behind")
+        print(f"[RIGHT HAND] In {current_position}, keeping {direction} ${destination} behind", flush=True)
         return False
     try:
         dxy_bias, dxy_change = get_dxy_bias()
         if dxy_bias == "DXY_UP" and direction == "LONG":
-            print(f"[DXY FILTER] DXY UP - BLOCK LONG {destination}")
+            print(f"[DXY FILTER] DXY UP - BLOCK LONG {destination}", flush=True)
             vol_tmp = safe_ticker()['quoteVolume'] or 0
             if vol_tmp > 100000000:
-                print(f"[MARKET OVERRIDE] Vol > 100M - ALLOW LONG")
+                print(f"[MARKET OVERRIDE] Vol > 100M - ALLOW LONG", flush=True)
             else:
                 direction = "SHORT"
-                print(f"[DXY FOLLOW] Switched to SHORT ${destination}")
+                print(f"[DXY FOLLOW] Switched to SHORT ${destination}", flush=True)
         elif dxy_bias == "DXY_DOWN" and direction == "SHORT":
-            print(f"[DXY FILTER] DXY DOWN - BLOCK SHORT {destination}")
+            print(f"[DXY FILTER] DXY DOWN - BLOCK SHORT {destination}", flush=True)
             vol_tmp = safe_ticker()['quoteVolume'] or 0
             if vol_tmp > 100000000:
-                print(f"[MARKET OVERRIDE] Vol > 100M - ALLOW SHORT")
+                print(f"[MARKET OVERRIDE] Vol > 100M - ALLOW SHORT", flush=True)
             else:
                 direction = "LONG"
-                print(f"[DXY FOLLOW] Switched to LONG ${destination}")
+                print(f"[DXY FOLLOW] Switched to LONG ${destination}", flush=True)
         else:
-            print(f"[DRIVER] {dxy_bias} - Follow Market: {direction} ${destination}")
-
+            print(f"[DRIVER] {dxy_bias} - Follow Market: {direction} ${destination}", flush=True)
         price = safe_ticker()['last']
         bal = get_balance()
         if bal < 1.0:
-            print(f"[BAL LOW] ${bal:.2f} too low - skip")
+            print(f"[BAL LOW] ${bal:.2f} too low - skip", flush=True)
             time.sleep(10)
             return False
         qty, lev = get_smart_lot_and_leverage(bal, price)
@@ -315,27 +300,27 @@ def open_trade(direction, destination):
         side = 'buy' if direction=="LONG" else 'sell'
         exchange.create_order(SYMBOL, 'market', side, qty)
         current_position = direction
-        print(f"\n[ENTRY] {direction} @ {price} Qty {qty} Lev {lev}x SL {sl_dist} Dest ${destination} | DXY:{dxy_bias}")
+        print(f"\n[ENTRY] {direction} @ {price} Qty {qty} Lev {lev}x SL {sl_dist} Dest ${destination} | DXY:{dxy_bias}", flush=True)
         should_switch = monitor_trade(price, sl, tp, destination, direction, qty)
         current_position = None
         if should_switch or pending_trade:
             return True
     except Exception as e:
-        print(f"[OPEN ERR] {e}")
+        print(f"[OPEN ERR] {e}", flush=True)
         time.sleep(2)
     return False
 
 def start_bot():
     global pending_trade
-    print("="*60)
-    print("HANDSOME BOY V4.4.36 FINAL - From V4.4.33 + Fixes")
-    print("No Hold All Night + Anti Spin-Down + BE Fix")
-    print("="*60)
-    print(f"[START BAL] ${get_balance():.2f}")
+    print("="*60, flush=True)
+    print("HANDSOME BOY V4.4.37 FINAL - NO BUFFER", flush=True)
+    print("No Hold + Instant Logs + No Spin-Down", flush=True)
+    print("="*60, flush=True)
+    print(f"[START BAL] ${get_balance():.2f}", flush=True)
     while True:
         try:
             if pending_trade:
-                print(f"[SWITCH] Right hand 0.5sec fast! -> {pending_trade}")
+                print(f"[SWITCH] Right hand 0.5sec fast! -> {pending_trade}", flush=True)
                 time.sleep(0.5)
                 nd, nDest = pending_trade
                 pending_trade = None
@@ -343,13 +328,13 @@ def start_bot():
             else:
                 dest = random.randint(600, 3000)
                 dir = random.choice(["LONG","SHORT"])
-                print(f"\n[SCAN] Dest ${dest} {dir} - {datetime.now(timezone.utc).strftime('%H:%M UTC')} - Bal ${get_balance():.2f}")
+                print(f"\n[SCAN] Dest ${dest} {dir} - {datetime.now(timezone.utc).strftime('%H:%M UTC')} - Bal ${get_balance():.2f}", flush=True)
                 switched = open_trade(dir, dest)
                 if switched and pending_trade:
                     continue
             time.sleep(5)
         except Exception as e:
-            print(f"[MAIN ERR] {e}")
+            print(f"[MAIN ERR] {e}", flush=True)
             time.sleep(5)
 
 if __name__ == "__main__":
