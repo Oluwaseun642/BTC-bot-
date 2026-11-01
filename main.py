@@ -1,5 +1,5 @@
-# HANDSOME BOY V4.4.32 - DXY BRAIN + MARKET DRIVER - FINAL MASTER
-# Gee's $5 to $1000 - 0.001 + 20x-60x + DXY Filter + No Error
+# HANDSOME BOY V4.4.33 - DXY BRAIN + MARKET DRIVER - FINAL MASTER
+# $5 to $1000 - 0.001 + 20x-60x + DXY Filter + Smart Logs + No 501
 
 import time, random, ccxt, os, requests
 from datetime import datetime
@@ -17,7 +17,8 @@ MAX_SL = 800
 current_position = None
 pending_trade = None
 last_leverage = None
-last_eur_usd = None  # For DXY proxy
+last_eur_usd = None
+current_balance_cache = 5.0
 
 exchange = ccxt.bybit({
     'apiKey': API_KEY,
@@ -29,7 +30,7 @@ exchange = ccxt.bybit({
 if API_KEY == "YOUR_BYBIT_KEY":
     print("[WARNING] Set BYBIT_KEY + BYBIT_SECRET in Render Env!")
 else:
-    print(f"[KEYS] Loaded - V4.4.32 DXY Brain Ready")
+    print(f"[KEYS] Loaded - V4.4.33 DXY Brain Ready")
 
 try:
     exchange.set_position_mode(False, SYMBOL_RAW)
@@ -37,12 +38,77 @@ try:
 except Exception as e:
     print(f"[MODE] Already One-Way - {e}")
 
-# ===== RENDER HEALTH =====
+def get_balance():
+    global current_balance_cache
+    try:
+        bal_data = exchange.fetch_balance()
+        val = None
+        try:
+            if 'USDT' in bal_data and isinstance(bal_data['USDT'], dict):
+                if 'free' in bal_data['USDT'] and bal_data['USDT']['free'] is not None:
+                    val = float(bal_data['USDT']['free'])
+        except: pass
+        if val is None:
+            try:
+                if 'free' in bal_data and 'USDT' in bal_data['free']:
+                    val = float(bal_data['free']['USDT'])
+            except: pass
+        if val is None:
+            try:
+                if 'total' in bal_data and 'USDT' in bal_data['total']:
+                    val = float(bal_data['total']['USDT'])
+            except: pass
+        if val is not None:
+            current_balance_cache = val
+            return val
+        return current_balance_cache
+    except Exception as e:
+        print(f"[BAL ERR] {e} - using ${current_balance_cache} cache")
+        return current_balance_cache
+
+def safe_ticker():
+    for i in range(3):
+        try:
+            return exchange.fetch_ticker(SYMBOL)
+        except Exception as e:
+            print(f"[TICKER RETRY {i+1}/3] {e}")
+            time.sleep(1.5)
+    raise Exception("Ticker failed 3 times")
+
+# ===== RENDER HEALTH - FIXED FOR HEAD + KEYWORD + SMART STATUS =====
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+    def _set_headers(self, code=200):
+        self.send_response(code)
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Handsome Boy V4.4.32 - DXY + Market Driver - Alive")
+
+    def _get_status_text(self):
+        try:
+            bal = current_balance_cache
+            pos = current_position if current_position else "No Position"
+            return f"handsome boy ALIVE - V4.4.33 | Bal ${bal:.2f} | {pos} | DXY Brain ON"
+        except:
+            return "handsome boy ALIVE - V4.4.33 DXY + Market Driver"
+
+    def do_GET(self):
+        self._set_headers(200)
+        self.wfile.write(self._get_status_text().encode())
+
+    def do_HEAD(self):
+        self._set_headers(200)
+
+    def do_POST(self):
+        self.do_GET()
+
+    def do_OPTIONS(self):
+        self._set_headers(200)
+
+    def do_PUT(self):
+        self.do_GET()
+
+    def do_DELETE(self):
+        self.do_GET()
+
     def log_message(self, format, *args):
         return
 
@@ -58,29 +124,6 @@ def start_health_server():
             time.sleep(5)
 
 threading.Thread(target=start_health_server, daemon=True).start()
-
-def get_balance():
-    try:
-        bal_data = exchange.fetch_balance()
-        try:
-            if 'USDT' in bal_data and isinstance(bal_data['USDT'], dict):
-                if 'free' in bal_data['USDT'] and bal_data['USDT']['free'] is not None:
-                    return float(bal_data['USDT']['free'])
-        except: pass
-        try:
-            if 'free' in bal_data and 'USDT' in bal_data['free']:
-                if bal_data['free']['USDT'] is not None:
-                    return float(bal_data['free']['USDT'])
-        except: pass
-        try:
-            if 'total' in bal_data and 'USDT' in bal_data['total']:
-                if bal_data['total']['USDT'] is not None:
-                    return float(bal_data['total']['USDT'])
-        except: pass
-        return 5.0
-    except Exception as e:
-        print(f"[BAL ERR] {e} - using $5 default")
-        return 5.0
 
 def get_smart_lot_and_leverage(balance, price):
     global last_leverage
@@ -115,41 +158,49 @@ def get_smart_lot_and_leverage(balance, price):
     except:
         return 0.001, 60
 
-# ===== NEW DXY BRAIN - FOLLOW DXY OR MARKET =====
 def get_dxy_bias():
     global last_eur_usd
+    eur_usd = None
     try:
-        # Use EUR/USD as DXY proxy (57% of DXY) - EUR up = DXY down
         resp = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=4)
         data = resp.json()
         eur_usd = float(data['rates']['USD'])
-        
-        if last_eur_usd is None:
-            last_eur_usd = eur_usd
-            print(f"[DXY] Init EUR/USD {eur_usd:.5f} -> NEUTRAL")
+        print(f"[DXY] Frankfurter OK")
+    except Exception as e1:
+        print(f"[DXY] Frankfurter fail {e1} -> trying backup")
+        try:
+            resp = requests.get("https://api.exchangerate.host/latest?base=EUR&symbols=USD", timeout=4)
+            data = resp.json()
+            eur_usd = float(data['rates']['USD'])
+            print(f"[DXY] Backup exchangerate.host OK")
+        except Exception as e2:
+            print(f"[DXY ERR] Both failed {e2} -> NEUTRAL")
             return "NEUTRAL", 0
-        
-        change_pct = ((eur_usd - last_eur_usd) / last_eur_usd) * 100
-        last_eur_usd = eur_usd
-        
-        # DXY logic: EUR up = DXY down
-        if change_pct > 0.15:
-            print(f"[DXY] EUR/USD UP {change_pct:.3f}% => DXY DOWN STRONG -> BTC BULL")
-            return "DXY_DOWN", change_pct  # Dollar weak -> BTC up
-        elif change_pct < -0.15:
-            print(f"[DXY] EUR/USD DOWN {change_pct:.3f}% => DXY UP STRONG -> BTC BEAR")
-            return "DXY_UP", change_pct  # Dollar strong -> BTC down
-        else:
-            print(f"[DXY] EUR/USD {change_pct:.3f}% => DXY NEUTRAL -> FOLLOW MARKET")
-            return "NEUTRAL", change_pct
-            
-    except Exception as e:
-        print(f"[DXY ERR] {e} -> NEUTRAL follow market")
+
+    if eur_usd is None:
         return "NEUTRAL", 0
+
+    if last_eur_usd is None:
+        last_eur_usd = eur_usd
+        print(f"[DXY] Init EUR/USD {eur_usd:.5f} -> NEUTRAL")
+        return "NEUTRAL", 0
+
+    change_pct = ((eur_usd - last_eur_usd) / last_eur_usd) * 100
+    last_eur_usd = eur_usd
+
+    if change_pct > 0.15:
+        print(f"[DXY] EUR/USD UP {change_pct:.3f}% => DXY DOWN -> BTC BULL")
+        return "DXY_DOWN", change_pct
+    elif change_pct < -0.15:
+        print(f"[DXY] EUR/USD DOWN {change_pct:.3f}% => DXY UP -> BTC BEAR")
+        return "DXY_UP", change_pct
+    else:
+        print(f"[DXY] EUR/USD {change_pct:.3f}% => DXY NEUTRAL -> FOLLOW MARKET")
+        return "NEUTRAL", change_pct
 
 def world_dominance_check(curr, entry_price):
     try:
-        ticker = exchange.fetch_ticker(SYMBOL)
+        ticker = safe_ticker()
         vol = ticker['quoteVolume'] or 0
         move = abs(curr - entry_price) if entry_price else 0
         if vol > 50000000 and move > 200:
@@ -167,6 +218,7 @@ def close_position(direction, qty):
     except:
         time.sleep(0.5)
         try:
+            side = 'sell' if direction == "LONG" else 'buy'
             exchange.create_order(SYMBOL, 'market', side, qty)
             return True
         except:
@@ -177,7 +229,7 @@ def monitor_trade(entry_price, sl_price, tp_price, destination, direction, qty):
     print(f"[MONITOR] Dest ${destination}")
     while True:
         try:
-            curr = exchange.fetch_ticker(SYMBOL)['last']
+            curr = safe_ticker()['last']
             bal = get_balance()
             new_impulse = world_dominance_check(curr, entry_price)
             if new_impulse >= 1000 and new_impulse > destination:
@@ -213,43 +265,36 @@ def monitor_trade(entry_price, sl_price, tp_price, destination, direction, qty):
 def open_trade(direction, destination):
     global current_position, pending_trade
     if datetime.utcnow().weekday() >= 5:
-        print("[NEURAL WEEKEND] Sat/Sun - 1hr check")
-        time.sleep(3600)
+        for i in range(4):
+            print(f"[NEURAL WEEKEND] Sat/Sun - Sleeping 15min check {i+1}/4 - Next scan in {60 - i*15}min")
+            time.sleep(900)
         return False
     if current_position is not None and pending_trade is None:
         pending_trade = (direction, destination)
         print(f"[RIGHT HAND] In {current_position}, keeping {direction} ${destination} behind")
         return False
     try:
-        # ===== DXY + MARKET DRIVER LOGIC =====
         dxy_bias, dxy_change = get_dxy_bias()
-        
-        # If DXY strongly up and we want LONG -> block, follow DXY (only SHORT)
         if dxy_bias == "DXY_UP" and direction == "LONG":
-            print(f"[DXY FILTER] DXY UP STRONG - BLOCK LONG {destination} - Follow DXY, SHORT only")
-            # If market driver strong (high vol), allow override
-            price_tmp = exchange.fetch_ticker(SYMBOL)['last']
-            vol_tmp = exchange.fetch_ticker(SYMBOL)['quoteVolume'] or 0
-            if vol_tmp > 100000000:  # Very high BTC volume = market bigger than DXY
-                print(f"[MARKET OVERRIDE] BTC Vol ${vol_tmp} > 100M - Market bigger than DXY - ALLOW LONG")
-            else:
-                direction = "SHORT"  # Follow DXY
-                print(f"[DXY FOLLOW] Switched to SHORT ${destination}")
-        
-        # If DXY strongly down and we want SHORT -> block
-        elif dxy_bias == "DXY_DOWN" and direction == "SHORT":
-            print(f"[DXY FILTER] DXY DOWN STRONG - BLOCK SHORT {destination} - Follow DXY, LONG only")
-            price_tmp = exchange.fetch_ticker(SYMBOL)['last']
-            vol_tmp = exchange.fetch_ticker(SYMBOL)['quoteVolume'] or 0
+            print(f"[DXY FILTER] DXY UP STRONG - BLOCK LONG {destination}")
+            vol_tmp = safe_ticker()['quoteVolume'] or 0
             if vol_tmp > 100000000:
-                print(f"[MARKET OVERRIDE] BTC Vol ${vol_tmp} > 100M - Market bigger than DXY - ALLOW SHORT")
+                print(f"[MARKET OVERRIDE] BTC Vol > 100M - ALLOW LONG")
+            else:
+                direction = "SHORT"
+                print(f"[DXY FOLLOW] Switched to SHORT ${destination}")
+        elif dxy_bias == "DXY_DOWN" and direction == "SHORT":
+            print(f"[DXY FILTER] DXY DOWN STRONG - BLOCK SHORT {destination}")
+            vol_tmp = safe_ticker()['quoteVolume'] or 0
+            if vol_tmp > 100000000:
+                print(f"[MARKET OVERRIDE] BTC Vol > 100M - ALLOW SHORT")
             else:
                 direction = "LONG"
                 print(f"[DXY FOLLOW] Switched to LONG ${destination}")
         else:
             print(f"[DRIVER] {dxy_bias} - Follow Market: {direction} ${destination}")
-        
-        price = exchange.fetch_ticker(SYMBOL)['last']
+
+        price = safe_ticker()['last']
         bal = get_balance()
         qty, lev = get_smart_lot_and_leverage(bal, price)
         sl_dist = random.randint(MIN_SL, MAX_SL)
@@ -271,8 +316,8 @@ def open_trade(direction, destination):
 def start_bot():
     global pending_trade
     print("="*60)
-    print("HANDSOME BOY V4.4.32 DXY + MARKET DRIVER")
-    print("0.001 + 20x-60x + DXY Brain + No Error")
+    print("HANDSOME BOY V4.4.33 DXY + MARKET DRIVER")
+    print("No Freeze Logs + Smart Health + No 501")
     print("="*60)
     while True:
         try:
