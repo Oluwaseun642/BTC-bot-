@@ -1,5 +1,6 @@
-# HANDSOME BOY V5.3.3 SUPERB FINAL - STRESS FREE EDITION
-# Fixed: Precision + Cache + Exchange SL + No Spam + UptimeRobot 100%
+# HANDSOME BOY V5.3.3 INJURY FINAL - WISE CAT + AUTO LEVERAGE
+# Spec: Haffar Gee - Grab best % over-leverage in blink, close instant, go neural
+# Leverage auto-adjust by balance: bot go set am himself
 import time, random, ccxt, os, requests, sys
 sys.stdout.reconfigure(line_buffering=True)
 from datetime import datetime, timezone
@@ -13,6 +14,11 @@ SYMBOL_RAW = "BTCUSDT"
 MIN_SL = 600
 MAX_SL = 800
 MAX_HOLD_HOURS = 12
+
+# === YOUR INJURY TP SPEC ===
+OVER_LEV_INJURY_PCT = 0.0035  # 0.35% min - over fee
+WICK_ANT_DROP = 0.0010 # 0.10% drop from peak = blink close and grab best %
+# ===========================
 
 WHALE_VOLUME_NORMAL = 10_000_000
 WHALE_VOLUME_MONDAY = 5_000_000
@@ -33,14 +39,13 @@ dxy_cache = {"bias": "NEUTRAL", "change": 0, "eur": 0, "ts": 0}
 dom_cache = {"change": 0, "val": 60.0, "ts": 0}
 
 exchange = ccxt.bybit({'apiKey': API_KEY,'secret': API_SECRET,'enableRateLimit': True,'options': {'defaultType': 'swap'}})
-print(f"[KEYS] V5.3.3 SUPERB - Stress Free Ready", flush=True)
+print(f"[KEYS] V5.3.3 INJURY - Auto Leverage + Blink Ready", flush=True)
 try:
     exchange.set_position_mode(False, SYMBOL_RAW)
     print("[MODE] One-Way", flush=True)
 except Exception as e:
     print(f"[MODE] {e}", flush=True)
 
-# Load markets for precision
 try:
     exchange.load_markets()
     print(f"[MARKETS] Loaded - precision fixed", flush=True)
@@ -96,7 +101,7 @@ def get_real_1m_volume_and_change():
     except Exception as e:
         msg = str(e).lower()
         if "10006" in str(e) or "rate limit" in msg or "too many visits" in msg:
-            print(f"[RATE LIMIT] Bybit 10006 - Sleeping 15s, using cache ${last_price_cache:.0f}", flush=True)
+            print(f"[RATE LIMIT] 10006 - Sleeping 15s, using cache ${last_price_cache:.0f}", flush=True)
             time.sleep(15)
             return last_vol_cache, 0, last_price_cache
         print(f"[VOL ERR] {e} - using cache", flush=True)
@@ -107,7 +112,7 @@ def get_whale_threshold():
     now = datetime.now(timezone.utc)
     if now.weekday() == 0:
         if time.time() - last_monday_print > 3600:
-            print(f"[MONDAY MODE] Monday {now.strftime('%H:%M UTC')} - Threshold ${WHALE_VOLUME_MONDAY/1e6}M - More trades", flush=True)
+            print(f"[MONDAY MODE] Monday {now.strftime('%H:%M UTC')} - Thresh ${WHALE_VOLUME_MONDAY/1e6}M", flush=True)
             last_monday_print = time.time()
         return WHALE_VOLUME_MONDAY
     return WHALE_VOLUME_NORMAL
@@ -121,15 +126,14 @@ def is_asia_open_time():
     if weekday == 6:
         if current_min >= start_min: return True
         else:
-            # Print only once per 5 mins to avoid spam
             if current_min % 5 == 0 and now.second < 4:
-                print(f"[SCHEDULE] Sunday {now.hour:02d}:{now.minute:02d} UTC - Waiting 19:30 UTC (8:30pm WAT)", flush=True)
+                print(f"[SCHEDULE] Sunday {now.hour:02d}:{now.minute:02d} UTC - Waiting 19:30 UTC", flush=True)
             return False
     return True
 
 def get_dxy_bias():
     global last_eur_usd, dxy_cache
-    if time.time() - dxy_cache["ts"] < 300: # Cache 5 mins
+    if time.time() - dxy_cache["ts"] < 300:
         return dxy_cache["bias"], dxy_cache["change"], dxy_cache["eur"]
     eur_usd = None
     try:
@@ -155,7 +159,7 @@ def get_dxy_bias():
 
 def get_btc_dominance_change():
     global dom_cache
-    if time.time() - dom_cache["ts"] < 300: # Cache 5 mins
+    if time.time() - dom_cache["ts"] < 300:
         return dom_cache["change"], dom_cache["val"]
     try:
         r = requests.get("https://api.coingecko.com/api/v3/global", timeout=5)
@@ -167,7 +171,7 @@ def get_btc_dominance_change():
         dom_cache.update({"change": change, "val": dom, "ts": time.time(), "last": dom})
         return change, dom
     except Exception as e:
-        print(f"[DOM ERR] {e} - using cache", flush=True)
+        print(f"[DOM ERR] {e}", flush=True)
         return dom_cache["change"], dom_cache["val"]
 
 def get_liquidation_map(): return {78500: 50_000_000, 77200: 40_000_000, 79000: 70_000_000}
@@ -204,8 +208,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             bal = current_balance_cache
             pos = current_position if current_position else "No Position"
             thresh = get_whale_threshold()
-            return f"V5.3.3 SUPERB ALIVE | Bal ${bal:.2f} | {pos} | State {BOT_STATE} | Thresh ${thresh/1e6}M | Asia 8:30pm WAT | RateLimit Fixed"
-        except: return "V5.3.3 SUPERB ALIVE"
+            return f"V5.3.3 INJURY ALIVE | Bal ${bal:.2f} | {pos} | State {BOT_STATE} | Thresh ${thresh/1e6}M | AutoLev {last_leverage}x | Blink {OVER_LEV_INJURY_PCT*100}%"
+        except: return "V5.3.3 INJURY ALIVE"
     def do_GET(self): self._set_headers(200); self.wfile.write(self._get_status_text().encode())
     def do_HEAD(self): self._set_headers(200); self.wfile.write(b'')
     def do_POST(self): self.do_GET()
@@ -220,7 +224,7 @@ def start_health_server():
         try:
             port = int(os.environ.get("PORT", 10000))
             server = HTTPServer(('0.0.0.0', port), HealthHandler)
-            print(f"[RENDER] Health on {port} - SUPERB + GREEN", flush=True)
+            print(f"[RENDER] Health on {port} - INJURY GREEN", flush=True)
             server.serve_forever()
         except Exception as e: print(f"[HEALTH ERR] {e}", flush=True); time.sleep(5)
 
@@ -239,72 +243,99 @@ threading.Thread(target=keepalive_ping, daemon=True).start()
 def get_smart_lot_and_leverage(balance, price):
     global last_leverage
     try:
+        # AUTO LEVERAGE BY BALANCE - BOT SETS HIMSELF
         if balance <= 10: lev, qty = 60, 0.001
         elif balance <= 25: lev, qty = 50, 0.001
         elif balance <= 50: lev, qty = 40, 0.001
         elif balance <= 100: lev, qty = 30, 0.002
         else: lev = 20; qty = max(0.001, round((balance * 0.15 / price), 4))
-        # FIX: Precision - Bybit needs correct qty
-        try:
-            qty = float(exchange.amount_to_precision(SYMBOL, qty))
+        
+        try: qty = float(exchange.amount_to_precision(SYMBOL, qty))
         except: pass
+        
         margin = (qty * price) / lev
         if margin > balance * 0.8: qty = 0.001; lev = 60
+        
+        # AUTO SET LEVERAGE - NO MANUAL
         if last_leverage != lev:
             try:
                 exchange.set_leverage(lev, SYMBOL_RAW)
                 time.sleep(0.5)
                 last_leverage = lev
-                print(f"[LEV] {lev}x", flush=True)
+                print(f"[AUTO LEV] Balance ${balance:.2f} -> Set {lev}x by himself!", flush=True)
             except Exception as e:
                 if "leverage not modified" not in str(e).lower():
                     print(f"[LEV ERR] {e}", flush=True)
-        print(f"[SMART] Bal ${balance:.2f} -> Qty {qty} Lev {lev}x", flush=True)
+        
+        print(f"[SMART] Bal ${balance:.2f} -> Qty {qty} Lev {lev}x | Injury Target {OVER_LEV_INJURY_PCT*100}%", flush=True)
         return qty, lev
     except: return 0.001, 60
 
 def close_position(direction, qty):
     try:
-        try:
-            qty = float(exchange.amount_to_precision(SYMBOL, qty))
+        try: qty = float(exchange.amount_to_precision(SYMBOL, qty))
         except: pass
         try: exchange.cancel_all_orders(SYMBOL)
         except: pass
         side = 'sell' if direction == "LONG" else 'buy'
         exchange.create_order(SYMBOL, 'market', side, qty, None, {'reduceOnly': True})
-        print(f"[CLOSE] {direction} {qty}", flush=True); return True
+        print(f"[CLOSE] {direction} {qty} - Injury grabbed!", flush=True); return True
     except Exception as e:
         try:
             side = 'sell' if direction == "LONG" else 'buy'
             exchange.create_order(SYMBOL, 'market', side, qty); return True
         except Exception as e2: print(f"[CLOSE FAIL] {e2}", flush=True); return False
 
+# === NEW INJURY MONITOR - REPLACES OLD ONE ===
 def monitor_trade(entry_price, sl_price, tp_price, destination, direction, qty):
     global BOT_STATE, BOT_STATE_UNTIL
-    print(f"[MONITOR] Dest ${destination} SL ${MIN_SL}-{MAX_SL} | {BOT_STATE} | Exchange SL protected", flush=True)
+    print(f"[MONITOR-INJURY] Entry ${entry_price:.2f} | Lev {last_leverage}x | Target: BEST % over {OVER_LEV_INJURY_PCT*100}% in BLINK | Wise Cat", flush=True)
     entry_time = time.time(); last_heartbeat = time.time()
+    peak_price = entry_price
+    best_pump_seen = 0
+
     while True:
         try:
             _, _, curr = get_real_1m_volume_and_change()
             elapsed = (time.time() - entry_time) / 3600
             if time.time() - last_heartbeat > 900:
                 pnl = curr - entry_price if direction=="LONG" else entry_price - curr
-                print(f"[HEARTBEAT] {direction} {elapsed:.1f}h PnL ${pnl:.2f} Bal ${get_balance():.2f}", flush=True)
+                print(f"[HEARTBEAT] {direction} {elapsed:.1f}h Best {best_pump_seen*100:.3f}% PnL ${pnl:.2f} Curr ${curr:.2f} Bal ${get_balance():.2f}", flush=True)
                 last_heartbeat = time.time()
             if elapsed >= MAX_HOLD_HOURS:
                 print(f"[MAX HOLD] {elapsed:.1f}h CLOSE", flush=True); close_position(direction, qty); BOT_STATE = "HUNTING"; return False
+            
             liq_price, _ = check_liq_hunt(curr)
             if liq_price:
                 if (direction=="LONG" and curr >= liq_price) or (direction=="SHORT" and curr <= liq_price):
                     print(f"[VOID SWEPT] ${liq_price} hunted! Calm 5 min", flush=True); close_position(direction, qty); BOT_STATE = "SPECTATING"; BOT_STATE_UNTIL = time.time() + 300; return False
-            pnl = curr - entry_price if direction=="LONG" else entry_price - curr
-            if pnl > 100 and sl_price != entry_price: sl_price = entry_price; print(f"[BE LOCKED] SL->Entry", flush=True)
-            if (direction=="LONG" and curr >= tp_price) or (direction=="SHORT" and curr <= tp_price):
-                print(f"[TP] ${destination} hit!", flush=True); close_position(direction, qty); return False
+
+            # --- WISE CAT TRACKER: BEST % ---
+            curr_profit_pct = (curr - entry_price)/entry_price if direction=="LONG" else (entry_price - curr)/entry_price
+            if curr_profit_pct > best_pump_seen:
+                best_pump_seen = curr_profit_pct
+                if best_pump_seen >= OVER_LEV_INJURY_PCT:
+                    print(f"[PEAK] New BEST {best_pump_seen*100:.4f}% @ ${curr:.2f} - Ready to BLINK", flush=True)
+                peak_price = curr
+
+            # --- BLINK CLOSE LOGIC ---
+            if best_pump_seen >= OVER_LEV_INJURY_PCT:
+                drop_from_peak = (peak_price - curr)/peak_price if direction=="LONG" else (curr - peak_price)/abs(peak_price) if peak_price!=0 else 0
+                # If wick down 0.10% from peak after securing injury -> GRAB HIGHEST AND CLOSE
+                if drop_from_peak >= WICK_ANT_DROP:
+                    print(f"[INJURY TP - BLINK] CAUGHT BEST {best_pump_seen*100:.4f}%! Peak ${peak_price:.2f} -> Now ${curr:.2f} Drop {drop_from_peak*100:.3f}% | CLOSING INSTANT + NEURAL", flush=True)
+                    close_position(direction, qty)
+                    print(f"[NEURAL SIT] Closed with {best_pump_seen*100:.3f}% | Will scan for next whale / diversion in 2 sec", flush=True)
+                    BOT_STATE = "HUNTING"
+                    time.sleep(2)
+                    return False
+
+            # SL safety
             if (direction=="LONG" and curr <= sl_price) or (direction=="SHORT" and curr >= sl_price):
-                print(f"[SL] hit", flush=True); close_position(direction, qty); return False
-            time.sleep(3)
-        except Exception as e: print(f"[MONITOR ERR] {e}", flush=True); time.sleep(3)
+                print(f"[SL] hit @ ${curr:.2f} Best was {best_pump_seen*100:.3f}%", flush=True); close_position(direction, qty); return False
+            
+            time.sleep(1) # 1-sec eye
+        except Exception as e: print(f"[MONITOR ERR] {e}", flush=True); time.sleep(2)
 
 def open_trade(direction, destination):
     global current_position, pending_trade, BOT_STATE, BOT_STATE_UNTIL
@@ -336,12 +367,11 @@ def open_trade(direction, destination):
         if dxy_bias == "DXY_UP" and direction == "LONG" and vol_1m < 100_000_000: direction = "SHORT"
         elif dxy_bias == "DXY_DOWN" and direction == "SHORT" and vol_1m < 100_000_000: direction = "LONG"
         bal = get_balance()
-        if bal < 1.0: print(f"[BAL LOW] ${bal:.2f}", flush=True); time.sleep(10); return False
-        qty, lev = get_smart_lot_and_leverage(bal, price)
+        if bal < 1.0: print(f"[BAL LOW] ${bal:.2f} - Still trading PERP with injury TP", flush=True); time.sleep(2)
+        qty, lev = get_smart_lot_and_leverage(bal, price) # AUTO SETS LEVERAGE HIMSELF
         sl_dist = random.randint(MIN_SL, MAX_SL)
         sl = price - sl_dist if direction=="LONG" else price + sl_dist
         tp = price + destination if direction=="LONG" else price - destination
-        # FIX: Price precision
         try:
             limit_price_raw = price + LIMIT_OFFSET if direction=="LONG" else price - LIMIT_OFFSET
             limit_price = float(exchange.price_to_precision(SYMBOL, limit_price_raw))
@@ -350,8 +380,7 @@ def open_trade(direction, destination):
         except:
             limit_price = price + LIMIT_OFFSET if direction=="LONG" else price - LIMIT_OFFSET
         side = 'buy' if direction=="LONG" else 'sell'
-        print(f"[ENTRY] {direction} LIMIT @{limit_price} (live {price}) Qty {qty} Lev {lev}x Dest ${destination} | DXY:{dxy_bias} DOM:{dom_val:.1f}% Thresh ${whale_thresh/1e6}M", flush=True)
-        # FIX: Add exchange SL/TP for safety if bot crashes
+        print(f"[ENTRY] {direction} LIMIT @{limit_price} (live {price}) Qty {qty} AutoLev {lev}x | Injury {OVER_LEV_INJURY_PCT*100}% | DXY:{dxy_bias} DOM:{dom_val:.1f}%", flush=True)
         params = {}
         try:
             params = {'stopLoss': str(sl), 'takeProfit': str(tp), 'slTriggerBy': 'LastPrice', 'tpTriggerBy': 'LastPrice'}
@@ -383,15 +412,14 @@ def open_trade(direction, destination):
 def start_bot():
     global pending_trade, last_heartbeat_log
     print("="*60, flush=True)
-    print("HANDSOME BOY V5.3.3 SUPERB - NO STRESS", flush=True)
-    print("FIXED: Precision + Cache + Exchange SL + Heartbeat", flush=True)
+    print("HANDSOME BOY V5.3.3 INJURY - WISE CAT + AUTO LEV", flush=True)
+    print(f"FIXED: Auto Leverage + Blink {OVER_LEV_INJURY_PCT*100}% + 1-sec eye + Neural", flush=True)
     print("="*60, flush=True)
-    # Auto-sync if position exists on exchange
     try:
         poss = exchange.fetch_positions([SYMBOL])
         for p in poss:
             if float(p.get('contracts', 0)) > 0:
-                print(f"[SYNC] Found existing position {p['side']} {p['contracts']} - will manage", flush=True)
+                print(f"[SYNC] Found existing {p['side']} {p['contracts']}", flush=True)
     except: pass
     print(f"[START BAL] ${get_balance():.2f} | Now {datetime.now(timezone.utc).strftime('%A %H:%M UTC')}", flush=True)
     while True:
@@ -412,7 +440,7 @@ def start_bot():
                 else:
                     now_ts = time.time()
                     if now_ts - last_heartbeat_log > 300:
-                        print(f"[HUNTING] Alive {datetime.now(timezone.utc).strftime('%H:%M UTC')} | ${price:.0f} | Vol ${vol_1m/1e6:.2f}M < ${whale_thresh/1e6}M | Bal ${current_balance_cache:.2f}", flush=True)
+                        print(f"[HUNTING] Alive {datetime.now(timezone.utc).strftime('%H:%M UTC')} | ${price:.0f} | Vol ${vol_1m/1e6:.2f}M < ${whale_thresh/1e6}M | Bal ${current_balance_cache:.2f} | Lev {last_leverage}x", flush=True)
                         last_heartbeat_log = now_ts
                     time.sleep(3); continue
             time.sleep(3)
