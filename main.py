@@ -1,6 +1,6 @@
-# main.py - HEART DEMO - V5.1 PAPER MODE - CHECKED COMPLETE
-# Checked: Imports, Flask, Eye, Watcher, Heart -0.02 to 0.00, Paper PnL - ALL COMPLETE
-# Real Dominance Heart, No API needed
+# main.py - HEART - V8 TWO HANDS + SEAMLESS - PAPER MODE
+# Previous agreement Vol 400k, No daily loss stop, Unlimited trades, Hold till TP, 2 Hands
+# Hand1 hold till TP even over roof 0.00, Hand2 enter new -0.02 while Hand1 still dey
 
 import time, os, threading, json
 from flask import Flask
@@ -8,20 +8,25 @@ import requests
 import websocket
 
 QTY = 0.001
-MIN_VOL = 400_000
-MIN_CVD = 5_000
-MIN_IMBALANCE = 0.30
-MIN_EXP_PCT = 0.15
+LEV = 120  # PAPER simulation for 120x as you want, Real we go talk later
+MIN_VOL = 400_000          # PREVIOUS AGREEMENT - back to 400k
+MIN_CVD = 5_000            # PREVIOUS AGREEMENT
+MIN_PRESSURE = 0.30        # PREVIOUS AGREEMENT
+MIN_EXP_PCT = 0.15         # PREVIOUS AGREEMENT
+CONFIRM_NEEDED = 2
 
-IN_TRADE = False
-ENTRY = 0
-TP_PRICE = 0
-SL_PRICE = 0
-SL_HITS = 0
-LAST_SL_TIME = 0
+# SEAMLESS - NO LIMITS FOR DEMO
+# No MAX_DAILY_LOSS stop, No MAX_TRADES_PER_HOUR, No SL cooldown
+# Unlimited trades till eternity
+
 PAPER_WINS = 0
 PAPER_LOSSES = 0
 PAPER_PNL = 0.0
+CONFIRM_COUNT = 0
+
+# TWO HANDS - List of open positions
+# Each hand: {entry, tp, sl, id}
+HANDS = []
 
 cvd = 0
 total_vol_1min = 0
@@ -33,7 +38,7 @@ last_vol_reset = time.time()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"Heart Bot PAPER MODE V5.1 - Price {last_price} CVD {cvd} Vol ${total_vol_1min:.0f} InTrade {IN_TRADE} Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}"
+    return f"Heart Bot PAPER V8 TWO HANDS SEAMLESS - Price {last_price} CVD {cvd} Vol ${total_vol_1min:.0f} Hands {len(HANDS)} Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -49,72 +54,93 @@ def self_ping():
         time.sleep(300)
 
 def place_order_paper(side, price):
-    print(f"[PAPER] {side} {QTY} @ {price:.1f} - PAPER FILL (Real price, no Bybit order)", flush=True)
+    print(f"[PAPER] {side} {QTY} @ {price:.1f} - PAPER FILL", flush=True)
 
 def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
-    global IN_TRADE, ENTRY, TP_PRICE, SL_PRICE, SL_HITS, LAST_SL_TIME, PAPER_WINS, PAPER_LOSSES, PAPER_PNL
-    # FIXED: 2 SL rest logic - if 60s don pass, reset
-    if SL_HITS >= 2:
-        if time.time() - LAST_SL_TIME < 60:
-            return
-        SL_HITS = 0
-
-    if IN_TRADE:
-        if price >= TP_PRICE:
-            profit = (TP_PRICE - ENTRY) * QTY
-            fee = ENTRY * QTY * 0.0011
+    global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, CONFIRM_COUNT, HANDS
+    # 1. CHECK HANDS FIRST - Hold till TP, even over roof
+    # SEAMLESS: No daily loss stop, no trade limit
+    hands_to_remove = []
+    for i, hand in enumerate(HANDS):
+        entry = hand['entry']; tp = hand['tp']; sl = hand['sl']; hid = hand['id']
+        if price >= tp:
+            profit = (tp - entry) * QTY
+            fee = entry * QTY * 0.0011
             net = profit - fee
             PAPER_WINS += 1
             PAPER_PNL += net
-            print(f"[HEART] ✅ TP HIT INSIDE HEART! Price {price:.1f} >= TP {TP_PRICE:.1f} | Dom {dominance:.3f} (no reach 0.00 yet) | Net ${net:.4f} | Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f} | COMOT FAST!", flush=True)
+            print(f"[HAND {hid}] ✅ TP HIT! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} | Net ${net:.4f} | Hands left {len(HANDS)-1} | Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}", flush=True)
             place_order_paper("Sell", price)
-            IN_TRADE = False
-            return
-        if price <= SL_PRICE:
-            loss = (ENTRY - SL_PRICE) * QTY
+            hands_to_remove.append(i)
+            continue
+        if price <= sl:
+            loss = (entry - sl) * QTY
             PAPER_LOSSES += 1
             PAPER_PNL -= loss
-            print(f"[HEART] ❌ WIDE SL HIT @ {price:.1f} | Loss ${loss:.4f} | Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}", flush=True)
+            print(f"[HAND {hid}] ❌ SL HIT @ {price:.1f} | Loss ${loss:.4f} | Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}", flush=True)
             place_order_paper("Sell", price)
-            SL_HITS += 1
-            LAST_SL_TIME = time.time()
-            IN_TRADE = False
-            return
-        if dominance >= 0.00:
-            pnl = (price - ENTRY) * QTY
-            PAPER_PNL += pnl
-            if pnl >= 0:
+            hands_to_remove.append(i)
+            continue
+        # HOLD TILL TP - Even if Dom over roof 0.00, NO close
+        # Only close if Dom go too far +0.20 - heart don die finish
+        if dominance >= 0.20:
+            pnl = (price - entry) * QTY
+            pnl_net = pnl - (entry * QTY * 0.0011) if pnl > 0 else pnl
+            PAPER_PNL += pnl_net
+            if pnl_net >= 0:
                 PAPER_WINS += 1
             else:
                 PAPER_LOSSES += 1
-            print(f"[HEART] ⏰ Heart close 0.00, comot PnL ${pnl:.4f}, Total PnL ${PAPER_PNL:.4f}, go back -0.02", flush=True)
+            print(f"[HAND {hid}] ⏰ Heart die finish Dom {dominance:.3f} >= 0.20, comot PnL ${pnl_net:.4f} | Total PnL ${PAPER_PNL:.4f}", flush=True)
             place_order_paper("Sell", price)
-            IN_TRADE = False
-            return
-        print(f"[HEART] Inside... Dom {dominance:.3f} Price {price:.1f} TP {TP_PRICE:.1f}", flush=True)
-        return
+            hands_to_remove.append(i)
+            continue
+        print(f"[HAND {hid}] Hold... Dom {dominance:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} - Hold till TP, no comot for 0.00", flush=True)
+    # Remove closed hands (reverse to keep index correct)
+    for idx in reversed(hands_to_remove):
+        HANDS.pop(idx)
 
+    # 2. CHECK NEW ENTRY - For Hand 1 or Hand 2
+    if len(HANDS) >= 2:
+        print(f"[SEAMLESS] 2 Hands already open, no Hand 3, wait make one close", flush=True)
+        return
     imbalance = bid_qty / (bid_qty + ask_qty) if (bid_qty + ask_qty) != 0 else 0
     pressure = max(imbalance, 1 - imbalance)
     exp_move = vol_drip * 0.00035
     exp_pct = (exp_move / price) * 100 if price else 0
-    print(f"[CHECK] Dom {dominance:.3f} Vol ${vol_drip:.0f} CVD ${cvd_val:.0f} Imb {imbalance:.2f} Pressure {pressure:.2f} Exp {exp_pct:.2f}%", flush=True)
+    print(f"[CHECK] Dom {dominance:.3f} Vol ${vol_drip:.0f} CVD ${cvd_val:.0f} Imb {imbalance:.2f} Pressure {pressure:.2f} Exp {exp_pct:.2f}% Hands {len(HANDS)}/2 Confirm {CONFIRM_COUNT}/2", flush=True)
     if exp_pct < MIN_EXP_PCT:
+        CONFIRM_COUNT = 0
         print(f"[-0.02] SKIP - Exp {exp_pct:.2f}% too small", flush=True)
         return
     must_pass = (vol_drip >= MIN_VOL) and (-0.50 < dominance < -0.005)
-    score_pass = (abs(cvd_val) >= MIN_CVD) or (pressure >= MIN_IMBALANCE)
-    if must_pass and score_pass:
+    cvd_pass = abs(cvd_val) >= MIN_CVD
+    pressure_pass = pressure >= MIN_PRESSURE
+    if must_pass and cvd_pass and pressure_pass:
+        CONFIRM_COUNT += 1
+        print(f"[CONFIRM] Strong heart {CONFIRM_COUNT}/2 - Dom {dominance:.3f} Vol ${vol_drip:.0f}", flush=True)
+        if CONFIRM_COUNT < CONFIRM_NEEDED:
+            return
+        # ENTER NEW HAND - Hand 1 or Hand 2
         ENTRY = price
         TP_PRICE = ENTRY + exp_move
         SL_PRICE = ENTRY - (exp_move * 0.5)
-        IN_TRADE = True
+        hand_id = len(HANDS) + 1 if len(HANDS) == 0 else 2
+        # If Hand 1 still dey, this na Hand 2 - Follow-up
+        if len(HANDS) == 1:
+            hand_id = 2
+            print(f"[TWO HANDS] 🔥 Hand 1 still dey hold, Hand 2 dey enter follow-up!", flush=True)
+        else:
+            hand_id = 1
+        HANDS.append({'entry': ENTRY, 'tp': TP_PRICE, 'sl': SL_PRICE, 'id': hand_id})
+        CONFIRM_COUNT = 0
         fee = ENTRY * QTY * 0.0011
         net = exp_move * QTY - fee
-        print(f"[HEART] 🔥 ENTER TINY @ {ENTRY:.1f} QTY {QTY} | Vol ${vol_drip:.0f} | Dom {dominance:.3f} | CVD ${cvd_val:.0f} | Pressure {pressure:.2f} | Exp ${exp_move:.0f} ({exp_pct:.2f}%) | TP {TP_PRICE:.1f} INSIDE HEART | SL {SL_PRICE:.1f} | Net if TP ${net:.4f} | PAPER MODE - REAL HEART", flush=True)
+        print(f"[HAND {hand_id}] 🔥 ENTER @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | Vol ${vol_drip:.0f} | Dom {dominance:.3f} | CVD ${cvd_val:.0f} | Pressure {pressure:.2f} | Exp ${exp_move:.0f} ({exp_pct:.2f}%) | TP {TP_PRICE:.1f} HOLD TILL TP | SL {SL_PRICE:.1f} | Net if TP ${net:.4f} | V8 TWO HANDS SEAMLESS - PAPER", flush=True)
         place_order_paper("Buy", price)
     else:
-        print(f"[-0.02] No join - Must Vol+Dom: {must_pass}, Score CVD/Pressure: {score_pass}", flush=True)
+        CONFIRM_COUNT = 0
+        print(f"[-0.02] No join - Vol+Dom: {must_pass}, CVD>=5k: {cvd_pass}, Pressure>=0.30: {pressure_pass}", flush=True)
 
 def on_message(ws, message):
     global cvd, total_vol_1min, last_price, best_bid_qty, best_ask_qty
@@ -137,16 +163,11 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER MODE V5.1 - Real Heart, No API needed!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V8 TWO HANDS SEAMLESS - Unlimited, No stop!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT", "orderbook.1.BTCUSDT"]}))
+def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
+def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
 
-def on_error(ws, e):
-    print(f"[EYE] Error {e}", flush=True)
-
-def on_close(ws, a, b):
-    print("[EYE] Eye close, go reconnect...", flush=True)
-
-# FIXED: Loop reconnect, no recursion pile-up
 def start_eye():
     while True:
         try:
@@ -158,21 +179,17 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset, cvd
-    print("[WATCHER] Watcher start - PAPER MODE V5.1 - Real Heart - dey check every 2s...", flush=True)
+    print("[WATCHER] Watcher start - V8 TWO HANDS SEAMLESS - dey check every 2s...", flush=True)
     while True:
         time.sleep(2)
         if time.time() - last_vol_reset > 60:
-            print(f"[WATCHER] 1min: Vol ${total_vol_1min:.0f} CVD ${cvd:.0f} Price {last_price:.1f} BidQty {best_bid_qty} AskQty {best_ask_qty} | PAPER Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}", flush=True)
-            total_vol_1min = 0
-            cvd = 0
-            last_vol_reset = time.time()
-            continue
+            print(f"[WATCHER] 1min: Vol ${total_vol_1min:.0f} CVD ${cvd:.0f} Price {last_price:.1f} | Hands {len(HANDS)} | PAPER Wins {PAPER_WINS} Losses {PAPER_LOSSES} PnL ${PAPER_PNL:.4f}", flush=True)
+            total_vol_1min = 0; cvd = 0; last_vol_reset = time.time(); continue
         if total_vol_1min > 0:
             dominance = cvd / total_vol_1min
-            if IN_TRADE:
-                check_heart(dominance, total_vol_1min, best_bid_qty, best_ask_qty, cvd, last_price)
-            elif -0.50 < dominance < -0.005:
-                print(f"[WATCHER] 👀 -0.02 SIGNAL? Dom {dominance:.3f} Vol ${total_vol_1min:.0f} CVD ${cvd:.0f} Price {last_price:.1f}", flush=True)
+            # SEAMLESS: Always check, even if hands open (for Hand 2) or no hands
+            # Check if in trade (hands) OR new signal -0.02
+            if len(HANDS) > 0 or (-0.50 < dominance < -0.005):
                 check_heart(dominance, total_vol_1min, best_bid_qty, best_ask_qty, cvd, last_price)
             elif int(time.time()) % 30 == 0:
                 print(f"[WATCHER] No heart yet - Dom {dominance:.3f} Vol ${total_vol_1min:.0f} Price {last_price:.1f}", flush=True)
@@ -181,5 +198,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V5.1 PAPER MODE Heart Bot start! Real Heart, No API! CHECKED COMPLETE!", flush=True)
+    print("V8 TWO HANDS SEAMLESS Heart Bot start! Unlimited, No stop, Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
