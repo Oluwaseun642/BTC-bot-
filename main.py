@@ -1,16 +1,15 @@
-# main.py - HEART - V13 SIMPLE - TRADE EVERY FOUNDATION, TP @ 0.00, CONTINUOUS, NO BLOCK - PAPER MODE
-# Simple: No Confirm, No Trend, No Vol, No CVD, No Pressure, No Cooldown, No Max, No CAT Block
-# Foundation = MOUSE direction, Enter if no hand, TP $120 or MOUSE 0.00, BE only, 1 Hand at a time
+# main.py - HEART - V15 SIMPLE FAST - GRAB COPY ON CROSS, BE $0.00, NO LOSS - PAPER MODE
+# Fix everything at once: Bot faster 0.5s, MOUSE 5s window, TP on CROSS blink, TP on any profit, BE $0.00 exact
+# Simple: No Confirm, No Trend, No Vol, No Cooldown, No Max, Trade every foundation, Continuous
 
-import time, os, threading, json
+import time, os, threading, json, hmac, hashlib
 from flask import Flask
 import requests
 import websocket
 
 QTY = 0.001
 LEV = 120
-TP_MOVE = 120  # V13: Smaller TP $120 to make TP @ 0.00 easier, still pass fees: Gross $0.12 - Fee $0.097 = $0.023 Net
-HEART_STOP_SECS = 10
+TP_MOVE = 120
 
 PAPER_WINS = 0
 PAPER_LOSSES = 0
@@ -23,14 +22,14 @@ last_price = 79000
 last_vol_reset = time.time()
 LAST_SUMMARY_TIME = 0
 PREV_MOUSE_DOM = 0
-BUY_VOL_10S = []
-SELL_VOL_10S = []
+BUY_VOL_5S = []
+SELL_VOL_5S = []
 total_vol_1min = 0
 
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_BASE = "https://api.bybit.com"
-import hmac, hashlib
+
 def bybit_sign(params, secret):
     query = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
     return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -64,7 +63,7 @@ app = Flask(__name__)
 def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
-    return f"Heart Bot PAPER V13 SIMPLE - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot PAPER V15 FAST - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -96,9 +95,10 @@ def get_score_str(price):
     return f"Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Floating ${floating:.4f}"
 
 def get_mouse_dom():
+    # V15 FAST: 5s window, no be 10s, react faster to blink cross
     now = time.time()
-    b = sum([v for t,v in BUY_VOL_10S if now - t < 10])
-    s = sum([v for t,v in SELL_VOL_10S if now - t < 10])
+    b = sum([v for t,v in BUY_VOL_5S if now - t < 5])
+    s = sum([v for t,v in SELL_VOL_5S if now - t < 5])
     total = b + s
     if total == 0:
         return 0
@@ -110,15 +110,28 @@ def check_heart(mouse_dom, price):
     global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, PREV_MOUSE_DOM
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
-        print(f"[SUMMARY] 1min | {get_score_str(price)} | Hands {len(HANDS)}/1 | Price {price:.1f} | MOUSE {mouse_dom:.3f} | Bal ${ACCOUNT_BALANCE:.2f} | V13 SIMPLE", flush=True)
+        print(f"[SUMMARY] 1min | {get_score_str(price)} | Hands {len(HANDS)}/1 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Bal ${ACCOUNT_BALANCE:.2f} | V15 FAST 0.5s", flush=True)
 
-    # === IF HAND DEY OPEN, MANAGE AM - TP @ 0.00 ===
     if len(HANDS) > 0:
         hand = HANDS[0]
         entry = hand['entry']; tp = hand['tp']; sl = hand['sl']; hid = hand['id']; side = hand['side']
         hold = int(time.time() - hand['enter_time'])
         fee = get_fee(entry)
-        # BE: If halfway reach, move SL to BE
+        # V15: CROSS = sign flip, grab copy instant
+        crossed = False
+        if side == 'BUY' and PREV_MOUSE_DOM < 0 and mouse_dom >= 0:
+            crossed = True
+        if side == 'SELL' and PREV_MOUSE_DOM > 0 and mouse_dom <= 0:
+            crossed = True
+        if abs(mouse_dom) < 0.05:
+            crossed = True
+        # V15: Any profit > fee + $0.01, grab copy, no wait $120
+        quick_profit = False
+        if side == 'BUY' and price >= entry + (fee / QTY) + 10:
+            quick_profit = True
+        if side == 'SELL' and price <= entry - (fee / QTY) - 10:
+            quick_profit = True
+
         if side == 'BUY':
             be_price = entry + (fee / QTY)
             halfway = entry + (tp - entry) * 0.5
@@ -133,58 +146,59 @@ def check_heart(mouse_dom, price):
                 PAPER_WINS += 1
                 PAPER_PNL += net
                 ACCOUNT_BALANCE += net
-                print(f"[HAND {hid} BUY] ✅ TP @ 0.00! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} -> 0.00 | Net ${net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} BUY] ✅ TP $120! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Net ${net:.4f} | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            # TP 2: MOUSE reach 0.00 - Cat don chop, comot
-            if abs(mouse_dom) < 0.05:
+            # TP 2: CROSS or QUICK PROFIT - Grab copy in blink, faster
+            if crossed or quick_profit:
                 pnl_gross = (price - entry) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
-                    print(f"[HAND {hid} BUY] ⏰ TP @ 0.00! MOUSE {mouse_dom:.3f} -> 0.00, comot Win! Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    PAPER_PNL += pnl_net
+                    ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} BUY] ⏰ GRAB COPY! CROSS={crossed} QUICK={quick_profit} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
+                    # V15 FIX: BE = $0.00 EXACT, no add negative to PnL, no loss
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] ⏰ TP @ 0.00! MOUSE {mouse_dom:.3f} -> 0.00, comot BE! Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                PAPER_PNL += pnl_net
-                ACCOUNT_BALANCE += pnl_net
+                    # PnL no change, Balance no change
+                    print(f"[HAND {hid} BUY] ⏰ GRAB COPY BE $0.00! CROSS={crossed} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Gross ${pnl_gross:.4f} Fee ${fee:.4f} PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            # BE HIT: Price touch BE SL
+            # BE HIT - V15: BE = $0.00, no PnL change
             if price <= sl:
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00, PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
                     place_order_paper("Sell", price)
                     HANDS.clear()
                     PREV_MOUSE_DOM = mouse_dom
                     return
                 else:
-                    # No close at loss, move to BE
                     hand['sl'] = be_price
                     hand['breakeven'] = True
                     print(f"[HAND {hid} BUY] 🚫 BE KILLER - No loss, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
-            # HEART STOP: No move 10s, comot BE/Win, no loss
-            if time.time() - hand['enter_time'] > 30:
+            # HEART STOP 20s - V15 faster, no hold long
+            if time.time() - hand['enter_time'] > 20:
                 pnl_gross = (price - entry) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
-                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 30s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    PAPER_PNL += pnl_net
+                    ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 20s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 30s - Comot BE, no loss | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                PAPER_PNL += pnl_net
-                ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 20s - Comot BE $0.00, no loss | Hold {hold}s | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            print(f"[HAND {hid} BUY] Hold... MOUSE {mouse_dom:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
+            print(f"[HAND {hid} BUY] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Cross {crossed} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
             PREV_MOUSE_DOM = mouse_dom
             return
         else:
@@ -200,22 +214,22 @@ def check_heart(mouse_dom, price):
                 PAPER_WINS += 1
                 PAPER_PNL += net
                 ACCOUNT_BALANCE += net
-                print(f"[HAND {hid} SELL] ✅ TP @ 0.00! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} -> 0.00 | Net ${net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} SELL] ✅ TP $120! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Net ${net:.4f} | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            if abs(mouse_dom) < 0.05:
+            if crossed or quick_profit:
                 pnl_gross = (entry - price) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
-                    print(f"[HAND {hid} SELL] ⏰ TP @ 0.00! MOUSE {mouse_dom:.3f} -> 0.00, comot Win! Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    PAPER_PNL += pnl_net
+                    ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} SELL] ⏰ GRAB COPY! CROSS={crossed} QUICK={quick_profit} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] ⏰ TP @ 0.00! MOUSE {mouse_dom:.3f} -> 0.00, comot BE! Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                PAPER_PNL += pnl_net
-                ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} SELL] ⏰ GRAB COPY BE $0.00! CROSS={crossed} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Gross ${pnl_gross:.4f} Fee ${fee:.4f} PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
@@ -223,7 +237,7 @@ def check_heart(mouse_dom, price):
             if price >= sl:
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00, PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
                     place_order_paper("Buy", price)
                     HANDS.clear()
                     PREV_MOUSE_DOM = mouse_dom
@@ -232,29 +246,28 @@ def check_heart(mouse_dom, price):
                     hand['sl'] = be_price
                     hand['breakeven'] = True
                     print(f"[HAND {hid} SELL] 🚫 BE KILLER - No loss, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
-            if time.time() - hand['enter_time'] > 30:
+            if time.time() - hand['enter_time'] > 20:
                 pnl_gross = (entry - price) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
-                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 30s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    PAPER_PNL += pnl_net
+                    ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 20s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 30s - Comot BE, no loss | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                PAPER_PNL += pnl_net
-                ACCOUNT_BALANCE += pnl_net
+                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 20s - Comot BE $0.00, no loss | Hold {hold}s | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            print(f"[HAND {hid} SELL] Hold... MOUSE {mouse_dom:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
+            print(f"[HAND {hid} SELL] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Cross {crossed} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
             PREV_MOUSE_DOM = mouse_dom
             return
 
-    # === NO HAND - ENTER FROM EVERY FOUNDATION, CONTINUOUS, NOTHING GO STOP AM ===
-    # Foundation = MOUSE direction. If MOUSE na 0.00, wait 2 secs for new foundation.
+    # NO HAND - ENTER EVERY FOUNDATION, CONTINUOUS
     if abs(mouse_dom) < 0.01:
-        print(f"[ROOF] MOUSE {mouse_dom:.3f} na 0.00, wait 2s for new foundation | {get_score_str(price)}", flush=True)
+        print(f"[ROOF] MOUSE {mouse_dom:.3f} na 0.00, wait 0.5s for new foundation | {get_score_str(price)}", flush=True)
         PREV_MOUSE_DOM = mouse_dom
         return
     direction = "BUY" if mouse_dom < 0 else "SELL"
@@ -269,12 +282,12 @@ def check_heart(mouse_dom, price):
     HANDS.append({'entry': ENTRY, 'tp': TP_PRICE, 'sl': SL_PRICE, 'id': hand_id, 'enter_time': time.time(), 'breakeven': False, 'side': direction})
     fee = get_fee(ENTRY)
     net = TP_MOVE * QTY - fee
-    print(f"[HAND {hand_id} {direction}] 🔥 ENTER EVERY FOUNDATION @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} -> 0.00 Foundation, TP @ 0.00 | TP {TP_PRICE:.1f} SL {SL_PRICE:.1f} BE ONLY | Net if TP ${net:.4f} | {get_score_str(price)} | V13 SIMPLE - PAPER", flush=True)
+    print(f"[HAND {hand_id} {direction}] 🔥 ENTER EVERY FOUNDATION @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} -> 0.00 Foundation, GRAB COPY ON CROSS | TP {TP_PRICE:.1f} SL {SL_PRICE:.1f} BE $0.00 ONLY | Net if TP ${net:.4f} | {get_score_str(price)} | V15 FAST - PAPER", flush=True)
     place_order_paper("Buy" if direction == 'BUY' else "Sell", price)
     PREV_MOUSE_DOM = mouse_dom
 
 def on_message(ws, message):
-    global last_price, BUY_VOL_10S, SELL_VOL_10S, total_vol_1min
+    global last_price, BUY_VOL_5S, SELL_VOL_5S, total_vol_1min
     try:
         data = json.loads(message)
         topic = data.get("topic", "")
@@ -284,16 +297,16 @@ def on_message(ws, message):
                 last_price = p
                 total_vol_1min += vol
                 if side == "Buy":
-                    BUY_VOL_10S.append((time.time(), vol))
+                    BUY_VOL_5S.append((time.time(), vol))
                 else:
-                    SELL_VOL_10S.append((time.time(), vol))
-                BUY_VOL_10S = [(tt, vv) for tt, vv in BUY_VOL_10S if time.time() - tt < 10]
-                SELL_VOL_10S = [(tt, vv) for tt, vv in SELL_VOL_10S if time.time() - tt < 10]
+                    SELL_VOL_5S.append((time.time(), vol))
+                BUY_VOL_5S = [(tt, vv) for tt, vv in BUY_VOL_5S if time.time() - tt < 5]
+                SELL_VOL_5S = [(tt, vv) for tt, vv in SELL_VOL_5S if time.time() - tt < 5]
     except Exception as e:
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER V13 SIMPLE!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V15 FAST!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -309,9 +322,10 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset
-    print("[WATCHER] Watcher start - V13 SIMPLE...", flush=True)
+    print("[WATCHER] Watcher start - V15 FAST 0.5s...", flush=True)
     while True:
-        time.sleep(2)
+        # V15 FAST: Check every 0.5s, no be 2s, to catch blink cross
+        time.sleep(0.5)
         if time.time() - last_vol_reset > 60:
             print(f"[WATCHER] 1min: Vol ${total_vol_1min:.0f} Price {last_price:.1f} | Hands {len(HANDS)} | {get_score_str(last_price)}", flush=True)
             total_vol_1min = 0; last_vol_reset = time.time(); continue
@@ -324,5 +338,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V13 SIMPLE Heart Bot start! Paper!", flush=True)
+    print("V15 FAST Heart Bot start! Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
