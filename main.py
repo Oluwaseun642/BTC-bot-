@@ -1,15 +1,17 @@
-# main.py - HEART - V26 - PEAK TRACKING - PAPER FIRST
-# Fix V25: V25 wait for MOUSE to weaken from ENTRY to 0.00. But market dey strengthen first: Entry 46.2% -> 47.1% -> 55% -> 65% (MoveToZero -0.009). So WIN never trigger, BE 70, Wins 2, 3%.
-# V26: Track PEAK = highest abs(MOUSE) since entry. WIN if weaken 0.05 from PEAK. Example SELL: Entry 46.2% -> Peak 65% -> Now 60% = 0.05 weaken from Peak = WIN. Same for BUY.
-# Both ways BUY and SELL. Rapid Wins: exit in 3-8s when peak turns, no wait 40s. BE go drop but no be 0 - if price never cover fee, e go still be BE to avoid Loss.
-# MOUSE 7s, % CHECK 35%, WIN_GRAB 30% OF Entry, WEAK High 0.04 Mid 0.03 Low 0.01, CROSS 0.00, BE Killer $40, Max Hold 40s. TP ALWAYS @ 0.00% direction, HOLD for 0.00%, Percentage Only.
+# main.py - HEART - V27 - DYNAMIC QTY + BALANCE UP - REAL $3
+# V26 Result: Wins 45 BE 263 Losses 0 WinRate 15% PnL $0.9088. Good to go for REAL.
+# V27: Dynamic Qty based on Balance. Balance $3 -> Qty 0.001, $6 -> 0.002, $9 -> 0.003, $12 -> 0.004, $15 -> 0.005 CAP. Formula QTY = 0.001 * (Balance/3). Floor 0.001 Cap 0.005.
+# Focus: Balance Up and Up. WinRate fit stay 15-20%, but PnL go climb because Qty dey climb. Losses must stay 0. WIN only if Net >= $0.002, else BE.
+# MOUSE 7s, % CHECK 35%, WIN_GRAB 30% OF Entry, PEAK 0.05 from Peak, WEAK High 0.04 Mid 0.03 Low 0.01, CROSS 0.00, BE Killer $40, Max Hold 40s. TP ALWAYS @ 0.00%, HOLD for 0.00%, Percentage Only. BUY and SELL both ways.
 
 import time, os, threading, json, hmac, hashlib
 from flask import Flask
 import requests
 import websocket
 
-QTY = 0.001
+BASE_QTY = 0.001
+BASE_BALANCE = 3.0
+MAX_QTY = 0.005
 LEV = 120
 MIN_ORDER_PCT = 0.35
 MOUSE_WINDOW = 7
@@ -36,6 +38,14 @@ total_vol_1min = 0
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_BASE = "https://api.bybit.com"
+
+def get_dynamic_qty():
+    # V27: Dynamic Qty based on Balance - Focus Balance Up
+    global ACCOUNT_BALANCE
+    qty = BASE_QTY * (ACCOUNT_BALANCE / BASE_BALANCE)
+    qty = max(BASE_QTY, min(MAX_QTY, qty))
+    qty = round(qty, 3)
+    return qty
 
 def bybit_sign(params, secret):
     query = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
@@ -64,7 +74,7 @@ def auto_config_bybit():
         p3["sign"] = bybit_sign(p3, BYBIT_API_SECRET)
         r3 = requests.post(f"{BYBIT_BASE}/v5/position/switch-mode", json=p3, timeout=10)
         print(f"[AUTO-CONFIG] Position Mode One-Way: {r3.text[:200]}", flush=True)
-        print(f"[AUTO-CONFIG] Done! REAL $3 Lev 120x, Isolated, One-Way", flush=True)
+        print(f"[AUTO-CONFIG] Done! REAL $3 Lev 120x, Isolated, One-Way V27 Dynamic Qty", flush=True)
     except Exception as e:
         print(f"[AUTO-CONFIG] Fail: {e}", flush=True)
 
@@ -74,7 +84,8 @@ def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
     mode = "REAL $3" if REAL_MODE else "PAPER"
-    return f"Heart Bot {mode} V26 PEAK - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    dq = get_dynamic_qty()
+    return f"Heart Bot {mode} V27 DYNAMIC - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f} Qty {dq}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -88,34 +99,36 @@ def self_ping():
             pass
         time.sleep(300)
 
-def place_order_real(side, price):
+def place_order_real(side, price, qty):
     if not REAL_MODE or not BYBIT_API_KEY:
-        print(f"[PAPER] {side} {QTY} @ {price:.1f} - PAPER FILL LIMIT MAKER", flush=True)
+        print(f"[PAPER] {side} {qty} @ {price:.1f} - PAPER FILL LIMIT MAKER", flush=True)
         return True
     try:
         ts = str(int(time.time()*1000))
-        p = {"api_key": BYBIT_API_KEY, "timestamp": ts, "recv_window": 5000, "category": "linear", "symbol": "BTCUSDT", "side": side, "orderType": "Limit", "qty": str(QTY), "price": str(round(price, 1)), "timeInForce": "PostOnly", "positionIdx": 0}
+        p = {"api_key": BYBIT_API_KEY, "timestamp": ts, "recv_window": 5000, "category": "linear", "symbol": "BTCUSDT", "side": side, "orderType": "Limit", "qty": str(qty), "price": str(round(price, 1)), "timeInForce": "PostOnly", "positionIdx": 0}
         p["sign"] = bybit_sign(p, BYBIT_API_SECRET)
         r = requests.post(f"{BYBIT_BASE}/v5/order/create", json=p, timeout=10)
-        print(f"[REAL] {side} {QTY} @ {price:.1f} Maker PostOnly -> {r.text[:300]}", flush=True)
+        print(f"[REAL] {side} {qty} @ {price:.1f} Maker PostOnly -> {r.text[:300]}", flush=True)
         return True
     except Exception as e:
         print(f"[REAL] Order Fail {e}", flush=True)
         return False
 
-def get_fee(entry):
-    return entry * QTY * MAKER_FEE_RATE
+def get_fee(entry, qty):
+    return entry * qty * MAKER_FEE_RATE
 
 def get_score_str(price):
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
+    dq = get_dynamic_qty()
     floating = 0
     for h in HANDS:
+        q = h.get('qty', dq)
         if h['side'] == 'BUY':
-            floating += (price - h['entry']) * QTY
+            floating += (price - h['entry']) * q
         else:
-            floating += (h['entry'] - price) * QTY
-    return f"Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Floating ${floating:.4f}"
+            floating += (h['entry'] - price) * q
+    return f"Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Floating ${floating:.4f} Bal ${ACCOUNT_BALANCE:.2f} Qty {dq}"
 
 def get_mouse_dom():
     now = time.time()
@@ -133,7 +146,8 @@ def check_heart(mouse_dom, price):
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
         mode = "REAL $3" if REAL_MODE else "PAPER"
-        print(f"[SUMMARY] 1min {mode} | {get_score_str(price)} | Hands {len(HANDS)}/2 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% | Bal ${ACCOUNT_BALANCE:.2f} | V26 MOUSE 7s % 35% PEAK 0.05", flush=True)
+        dq = get_dynamic_qty()
+        print(f"[SUMMARY] 1min {mode} | {get_score_str(price)} | Hands {len(HANDS)}/2 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% | Bal ${ACCOUNT_BALANCE:.2f} Qty {dq} | V27 MOUSE 7s % 35% PEAK 0.05 DYNAMIC QTY", flush=True)
 
     if len(HANDS) > 0:
         side = HANDS[0]['side']
@@ -181,9 +195,10 @@ def check_heart(mouse_dom, price):
                 price_cover = True
             still_strong = abs(mouse_dom) >= 0.35
             if stronger and price_cover and still_strong:
-                HANDS.append({'entry': price, 'id': 2 if side == 'SELL' else 1, 'enter_time': time.time(), 'breakeven': False, 'side': side, 'entry_pct': abs(mouse_dom), 'peak_pct': abs(mouse_dom)})
-                print(f"[HAND 2 {side}] 🔥 JOIN! Hand 1 Entry% {h1['entry_pct']*100:.1f}% -> Now MOUSE {mouse_dom:.3f} Order% {abs(mouse_dom)*100:.1f}% Stronger +0.08, Fee Cover $3 Yes | Join @ {price:.1f} Same Direction, Both Go To 0.00 | {get_score_str(price)}", flush=True)
-                place_order_real("Buy" if side == 'BUY' else "Sell", price)
+                dq = get_dynamic_qty()
+                HANDS.append({'entry': price, 'id': 2 if side == 'SELL' else 1, 'enter_time': time.time(), 'breakeven': False, 'side': side, 'entry_pct': abs(mouse_dom), 'peak_pct': abs(mouse_dom), 'qty': dq})
+                print(f"[HAND 2 {side}] 🔥 JOIN! Hand 1 Entry% {h1['entry_pct']*100:.1f}% -> Now MOUSE {mouse_dom:.3f} Order% {abs(mouse_dom)*100:.1f}% Stronger +0.08, Fee Cover $3 Yes | Join @ {price:.1f} Qty {dq} Same Direction, Both Go To 0.00 | {get_score_str(price)}", flush=True)
+                place_order_real("Buy" if side == 'BUY' else "Sell", price, dq)
                 PREV_MOUSE_DOM = mouse_dom
                 return
         
@@ -191,40 +206,45 @@ def check_heart(mouse_dom, price):
             total_gross = 0
             total_fee = 0
             for h in HANDS:
+                q = h.get('qty', get_dynamic_qty())
                 if h['side'] == 'BUY':
-                    total_gross += (price - h['entry']) * QTY
+                    total_gross += (price - h['entry']) * q
                 else:
-                    total_gross += (h['entry'] - price) * QTY
-                total_fee += get_fee(h['entry'])
+                    total_gross += (h['entry'] - price) * q
+                total_fee += get_fee(h['entry'], q)
             total_net = total_gross - total_fee
             is_win_trigger = crossed or weakening or win_grab or peak_win
             if is_win_trigger and total_net >= 0.002:
                 PAPER_WINS += 1
                 PAPER_PNL += total_net
                 ACCOUNT_BALANCE += total_net
-                print(f"[HANDS {len(HANDS)}x {side}] ✅ WIN @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} PEAK_WIN={peak_win} Entry {entry_pct_1:.3f} Peak {peak_pct:.3f} Now {abs(mouse_dom):.3f} PeakWeaken {peak_weaken_amt:.3f}/0.05 MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Hands {len(HANDS)} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} DOUBLE WIN! Fee Covered! | {get_score_str(price)}", flush=True)
+                print(f"[HANDS {len(HANDS)}x {side}] ✅ WIN @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} PEAK_WIN={peak_win} Entry {entry_pct_1:.3f} Peak {peak_pct:.3f} Now {abs(mouse_dom):.3f} PeakWeaken {peak_weaken_amt:.3f}/0.05 MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Hands {len(HANDS)} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} BAL UP! New Bal ${ACCOUNT_BALANCE:.2f} Next Qty {get_dynamic_qty()} | {get_score_str(price)}", flush=True)
             else:
                 PAPER_BREAKEVEN += 1
-                print(f"[HANDS {len(HANDS)}x {side}] ⏰ BE @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} PEAK_WIN={peak_win} Peak {peak_pct:.3f} PeakWeaken {peak_weaken_amt:.3f}/0.05 MAXHOLD={max_hold} STUCK={price_stuck} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} No Loss | {get_score_str(price)}", flush=True)
-            place_order_real("Sell" if side == 'BUY' else "Buy", price)
+                print(f"[HANDS {len(HANDS)}x {side}] ⏰ BE @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} PEAK_WIN={peak_win} Peak {peak_pct:.3f} PeakWeaken {peak_weaken_amt:.3f}/0.05 MAXHOLD={max_hold} STUCK={price_stuck} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} No Loss Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)}", flush=True)
+            # Exit with total qty
+            exit_qty = sum([h.get('qty', get_dynamic_qty()) for h in HANDS])
+            place_order_real("Sell" if side == 'BUY' else "Buy", price, exit_qty)
             HANDS.clear()
             PREV_MOUSE_DOM = mouse_dom
             return
         if side == 'BUY' and price <= HANDS[0]['entry'] - 40:
             PAPER_BREAKEVEN += 1
             print(f"[HANDS {len(HANDS)}x BUY] 🛑 BE KILLER - Price go against $40, both comot BE $0.00 Safety Only | Hold {hold1}s Price {price:.1f} | {get_score_str(price)}", flush=True)
-            place_order_real("Sell", price)
+            exit_qty = sum([h.get('qty', get_dynamic_qty()) for h in HANDS])
+            place_order_real("Sell", price, exit_qty)
             HANDS.clear()
             PREV_MOUSE_DOM = mouse_dom
             return
         if side == 'SELL' and price >= HANDS[0]['entry'] + 40:
             PAPER_BREAKEVEN += 1
             print(f"[HANDS {len(HANDS)}x SELL] 🛑 BE KILLER - Price go against $40, both comot BE $0.00 Safety Only | Hold {hold1}s Price {price:.1f} | {get_score_str(price)}", flush=True)
-            place_order_real("Buy", price)
+            exit_qty = sum([h.get('qty', get_dynamic_qty()) for h in HANDS])
+            place_order_real("Buy", price, exit_qty)
             HANDS.clear()
             PREV_MOUSE_DOM = mouse_dom
             return
-        print(f"[HANDS {len(HANDS)}x {side}] Hold for 0.00%... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct_1*100:.1f}% Peak% {peak_pct*100:.1f}% PeakWeaken {peak_weaken_amt:.3f}/0.05 MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} Weak {weakening} Weaken {weaken_amt:.3f} Price {price:.1f} Entry {HANDS[0]['entry']:.1f} TP @ 0.00% Hold {hold1}s | {get_score_str(price)}", flush=True)
+        print(f"[HANDS {len(HANDS)}x {side}] Hold for 0.00%... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct_1*100:.1f}% Peak% {peak_pct*100:.1f}% PeakWeaken {peak_weaken_amt:.3f}/0.05 MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} Weak {weakening} Weaken {weaken_amt:.3f} Price {price:.1f} Entry {HANDS[0]['entry']:.1f} TP @ 0.00% Hold {hold1}s Qty {HANDS[0].get('qty', get_dynamic_qty())} | {get_score_str(price)}", flush=True)
         PREV_MOUSE_DOM = mouse_dom
         return
 
@@ -239,11 +259,12 @@ def check_heart(mouse_dom, price):
         return
     direction = "SELL" if mouse_dom < 0 else "BUY"
     ENTRY = price
-    fee = get_fee(ENTRY)
-    fee_move = fee / QTY
-    HANDS.append({'entry': ENTRY, 'id': 2 if direction == 'SELL' else 1, 'enter_time': time.time(), 'breakeven': False, 'side': direction, 'entry_pct': order_pct, 'peak_pct': order_pct})
-    print(f"[HAND 1 {direction}] 🔥 ENTER %CHECK PASS @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Order% {order_pct*100:.1f}% >=35% Maker Fee ${fee:.4f} FeeMove ${fee_move:.1f} | TP ALWAYS @ 0.00%, Hand 2 go join if stronger | {get_score_str(price)} | V26 PAPER FIRST", flush=True)
-    place_order_real("Buy" if direction == 'BUY' else "Sell", price)
+    dq = get_dynamic_qty()
+    fee = get_fee(ENTRY, dq)
+    fee_move = fee / dq if dq > 0 else 0
+    HANDS.append({'entry': ENTRY, 'id': 2 if direction == 'SELL' else 1, 'enter_time': time.time(), 'breakeven': False, 'side': direction, 'entry_pct': order_pct, 'peak_pct': order_pct, 'qty': dq})
+    print(f"[HAND 1 {direction}] 🔥 ENTER %CHECK PASS @ {ENTRY:.1f} QTY {dq} LEV {LEV}x Bal ${ACCOUNT_BALANCE:.2f} | MOUSE {mouse_dom:.3f} Order% {order_pct*100:.1f}% >=35% Maker Fee ${fee:.4f} FeeMove ${fee_move:.1f} | TP ALWAYS @ 0.00%, Hand 2 go join if stronger | {get_score_str(price)} | V27 DYNAMIC REAL $3", flush=True)
+    place_order_real("Buy" if direction == 'BUY' else "Sell", price, dq)
     PREV_MOUSE_DOM = mouse_dom
 
 def on_message(ws, message):
@@ -266,7 +287,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! V26 PEAK PAPER!", flush=True)
+    print("[EYE] 👁️ Eye don open! V27 DYNAMIC REAL $3!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -282,7 +303,7 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset
-    print("[WATCHER] Watcher start - V26 0.3s...", flush=True)
+    print("[WATCHER] Watcher start - V27 0.3s...", flush=True)
     while True:
         time.sleep(0.3)
         if time.time() - last_vol_reset > 60:
@@ -297,5 +318,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V26 Heart Bot start! Paper First!", flush=True)
+    print("V27 Heart Bot start! Dynamic Qty REAL $3!", flush=True)
     app.run(host="0.0.0.0", port=10000)
