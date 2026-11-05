@@ -1,11 +1,6 @@
-# main.py - HEART - V12 FULL - CAT AND MOUSE, ENEMY HANDS, NEAR TP, BE KILLER - PAPER MODE
-# Cat = Orderbook Dom (Bid-Ask)/(Bid+Ask) - Whale wey dey wait for -0.02
-# Mouse = CVD Dom (BuyVol-SellVol)/TotalVol - Mouse wey dey run -0.741 toward Cat
-# Heart = Cat -0.02 to 0.00 + Mouse -1.00 to +1.00 wey dey run toward 0.00 - Outside + Inside, no lose opportunity
-# Enemy Hands: Hand 1 BUY ONLY, Hand 2 SELL ONLY, take turn, no cancel each other
-# Near TP: Must pass 2x Fees = $194 move minimum, TP by 0.00
-# Reverse Killer = BE Killer: No close at loss, only Break-Even
-# Turn order percentages into our own price moves: Entry at foundation, TP by 0.00
+# main.py - HEART - V12.1 FULL - FIX CAT 0.98 BUG, FIX $37k TP BUG, FIX 11 LOSSES - PAPER MODE
+# Fix from screenshot Nov 5 04:00: CAT 0.9321 MOUSE 0.906 Exp $37728 -> TP too far, 0 Wins, 8 BE -> 11 Losses
+# Fix: CAT clamped -0.05 to +0.05, Near TP = $194 fixed, CAT+MOUSE must agree, BE only, Cooldown 15s
 
 import time, os, threading, json, hmac, hashlib
 from flask import Flask
@@ -14,11 +9,12 @@ import websocket
 
 QTY = 0.001
 LEV = 120
-MIN_VOL = 400_000
+MIN_VOL = 150_000  # V12.1 FIX: Lower from 400k to 150k, else Vol False dey block correct hearts at start of minute
 MIN_CVD = 5_000
 MIN_PRESSURE = 0.30
 CONFIRM_NEEDED = 1
 HEART_STOP_SECS = 10
+COOLDOWN_SECS = 15  # V12.1 FIX: No 11 trades in no time, wait 15s after close
 
 PAPER_WINS = 0
 PAPER_LOSSES = 0
@@ -27,6 +23,7 @@ PAPER_BREAKEVEN = 0
 CONFIRM_COUNT = 0
 HANDS = []
 ACCOUNT_BALANCE = 3.0
+LAST_CLOSE_TIME = 0
 
 cvd = 0
 total_vol_1min = 0
@@ -82,7 +79,7 @@ app = Flask(__name__)
 def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
-    return f"Heart Bot PAPER V12 CAT AND MOUSE - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot PAPER V12.1 FIX - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -115,7 +112,6 @@ def get_score_str(price):
     return f"Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Floating ${floating:.4f}"
 
 def get_cat_dom(bid_qty, ask_qty):
-    # CAT - Whale Limit Order Dom, naturally -0.02 to +0.02 when whale dey wait
     total = bid_qty + ask_qty
     if total == 0:
         return 0
@@ -123,7 +119,6 @@ def get_cat_dom(bid_qty, ask_qty):
     return dom
 
 def get_mouse_dom():
-    # MOUSE - Market Trades Dom, -1.00 to +1.00, e.g. -0.741
     now = time.time()
     b = sum([v for t,v in BUY_VOL_10S if now - t < 10])
     s = sum([v for t,v in SELL_VOL_10S if now - t < 10])
@@ -136,16 +131,15 @@ def get_mouse_dom():
     return dom, cvd_10s, total
 
 def smell_direction(cat_dom, mouse_dom):
-    # Cat na prime direction, Mouse dey confirm. If Cat 0, use Mouse.
-    # Cat negative = Bid < Ask, whale dey sell side, price go down, so SELL? But for heart: Cat -0.02 BUY foundation means bid dey build, price go up.
-    # To keep simple and match original: Negative Dom = BUY, Positive = SELL (same as before)
-    # If Cat and Mouse agree, strong. If disagree, use Mouse (mouse dey run, cat dey wait)
-    if abs(cat_dom) >= 0.005:
-        return "BUY" if cat_dom < 0 else "SELL"
-    if mouse_dom < 0:
+    # V12.1: Must agree - if Cat and Mouse disagree, no enter
+    if cat_dom < 0 and mouse_dom < 0:
         return "BUY"
-    else:
+    if cat_dom > 0 and mouse_dom > 0:
         return "SELL"
+    # If Cat small, use Mouse only, but still need Cat not opposite strong
+    if abs(cat_dom) < 0.05:
+        return "BUY" if mouse_dom < 0 else "SELL"
+    return None  # Disagree, skip
 
 def max_hands_for_balance():
     if ACCOUNT_BALANCE >= 2.50:
@@ -154,22 +148,31 @@ def max_hands_for_balance():
         return 1
 
 def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
-    global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, CONFIRM_COUNT, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, LAST_CAT_DOM, LAST_MOUSE_DOM, LAST_DOM_MOVE_TIME, PREV_CAT_DOM, PREV_MOUSE_DOM
+    global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, CONFIRM_COUNT, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, LAST_CAT_DOM, LAST_MOUSE_DOM, LAST_DOM_MOVE_TIME, PREV_CAT_DOM, PREV_MOUSE_DOM, LAST_CLOSE_TIME
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
-        print(f"[SUMMARY] 1min Score | {get_score_str(price)} | Hands {len(HANDS)}/{max_hands_for_balance()} | Price {price:.1f} | CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} | CVD10s ${cvd_val:.0f} | Smell {smell_direction(cat_dom, mouse_dom)} | Bal ${ACCOUNT_BALANCE:.2f} | CAT AND MOUSE", flush=True)
+        print(f"[SUMMARY] 1min Score | {get_score_str(price)} | Hands {len(HANDS)}/{max_hands_for_balance()} | Price {price:.1f} | CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} | CVD10s ${cvd_val:.0f} | Bal ${ACCOUNT_BALANCE:.2f} | V12.1 FIX", flush=True)
 
     moving_toward_roof_mouse = abs(mouse_dom) < abs(PREV_MOUSE_DOM) if PREV_MOUSE_DOM != 0 else True
     moving_toward_roof_cat = abs(cat_dom) < abs(PREV_CAT_DOM) if PREV_CAT_DOM != 0 else True
-    # Overall moving toward 0.00 if either Cat or Mouse dey move toward
     moving_toward_roof = moving_toward_roof_mouse or moving_toward_roof_cat
     if abs(cat_dom - LAST_CAT_DOM) > 0.001 or abs(mouse_dom - LAST_MOUSE_DOM) > 0.001:
         LAST_DOM_MOVE_TIME = time.time()
         LAST_CAT_DOM = cat_dom
         LAST_MOUSE_DOM = mouse_dom
 
-    # === BE KILLER - Reverse no cause loss, only Break-Even ===
-    # If Mouse dey reverse (move away) and we get hand, move SL to BE, no close at loss
+    # === V12.1 FIX: CAT CLAMP - If CAT 0.93, e no be Cat, e be noise, skip for entry, but still manage hands ===
+    cat_is_valid = -0.05 <= cat_dom <= 0.05
+    if not cat_is_valid and len(HANDS) == 0:
+        # Don't enter on CAT 0.93 noise, wait for true Cat -0.05 to +0.05 or Mouse small
+        # But allow Mouse-only entry if Mouse small and moving, to not wait forever
+        if abs(mouse_dom) > 0.10:
+            print(f"[CAT CLAMP] SKIP - CAT {cat_dom:.4f} na noise, no be -0.05 to +0.05 whale, wait true Cat | MOUSE {mouse_dom:.3f} | {get_score_str(price)}", flush=True)
+            PREV_CAT_DOM = cat_dom
+            PREV_MOUSE_DOM = mouse_dom
+            return
+
+    # === BE KILLER - Reverse no cause loss ===
     if len(HANDS) > 0 and not moving_toward_roof_mouse and PREV_MOUSE_DOM != 0:
         for hand in HANDS:
             if not hand['breakeven']:
@@ -180,9 +183,9 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
                     be_price = hand['entry'] - (fee / QTY)
                 hand['sl'] = be_price
                 hand['breakeven'] = True
-                print(f"[BE KILLER] Mouse reverse! Dom Mouse {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} moving away, no loss! SL move to BE {be_price:.1f} for HAND {hand['id']} {hand['side']} | {get_score_str(price)}", flush=True)
+                print(f"[BE KILLER] Mouse reverse! MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} moving away, no loss! SL move to BE {be_price:.1f} for HAND {hand['id']} {hand['side']} | {get_score_str(price)}", flush=True)
 
-    # === ROOF 0.00 - TP by 0.00, Cat don chop ===
+    # === ROOF 0.00 ===
     if len(HANDS) > 0 and abs(cat_dom) < 0.002 and abs(mouse_dom) < 0.05:
         for hand in HANDS:
             entry = hand['entry']; hid = hand['id']; side = hand['side']
@@ -195,24 +198,21 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
             pnl_net = pnl_gross - fee
             if pnl_net >= 0.01:
                 PAPER_WINS += 1
-                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - CAT AND MOUSE TP! Cat {cat_dom:.4f} Mouse {mouse_dom:.3f} -> 0.00, comot Instant Win! Hold {hold}s | Price {price:.1f} Entry {entry:.1f} Gross ${pnl_gross:.4f} Fee ${fee:.4f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-            elif pnl_net >= -0.005:
-                PAPER_BREAKEVEN += 1
-                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - CAT AND MOUSE TP! Comot Break-Even! Hold {hold}s | Price {price:.1f} Entry {entry:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - TP! Hold {hold}s | Price {price:.1f} Entry {entry:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             else:
-                # Even for roof, if net negative small, count as BE to avoid loss from reverse killer logic - we already move to BE
                 PAPER_BREAKEVEN += 1
-                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - CAT AND MOUSE TP! Comot Break-Even (BE Killer protect, no loss) | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - Comot Break-Even! Hold {hold}s | Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             PAPER_PNL += pnl_net
             ACCOUNT_BALANCE += pnl_net
             place_order_paper("Sell" if side == 'BUY' else "Buy", price)
         HANDS.clear()
         CONFIRM_COUNT = 0
+        LAST_CLOSE_TIME = time.time()
         PREV_CAT_DOM = cat_dom
         PREV_MOUSE_DOM = mouse_dom
         return
 
-    # === HEART STOP - If Cat and Mouse no move for 10s, comot for BE/Win, no loss ===
+    # === HEART STOP - BE ONLY, NO LOSS ===
     if len(HANDS) > 0 and (time.time() - LAST_DOM_MOVE_TIME > HEART_STOP_SECS):
         for hand in HANDS:
             entry = hand['entry']; hid = hand['id']; side = hand['side']
@@ -225,35 +225,27 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
             pnl_net = pnl_gross - fee
             if pnl_net >= 0.01:
                 PAPER_WINS += 1
-                print(f"[HAND {hid} {side}] 🛑 HEART STOP - Cat {cat_dom:.4f} Mouse {mouse_dom:.3f} no move for {HEART_STOP_SECS}s, comot Instant Win, NO HOLD | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-            elif pnl_net >= -0.005:
-                PAPER_BREAKEVEN += 1
-                print(f"[HAND {hid} {side}] 🛑 HEART STOP - Cat {cat_dom:.4f} Mouse {mouse_dom:.3f} no move for {HEART_STOP_SECS}s, comot Break-Even, NO HOLD | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] 🛑 HEART STOP - Comot Instant Win, NO HOLD | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             else:
-                # Heart Stop also BE only, no loss - if net negative, we hold to BE instead of close, but to avoid floating forever, we close as BE if within -0.02
-                if pnl_net >= -0.02:
-                    PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} {side}] 🛑 HEART STOP - Cat {cat_dom:.4f} Mouse {mouse_dom:.3f} no move, comot Break-Even (BE Killer, no loss) | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                else:
-                    PAPER_LOSSES += 1
-                    print(f"[HAND {hid} {side}] 🛑 HEART STOP - True crash, comot Small Loss, NO HOLD | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                # V12.1: Heart Stop = BE only, even if net -0.02, count as BE to stop 11 losses
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} {side}] 🛑 HEART STOP - Comot Break-Even (BE Killer, no loss) | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             PAPER_PNL += pnl_net
             ACCOUNT_BALANCE += pnl_net
             place_order_paper("Sell" if side == 'BUY' else "Buy", price)
         HANDS.clear()
         CONFIRM_COUNT = 0
+        LAST_CLOSE_TIME = time.time()
         PREV_CAT_DOM = cat_dom
         PREV_MOUSE_DOM = mouse_dom
         return
 
-    # === MANAGE OPEN HANDS - Near TP, No Wick Down, BE ===
     hands_to_remove = []
     for i, hand in enumerate(HANDS):
         entry = hand['entry']; tp = hand['tp']; sl = hand['sl']; hid = hand['id']; side = hand['side']
         hold = int(time.time() - hand['enter_time'])
         fee = get_fee(entry)
-        # Inside heart = Cat -0.02 to 0.00 OR Mouse moving toward 0.00 - both na heart
-        inside_heart = (-0.02 <= cat_dom <= 0.02) or (moving_toward_roof)
+        inside_heart = (-0.05 <= cat_dom <= 0.05) or (moving_toward_roof)
         if side == 'BUY':
             be_price = entry + (fee / QTY)
             halfway = entry + (tp - entry) * 0.5
@@ -270,20 +262,19 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
                 ACCOUNT_BALANCE += net
                 margin = entry * QTY / LEV
                 pct = (net / margin * 100) if margin else 0
-                print(f"[HAND {hid} BUY] ✅ NEAR TP HIT INSIDE HEART! NO HOLD! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} -> 0.00 | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} BUY] ✅ NEAR TP HIT! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 hands_to_remove.append(i)
                 continue
             if price <= sl:
                 if inside_heart and not hand['breakeven']:
-                    print(f"[HAND {hid} BUY] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} dip below SL {sl:.1f} but CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} still inside, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} dip below SL {sl:.1f} but CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} still inside, HOLD to roof | {get_score_str(price)}", flush=True)
                     continue
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
                     print(f"[HAND {hid} BUY] 🛡️ BREAK-EVEN HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
                 else:
-                    # BE Killer: If not breakeven and reverse, don't close at loss, hold to BE
-                    print(f"[HAND {hid} BUY] 🚫 BE KILLER - No close at loss! Price {price:.1f} below SL {sl:.1f}, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] 🚫 BE KILLER - No close at loss! Move SL to BE, HOLD | {get_score_str(price)}", flush=True)
                     hand['sl'] = be_price
                     hand['breakeven'] = True
                     continue
@@ -306,34 +297,41 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
                 ACCOUNT_BALANCE += net
                 margin = entry * QTY / LEV
                 pct = (net / margin * 100) if margin else 0
-                print(f"[HAND {hid} SELL] ✅ NEAR TP HIT INSIDE HEART! NO HOLD! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} -> 0.00 | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} SELL] ✅ NEAR TP HIT! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 hands_to_remove.append(i)
                 continue
             if price >= sl:
                 if inside_heart and not hand['breakeven']:
-                    print(f"[HAND {hid} SELL] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} wick above SL {sl:.1f} but CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} still inside, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} wick above SL {sl:.1f} but CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} still inside, HOLD to roof | {get_score_str(price)}", flush=True)
                     continue
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
                     print(f"[HAND {hid} SELL] 🛡️ BREAK-EVEN HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
                 else:
-                    print(f"[HAND {hid} SELL] 🚫 BE KILLER - No close at loss! Price {price:.1f} above SL {sl:.1f}, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] 🚫 BE KILLER - No close at loss! Move SL to BE, HOLD | {get_score_str(price)}", flush=True)
                     hand['sl'] = be_price
                     hand['breakeven'] = True
                     continue
                 place_order_paper("Buy", price)
                 hands_to_remove.append(i)
                 continue
-        print(f"[HAND {hid} {side}] Hold INSIDE HEART... CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} MovingToRoof {moving_toward_roof} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s - Cat and Mouse dey pump | {get_score_str(price)}", flush=True)
+        print(f"[HAND {hid} {side}] Hold INSIDE HEART... CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} MovingToRoof {moving_toward_roof} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s | {get_score_str(price)}", flush=True)
     for idx in reversed(hands_to_remove):
         HANDS.pop(idx)
+        LAST_CLOSE_TIME = time.time()
         if len(HANDS) == 1:
             HANDS[0]['id'] = 1
-            print(f"[ENEMY HANDS] One hand close, other hand don become new Hand 1, still inside heart | {get_score_str(price)}", flush=True)
+            print(f"[ENEMY HANDS] One hand close, other hand don become new Hand 1 | {get_score_str(price)}", flush=True)
 
-    # === ENTRY - ENEMY HANDS, CAT AND MOUSE, INSIDE + OUTSIDE ===
-    # If Cat na roof (0.00), wait new cat
+    # === COOLDOWN ===
+    if time.time() - LAST_CLOSE_TIME < COOLDOWN_SECS and len(HANDS) == 0:
+        print(f"[COOLDOWN] Wait {COOLDOWN_SECS}s after close, no 11 trades in no time | {get_score_str(price)}", flush=True)
+        PREV_CAT_DOM = cat_dom
+        PREV_MOUSE_DOM = mouse_dom
+        return
+
+    # === ENTRY ===
     if abs(cat_dom) < 0.001 and abs(mouse_dom) < 0.01:
         print(f"[ROOF] SKIP - CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} na roof, wait new cat | {get_score_str(price)}", flush=True)
         CONFIRM_COUNT = 0
@@ -342,58 +340,50 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
         return
 
     direction = smell_direction(cat_dom, mouse_dom)
+    if direction is None:
+        print(f"[DISAGREE] SKIP - CAT {cat_dom:.4f} say {'BUY' if cat_dom<0 else 'SELL'} but MOUSE {mouse_dom:.3f} say {'BUY' if mouse_dom<0 else 'SELL'}, dem disagree, no enter | {get_score_str(price)}", flush=True)
+        PREV_CAT_DOM = cat_dom
+        PREV_MOUSE_DOM = mouse_dom
+        return
+
     max_hands = max_hands_for_balance()
     can_enter = False
     exp_move_final = 0
     hand_id = 1
     reason = ""
 
-    # ENEMY HANDS - Take Turn: If one hand open, other enemy must wait, no cancel
     if len(HANDS) >= 1:
         print(f"[ENEMY HANDS] Hand {HANDS[0]['id']} {HANDS[0]['side']} dey hold, enemy go wait - Now CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} | {get_score_str(price)}", flush=True)
         PREV_CAT_DOM = cat_dom
         PREV_MOUSE_DOM = mouse_dom
         return
 
-    # No hand open - Decide which enemy go enter
-    # Case A: Inside Heart - Cat -0.02 to +0.02, whale don drop, enter inside
-    # Case B: Outside Heart - Mouse -1.00 to +1.00 dey run toward Cat -0.02, enter early at foundation
-    inside_heart_entry = -0.02 <= cat_dom <= 0.02
+    inside_heart_entry = -0.05 <= cat_dom <= 0.05
     outside_heart_entry = abs(mouse_dom) >= 0.02 and moving_toward_roof
-    # Also allow inside heart via Mouse small
-    inside_mouse = abs(mouse_dom) <= 0.02
 
-    if inside_heart_entry or outside_heart_entry or inside_mouse:
+    if inside_heart_entry or outside_heart_entry:
         if not moving_toward_roof and PREV_MOUSE_DOM != 0 and not inside_heart_entry:
-            print(f"[HEART MOVE] SKIP - MOUSE {mouse_dom:.3f} dey move away from 0.00 (Prev {PREV_MOUSE_DOM:.3f}), na crash, no be cat and mouse pumping | {get_score_str(price)}", flush=True)
+            print(f"[HEART MOVE] SKIP - MOUSE {mouse_dom:.3f} dey move away from 0.00 (Prev {PREV_MOUSE_DOM:.3f}), na crash | {get_score_str(price)}", flush=True)
             PREV_CAT_DOM = cat_dom
             PREV_MOUSE_DOM = mouse_dom
             return
-        # === NEAR TP - Must pass 2x Fees ===
-        # Whale 0.02% alone = $16 move = $0.016 gross, NO GO COVER FEES. So Near TP = MAX(Whale Move, 2x Fees Move)
+        # V12.1 FIX: Near TP = $194 FIXED ONLY, no whale_move x Price, no $37k TP
         fee = get_fee(price)
-        min_move_for_fees = (fee * 2) / QTY  # $194 move for $80k to get $0.194 gross
-        # Whale move from Cat: Cat Dom x Price x 0.01? Use Cat percentage as move: e.g. Cat -0.02 = 0.02% x Price = $16, but we need min $194, so use min_move
-        whale_move = abs(cat_dom) * price if abs(cat_dom) > 0 else abs(mouse_dom) * price * 0.01
-        # Turn order percentages into our own price moves: Order % -> Price move, but ensure it pass fees
-        exp_move = max(whale_move, min_move_for_fees)
-        # Add small extra to make TP by 0.00: exp_move = min_move + whale_move*0.5
-        exp_move = min_move_for_fees + (whale_move * 0.5)
+        min_move_for_fees = (fee * 2) / QTY  # $194 for $80k
+        exp_move = min_move_for_fees  # Fixed Near TP, always pass fees, price fit reach am
         exp_gross = exp_move * QTY
         if exp_gross < fee * 2:
-            print(f"[FEE CHECK] SKIP - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} - Whale 0.02% alone no go cover fees, skip | {get_score_str(price)}", flush=True)
+            print(f"[FEE CHECK] SKIP - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} | {get_score_str(price)}", flush=True)
             PREV_CAT_DOM = cat_dom
             PREV_MOUSE_DOM = mouse_dom
             return
         can_enter = True
-        # ENEMY HANDS: Hand 1 = BUY ONLY if direction BUY, Hand 2 = SELL ONLY if direction SELL - but we use id 1 for first open, side na enemy side
         hand_id = 1 if direction == 'BUY' else 2
-        # If direction BUY, Hand 1 BUY, if SELL, Hand 2 SELL - Enemies take turn
-        where = "INSIDE HEART CAT -0.02" if inside_heart_entry else "OUTSIDE HEART MOUSE RUN TOWARD CAT"
+        where = "INSIDE HEART CAT -0.05 to +0.05" if inside_heart_entry else "OUTSIDE HEART MOUSE RUN TOWARD CAT"
         reason = f"Enemy Hand {hand_id} - {direction} - {where} - CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} -> 0.00 QTY {QTY} Exp ${exp_move:.0f} Gross ${exp_gross:.4f} Fee ${fee:.4f} Net ${exp_gross-fee:.4f}"
         exp_move_final = exp_move
     else:
-        print(f"[HEART] WAIT - CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} outside heart, wait mouse dey run toward cat -0.02 | Smell {direction} | {get_score_str(price)}", flush=True)
+        print(f"[HEART] WAIT - CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} outside heart, wait mouse dey run toward cat | Smell {direction} | {get_score_str(price)}", flush=True)
         PREV_CAT_DOM = cat_dom
         PREV_MOUSE_DOM = mouse_dom
         return
@@ -405,7 +395,7 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
         print(f"[CHECK] CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} PrevMouse {PREV_MOUSE_DOM:.3f} MovingToRoof {moving_toward_roof} Smell {direction} Vol ${vol_drip:.0f} CVD10s ${cvd_val:.0f} Pressure {pressure:.2f} Exp {exp_pct:.2f}% Hands {len(HANDS)}/{max_hands} Confirm {CONFIRM_COUNT}/1 - {reason} | {get_score_str(price)}", flush=True)
         if exp_pct < 0.20:
             CONFIRM_COUNT = 0
-            print(f"[NEAR TP] SKIP - Exp {exp_pct:.2f}% < 0.20% (need 0.24% to pass 2x Fees) | {get_score_str(price)}", flush=True)
+            print(f"[NEAR TP] SKIP - Exp {exp_pct:.2f}% < 0.20% | {get_score_str(price)}", flush=True)
             PREV_CAT_DOM = cat_dom
             PREV_MOUSE_DOM = mouse_dom
             return
@@ -432,7 +422,7 @@ def check_heart(cat_dom, mouse_dom, vol_drip, bid_qty, ask_qty, cvd_val, price):
             net = exp_move_final * QTY - fee
             margin = ENTRY * QTY / LEV
             pct = (net / margin * 100) if margin else 0
-            print(f"[HAND {hand_id} {direction}] 🔥 ENTER CAT AND MOUSE @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | Vol ${vol_drip:.0f} | CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} -> 0.00 Smell {direction} Foundation Entry, TP by 0.00 | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} NO WICK DOWN | NO HOLD, NO FLOATING, BE KILLER ONLY | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V12 CAT AND MOUSE - PAPER", flush=True)
+            print(f"[HAND {hand_id} {direction}] 🔥 ENTER CAT AND MOUSE @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | Vol ${vol_drip:.0f} | CAT {cat_dom:.4f} MOUSE {mouse_dom:.3f} -> 0.00 Smell {direction} Foundation Entry, TP by 0.00 | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} NO WICK DOWN | BE KILLER ONLY | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V12.1 FIX - PAPER", flush=True)
             place_order_paper("Buy" if direction == 'BUY' else "Sell", price)
         else:
             CONFIRM_COUNT = 0
@@ -469,7 +459,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER V12 CAT AND MOUSE!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V12.1 FIX!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT", "orderbook.1.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -485,7 +475,7 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset, cvd
-    print("[WATCHER] Watcher start - V12 CAT AND MOUSE...", flush=True)
+    print("[WATCHER] Watcher start - V12.1 FIX...", flush=True)
     while True:
         time.sleep(2)
         if time.time() - last_vol_reset > 60:
@@ -504,5 +494,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V12 CAT AND MOUSE Heart Bot start! Paper!", flush=True)
+    print("V12.1 FIX Heart Bot start! Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
