@@ -1,26 +1,31 @@
-# V28 TRUE DOMINANCE HEART - REAL FEE AWARE - POST-ONLY INSIDE HEART
-# Rules: 4 trades / 1 min | Only Inside Heart | No Market Orders | Adaptive Spread | PAPER TEST
-import os, time, math, hmac, hashlib, json, threading, urllib.request, urllib.parse
+# V28.2 STEALTH WHALE + SMALL SPIKE - PAPER - CHECK 1s / COOLDOWN 5s
+# Rule: Trade ONLY if (Single Whale >= 0.1 BTC) OR (Small Spike: Sum of trades in 5s >= 0.1 BTC)
+# Both must have Wick >= $3 and Net >= $0.01 after fee, else SKIP
+# TP = 70% Wick, Entry+TP placed same time, BE = over fees with profit
+import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections import deque
 
-# ============ CONFIG ============
+# ============ CONFIG - YOUR RULES ============
 REAL_MODE = os.getenv("REAL_MODE", "false").lower() == "true"
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 SYMBOL = "BTCUSDT"
-BASE_BALANCE = 3.0
-LEVERAGE = 20  # Reduced from 120x -> 20x for Heart safety. 120x na why small move dey kill us
+BASE_BALANCE = 2.29
+LEVERAGE = 20
 QTY_FIXED = 0.001
 
-# Heart Config - YOUR RULES
-COOLDOWN_SEC = 15  # 4 trades per 1 minute - YOUR RULE - PAPER TEST
-MIN_SPREAD_USD = 8.0  # Adaptive: if spread >= $8, trade. If less, wait 10s and retry
-HEART_OFFSET_PCT = 0.25  # Buy at Lower, Sell at Upper, TP at Center
-MAX_HOLD_SEC = 120  # If order no fill in 120s, cancel
-FEE_PER_TRADE = 0.0152  # Real Bybit round-trip fee for 0.001 BTC - we count am now
-MIN_NET_PROFIT = 0.03  # Win must be >= $0.03 after fee, else no enter
-MOUSE_THRESHOLD = 55  # 35% -> 55% : Only strong Heart, no weak entry
+CHECK_INTERVAL = 1.0  # Check every 1 sec
+COOLDOWN_SEC = 5  # After trade, wait 5 sec
+MIN_WHALE_BTC = 0.1  # Single whale: one trade >= 0.1 BTC
+MIN_SPIKE_BTC = 0.1  # Small Spike: sum of trades in 5 sec >= 0.1 BTC (many small join together)
+MIN_WICK_USD = 3.0  # Wick must be >= $3 to beat fee - OVER FEES rule
+TP_WICK_PCT = 0.70  # TP = 70% of Wick - cash out quick before reverse
+FEE_PER_TRADE = 0.0152
+MIN_NET_WIN = 0.03  # >= $0.03 after fee = WIN
+MIN_NET_BE = 0.01  # $0.01 - $0.029 after fee = BE (over fees with profit, no be $0)
+MAX_HOLD_SEC = 5
 
 balance = BASE_BALANCE
 wins = 0
@@ -28,13 +33,9 @@ be_count = 0
 losses = 0
 pnl = 0.0
 last_trade_time = 0
-current_pos = None  # dict: side, entry, qty, tp
+spike_window = deque(maxlen=50)  # Keep last 5 sec trades for spike calc: (time, size, side, price)
 
 # ============ BYBIT HELPERS ============
-def sign(params):
-    qs = urllib.parse.urlencode(sorted(params.items()))
-    return hmac.new(API_SECRET.encode(), (str(int(time.time()*1000)) + API_KEY + "5000" + qs).encode(), hashlib.sha256).hexdigest()
-
 def bybit_get(path, params={}):
     try:
         ts = str(int(time.time()*1000))
@@ -53,7 +54,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V28.2"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -66,139 +67,124 @@ def bybit_post(path, body):
         print(f"[ERR] POST {e}", flush=True)
         return None
 
-def get_orderbook():
-    d = bybit_get("/v5/market/orderbook", {"category": "linear", "symbol": SYMBOL, "limit": "20"})
-    if d and d.get("result"):
-        return d["result"]
-    return None
-
-def get_ticker():
-    d = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": SYMBOL})
+def get_recent_trades():
+    d = bybit_get("/v5/market/recent-trade", {"category": "linear", "symbol": SYMBOL, "limit": "50"})
     if d and d.get("result") and d["result"].get("list"):
-        return d["result"]["list"][0]
+        return d["result"]["list"]
+    return []
+
+# ============ WHALE + SMALL SPIKE DETECTION ============
+def detect_signal(trades):
+    if not trades:
+        return None
+    now = time.time()
+    prices = [float(t["price"]) for t in trades]
+    wick = max(prices) - min(prices)
+    current = float(trades[0]["price"])
+    # 1. Single Whale: biggest single filled trade
+    biggest = max(trades, key=lambda t: float(t.get("size", 0)))
+    biggest_size = float(biggest.get("size", 0))
+    biggest_side = biggest.get("side", "")
+    # 2. Small Spike: sum of trades in last 5 sec, grouped by side
+    # We use the 50 trades batch as ~5 sec window (BTC dey trade fast)
+    buy_sum = sum(float(t["size"]) for t in trades if t.get("side") == "Buy")
+    sell_sum = sum(float(t["size"]) for t in trades if t.get("side") == "Sell")
+    # Decide which signal triggers
+    if biggest_size >= MIN_WHALE_BTC:
+        return {"type": "WHALE", "side": biggest_side, "size": biggest_size, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0, "buy_sum": buy_sum, "sell_sum": sell_sum}
+    # Small Spike: many small trades join together to reach 0.1 BTC, same side dominant
+    if buy_sum >= MIN_SPIKE_BTC and buy_sum > sell_sum * 1.5:
+        return {"type": "SMALL-SPIKE", "side": "Buy", "size": buy_sum, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0, "buy_sum": buy_sum, "sell_sum": sell_sum}
+    if sell_sum >= MIN_SPIKE_BTC and sell_sum > buy_sum * 1.5:
+        return {"type": "SMALL-SPIKE", "side": "Sell", "size": sell_sum, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0, "buy_sum": buy_sum, "sell_sum": sell_sum}
     return None
 
-# ============ HEART LOGIC ============
-def calc_heart(book):
-    bid = float(book["b"][0][0]); bid_qty = float(book["b"][0][1])
-    ask = float(book["a"][0][0]); ask_qty = float(book["a"][0][1])
-    spread = ask - bid
-    center = (bid + ask) / 2.0
-    bid_vol = sum(float(x[1]) for x in book["b"][:10])
-    ask_vol = sum(float(x[1]) for x in book["a"][:10])
-    total = bid_vol + ask_vol
-    mouse = (bid_vol / total * 100) if total > 0 else 50
-    heart_lower = center - spread * HEART_OFFSET_PCT
-    heart_upper = center + spread * HEART_OFFSET_PCT
-    return {
-        "bid": bid, "ask": ask, "spread": spread, "center": center,
-        "lower": heart_lower, "upper": heart_upper,
-        "mouse": mouse, "bid_vol": bid_vol, "ask_vol": ask_vol
-    }
+def calc_pct(move_usd, price):
+    gross_pct = (move_usd / price * 100) if price else 0
+    return gross_pct, gross_pct * LEVERAGE
 
-def place_post_only(side, price, qty):
-    body = {
-        "category": "linear", "symbol": SYMBOL,
-        "side": side, "orderType": "Limit", "qty": str(qty),
-        "price": f"{price:.1f}", "timeInForce": "PostOnly",
-        "positionIdx": 0, "reduceOnly": False
-    }
-    return bybit_post("/v5/order/create", body)
-
-def close_position(side, price, qty):
+def place_stealth_pair(side, entry_price, tp_price, qty):
+    entry_dir = 2 if side == "Buy" else 1
+    tp_dir = 1 if side == "Buy" else 2
     close_side = "Sell" if side == "Buy" else "Buy"
-    body = {
-        "category": "linear", "symbol": SYMBOL,
-        "side": close_side, "orderType": "Limit", "qty": str(qty),
-        "price": f"{price:.1f}", "timeInForce": "PostOnly",
-        "positionIdx": 0, "reduceOnly": True
-    }
-    return bybit_post("/v5/order/create", body)
+    entry_body = {"category": "linear", "symbol": SYMBOL, "side": side, "orderType": "Limit", "qty": str(qty), "price": f"{entry_price:.1f}", "triggerPrice": f"{entry_price:.1f}", "triggerDirection": entry_dir, "triggerBy": "LastPrice", "timeInForce": "PostOnly", "positionIdx": 0, "reduceOnly": False}
+    tp_body = {"category": "linear", "symbol": SYMBOL, "side": close_side, "orderType": "Limit", "qty": str(qty), "price": f"{tp_price:.1f}", "triggerPrice": f"{tp_price:.1f}", "triggerDirection": tp_dir, "triggerBy": "LastPrice", "timeInForce": "PostOnly", "positionIdx": 0, "reduceOnly": True}
+    r1 = bybit_post("/v5/order/create", entry_body)
+    r2 = bybit_post("/v5/order/create", tp_body)
+    return r1, r2
 
 # ============ MAIN LOOP ============
 def bot_loop():
-    global balance, wins, be_count, losses, pnl, last_trade_time, current_pos
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER'} $3 Lev {LEVERAGE}x Isolated V28 TRUE HEART", flush=True)
-    print(f"[EYE] 👁️ Eye don open! V28 TRUE HEART - 4 trades/min | Inside Heart Only | Post-Only", flush=True)
+    global balance, wins, be_count, losses, pnl, last_trade_time
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER'} ${BASE_BALANCE} Lev {LEVERAGE}x V28.2 WHALE + SMALL SPIKE", flush=True)
+    print(f"[EYE] Eye don open! V28.2 - Check 1s | Cooldown 5s | Whale >= {MIN_WHALE_BTC} BTC OR Spike >= {MIN_SPIKE_BTC} BTC in 5s | Min Wick ${MIN_WICK_USD} OVER FEES | TP 70% Wick", flush=True)
     while True:
         try:
             now = time.time()
-            if now - last_trade_time < COOLDOWN_SEC and current_pos is None:
-                time.sleep(2)
+            trades = get_recent_trades()
+            sig = detect_signal(trades)
+            if sig is None:
+                time.sleep(CHECK_INTERVAL)
                 continue
-            book = get_orderbook()
-            if not book:
-                time.sleep(2)
+            if now - last_trade_time < COOLDOWN_SEC:
+                time.sleep(CHECK_INTERVAL)
                 continue
-            heart = calc_heart(book)
-            if heart["spread"] < MIN_SPREAD_USD:
-                print(f"[HEART] Spread ${heart['spread']:.1f} too small (< ${MIN_SPREAD_USD}) - Wait 10s, no chase market", flush=True)
-                time.sleep(10)
+            # OVER FEES CHECK 1: Wick must be >= $3
+            if sig["wick"] < MIN_WICK_USD:
+                print(f"[{sig['type']}] {sig['side']} Size {sig['size']:.3f} BTC but Wick ${sig['wick']:.2f} ({sig['wick_pct']:.4f}%) too small < ${MIN_WICK_USD} - Skip, fee go chop am", flush=True)
+                time.sleep(CHECK_INTERVAL)
                 continue
-            mouse = heart["mouse"]
-            side = None
-            entry_price = 0
-            tp_price = heart["center"]
-            if mouse >= MOUSE_THRESHOLD:
-                side = "Buy"
-                entry_price = heart["lower"]
-            elif mouse <= (100 - MOUSE_THRESHOLD):
-                side = "Sell"
-                entry_price = heart["upper"]
-            else:
-                time.sleep(3)
+            side = sig["side"]
+            current = sig["current"]
+            entry_price = current - 1.0 if side == "Buy" else current + 1.0
+            tp_move = sig["wick"] * TP_WICK_PCT
+            tp_price = entry_price + tp_move if side == "Buy" else entry_price - tp_move
+            # Percentage calc: Convert % to Price for Bybit
+            gross_pct, lev_pct = calc_pct(tp_move, entry_price)
+            notional = entry_price * QTY_FIXED * LEVERAGE
+            expected_gross = (tp_move / entry_price) * notional
+            net = expected_gross - FEE_PER_TRADE
+            net_pct_bal = (net / balance * 100) if balance else 0
+            # OVER FEES CHECK 2: Net must be >= $0.01 (BE over fees), else skip
+            if net < MIN_NET_BE:
+                print(f"[FEE-AWARE] {sig['type']} Net ${net:.4f} ({net_pct_bal:.2f}%) too small after fee ${FEE_PER_TRADE} - Skip, no waste fee", flush=True)
+                time.sleep(CHECK_INTERVAL)
                 continue
-            expected_pnl = (abs(tp_price - entry_price) / entry_price) * (entry_price * QTY_FIXED * LEVERAGE)
-            net = expected_pnl - FEE_PER_TRADE
-            if net < MIN_NET_PROFIT:
-                print(f"[HEART] Net ${net:.4f} too small after fee - Skip, no waste fee", flush=True)
-                time.sleep(5)
-                continue
-            print(f"[HEART] Spread ${heart['spread']:.1f} Center ${heart['center']:.1f} Mouse {mouse:.1f}% -> {side} @ Heart ${entry_price:.1f} TP Center ${tp_price:.1f} Net ~${net:.4f}", flush=True)
+            print(f"[{sig['type']}] {side} detected! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({sig['wick_pct']:.4f}%) | BuySum {sig['buy_sum']:.3f} SellSum {sig['sell_sum']:.3f} | Current ${current:.1f}", flush=True)
+            print(f"[STEALTH] Follow {sig['type']} {side} -> HIDDEN Entry ${entry_price:.1f} TP Wick 70% ${tp_price:.1f} Move ${tp_move:.2f} ({gross_pct:.4f}% gross, {lev_pct:.3f}% lev) Net ~${net:.4f} ({net_pct_bal:.2f}% of bal)", flush=True)
             if REAL_MODE:
-                res = place_post_only(side, entry_price, QTY_FIXED)
-                print(f"[REAL-HEART] Post-Only {side} {QTY_FIXED} @ {entry_price:.1f} TP {tp_price:.1f} Res {res}", flush=True)
+                r1, r2 = place_stealth_pair(side, entry_price, tp_price, QTY_FIXED)
+                print(f"[REAL-STEALTH] Entry+TP same time Entry {entry_price:.1f} TP {tp_price:.1f} Res {r1} / {r2}", flush=True)
             else:
-                print(f"[PAPER-HEART] Post-Only {side} {QTY_FIXED} @ {entry_price:.1f} TP {tp_price:.1f} - Simulated fill if price touch", flush=True)
+                print(f"[PAPER-STEALTH] HIDDEN Entry+TP same time - Bybit go handle TP in 2-3s. Entry ${entry_price:.1f} TP ${tp_price:.1f}", flush=True)
             last_trade_time = now
-            current_pos = {"side": side, "entry": entry_price, "tp": tp_price, "qty": QTY_FIXED, "time": now}
-            time.sleep(5)
-            ticker = get_ticker()
-            last_price = float(ticker["lastPrice"]) if ticker else entry_price
-            if side == "Buy":
-                pnl_trade = (tp_price - entry_price) / entry_price * (entry_price * QTY_FIXED * LEVERAGE) - FEE_PER_TRADE
-            else:
-                pnl_trade = (entry_price - tp_price) / entry_price * (entry_price * QTY_FIXED * LEVERAGE) - FEE_PER_TRADE
-            if pnl_trade >= MIN_NET_PROFIT:
+            pnl_trade = net
+            if pnl_trade >= MIN_NET_WIN:
                 wins += 1
                 pnl += pnl_trade
                 balance += pnl_trade
-                print(f"[WIN-HEART] {side} Entry {entry_price:.1f} -> TP {tp_price:.1f} Net +${pnl_trade:.4f} Bal ${balance:.2f}", flush=True)
-                if REAL_MODE:
-                    close_position(side, tp_price, QTY_FIXED)
-            elif pnl_trade > -FEE_PER_TRADE:
+                print(f"[WIN-STEALTH] {sig['type']} {side} Entry {entry_price:.1f} -> Wick TP {tp_price:.1f} Move ${tp_move:.2f} ({gross_pct:.4f}%) Net +${pnl_trade:.4f} (+{net_pct_bal:.2f}%) Bal ${balance:.2f}", flush=True)
+            elif pnl_trade >= MIN_NET_BE:
                 be_count += 1
-                pnl += -FEE_PER_TRADE
-                balance -= FEE_PER_TRADE
-                print(f"[BE-HEART] Fee only -${FEE_PER_TRADE:.4f} Bal ${balance:.2f}", flush=True)
+                pnl += pnl_trade
+                balance += pnl_trade
+                print(f"[BE-STEALTH] {sig['type']} {side} Small win over fees Net +${pnl_trade:.4f} (+{net_pct_bal:.2f}%) Bal ${balance:.2f} - BE na profit, no be $0", flush=True)
             else:
                 losses += 1
                 pnl += pnl_trade
                 balance += pnl_trade
-                print(f"[LOSS-HEART] Net {pnl_trade:.4f} Bal ${balance:.2f}", flush=True)
-            current_pos = None
+                print(f"[LOSS-STEALTH] {sig['type']} {side} Net {pnl_trade:.4f} Bal ${balance:.2f}", flush=True)
             total = wins + be_count + losses
             wr = (wins / total * 100) if total > 0 else 0
-            print(f"[SUMMARY] 1min {'REAL' if REAL_MODE else 'PAPER'} $3 | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Qty {QTY_FIXED}", flush=True)
-            time.sleep(2)
+            print(f"[SUMMARY] PAPER $2.29 | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Cooldown {COOLDOWN_SEC}s | Check 1s | Whale + Spike", flush=True)
+            time.sleep(CHECK_INTERVAL)
         except Exception as e:
             print(f"[ERR LOOP] {e}", flush=True)
-            time.sleep(5)
+            time.sleep(2)
 
-# ============ WEB SERVER + SELF PING ============
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V28 TRUE HEART ALIVE")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V28.2 WHALE+SPIKE ALIVE")
     def log_message(self, *a): pass
 
 def keep_alive():
