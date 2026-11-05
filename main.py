@@ -1,7 +1,8 @@
-# main.py - HEART - V16 DILIGENT - FIX INVERTED DIRECTION, TP ON CROSS, BE $0.00 - PAPER MODE
-# Diligent fix from screenshot Nov 5 04:47: Wins 0 BE 12 Losses 0 PnL $0.0000 - BE fix worked, but Wins 0 because direction inverted
-# Bug: MOUSE = (Buy - Sell)/Total, MOUSE -0.68 = sellers dominate, we entered BUY (wrong), price fell 80640 -> 80627, MOUSE went -0.51 -> -0.90 away from 0.00
-# Fix: MOUSE <0 = SELL, MOUSE >0 = BUY, TP on CROSS + $15 quick profit, TP $120 backup only, BE $0.00 exact, Check 0.5s, MOUSE 5s
+# main.py - HEART - V19 TP ALWAYS AT 0.00, % CHECK FEE COVER - PAPER MODE
+# User correct: No 50% wick, No fixed $120, No $500 wick wait. TP always at 0.00.
+# Instead calculate by % orders built in heart (-0.02 to 0.00) brought, check if % go enough to cover fees, then TP at 0.00, comot quick, leave profit
+# Example: MOUSE -0.02 = 2% = too small, no cover fee, SKIP. MOUSE -0.94 = 94% = big, cover fee, ENTER, TP at 0.00.
+# Fix: Only enter if abs(MOUSE) >= 0.20 (20% order imbalance), else skip. TP only on CROSS/WEAKEN to 0.00, no price TP.
 
 import time, os, threading, json, hmac, hashlib
 from flask import Flask
@@ -10,7 +11,7 @@ import websocket
 
 QTY = 0.001
 LEV = 120
-TP_MOVE = 120  # Backup only, main TP na CROSS + $15 quick
+MIN_ORDER_PCT = 0.20  # 20% - minimum order % to cover fees, if less, skip
 
 PAPER_WINS = 0
 PAPER_LOSSES = 0
@@ -64,7 +65,7 @@ app = Flask(__name__)
 def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
-    return f"Heart Bot PAPER V16 DILIGENT - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot PAPER V19 TP@0.00 %CHECK - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -110,14 +111,16 @@ def check_heart(mouse_dom, price):
     global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, PREV_MOUSE_DOM
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
-        print(f"[SUMMARY] 1min | {get_score_str(price)} | Hands {len(HANDS)}/1 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Bal ${ACCOUNT_BALANCE:.2f} | V16 DILIGENT CORRECT DIRECTION", flush=True)
+        print(f"[SUMMARY] 1min | {get_score_str(price)} | Hands {len(HANDS)}/1 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% | Bal ${ACCOUNT_BALANCE:.2f} | V19 TP@0.00 %CHECK", flush=True)
 
     if len(HANDS) > 0:
         hand = HANDS[0]
-        entry = hand['entry']; tp = hand['tp']; sl = hand['sl']; hid = hand['id']; side = hand['side']
+        entry = hand['entry']; hid = hand['id']; side = hand['side']
+        entry_pct = hand['entry_pct']
         hold = int(time.time() - hand['enter_time'])
         fee = get_fee(entry)
-        # CROSS: For SELL, MOUSE was negative, cross to positive = sellers done, grab. For BUY, MOUSE was positive, cross to negative = buyers done
+        fee_move = fee / QTY
+        # TP ALWAYS AT 0.00: Cross or Weaken to 0.00, no price TP, no wick TP
         crossed = False
         if side == 'SELL' and PREV_MOUSE_DOM < 0 and mouse_dom >= 0:
             crossed = True
@@ -125,161 +128,105 @@ def check_heart(mouse_dom, price):
             crossed = True
         if abs(mouse_dom) < 0.05:
             crossed = True
-        # Quick profit $15 - price move small, grab copy
+        weakening = False
+        weaken_amt = 0
+        if PREV_MOUSE_DOM != 0:
+            weaken_amt = abs(PREV_MOUSE_DOM) - abs(mouse_dom)
+            if weaken_amt >= 0.05:
+                weakening = True
         quick_profit = False
-        if side == 'BUY' and price >= entry + 15:
+        if side == 'BUY' and price >= entry + fee_move + 10:
             quick_profit = True
-        if side == 'SELL' and price <= entry - 15:
+        if side == 'SELL' and price <= entry - fee_move - 10:
             quick_profit = True
-        # Weakening: MOUSE moving toward 0.00 (abs decreasing) + price in favour small, also grab if hold >5s and profit > fee
-        weakening = abs(mouse_dom) < abs(PREV_MOUSE_DOM) if PREV_MOUSE_DOM != 0 else False
+        price_stuck = abs(price - entry) < 2 and hold >= 8
 
         if side == 'BUY':
-            be_price = entry + (fee / QTY)
-            halfway = entry + (tp - entry) * 0.5
-            if not hand['breakeven'] and price >= halfway:
-                hand['sl'] = be_price
-                hand['breakeven'] = True
-                print(f"[HAND {hid} BUY] 🛡️ BE! Price {price:.1f} halfway, SL to BE {be_price:.1f} | {get_score_str(price)}", flush=True)
-            if price >= tp:
-                profit = (tp - entry) * QTY
-                net = profit - fee
-                PAPER_WINS += 1
-                PAPER_PNL += net
-                ACCOUNT_BALANCE += net
-                print(f"[HAND {hid} BUY] ✅ TP $120! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Net ${net:.4f} | {get_score_str(price)}", flush=True)
-                place_order_paper("Sell", price)
-                HANDS.clear()
-                PREV_MOUSE_DOM = mouse_dom
-                return
-            if crossed or quick_profit:
+            if crossed or weakening or quick_profit:
                 pnl_gross = (price - entry) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
                     PAPER_PNL += pnl_net
                     ACCOUNT_BALANCE += pnl_net
-                    print(f"[HAND {hid} BUY] ⏰ GRAB COPY! CROSS={crossed} QUICK={quick_profit} Weak={weakening} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] ✅ TP @ 0.00! CROSS={crossed} WEAK={weakening} Weaken {weaken_amt:.3f} QUICK={quick_profit} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Entry {entry:.1f} Entry% {entry_pct*100:.1f}% FeeMove ${fee_move:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] ⏰ GRAB COPY BE $0.00! CROSS={crossed} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] ⏰ TP @ 0.00 BE $0.00! CROSS={crossed} WEAK={weakening} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} PnL $0.00 No Loss | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            if price <= sl:
-                if hand['breakeven']:
-                    PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00, PnL $0.00 | {get_score_str(price)}", flush=True)
-                    place_order_paper("Sell", price)
-                    HANDS.clear()
-                    PREV_MOUSE_DOM = mouse_dom
-                    return
-                else:
-                    hand['sl'] = be_price
-                    hand['breakeven'] = True
-                    print(f"[HAND {hid} BUY] 🚫 BE KILLER - No loss, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
-            if time.time() - hand['enter_time'] > 20:
-                pnl_gross = (price - entry) * QTY
-                pnl_net = pnl_gross - fee
-                if pnl_net >= 0.01:
-                    PAPER_WINS += 1
-                    PAPER_PNL += pnl_net
-                    ACCOUNT_BALANCE += pnl_net
-                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 20s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                else:
-                    PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} BUY] 🛑 HEART STOP 20s - Comot BE $0.00, no loss | Hold {hold}s | {get_score_str(price)}", flush=True)
+            if price_stuck:
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} BUY] 🛑 PRICE STUCK 8s - Comot BE $0.00 | Hold {hold}s Price {price:.1f} | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            print(f"[HAND {hid} BUY] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Cross {crossed} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
+            if price <= entry - fee_move - 60:
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} BUY] 🛑 BE KILLER - Price go against, comot BE $0.00, no loss | Hold {hold}s Price {price:.1f} | {get_score_str(price)}", flush=True)
+                place_order_paper("Sell", price)
+                HANDS.clear()
+                PREV_MOUSE_DOM = mouse_dom
+                return
+            print(f"[HAND {hid} BUY] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct*100:.1f}% Weak {weakening} Price {price:.1f} Entry {entry:.1f} TP @ 0.00 FeeMove ${fee_move:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
             PREV_MOUSE_DOM = mouse_dom
             return
-        else:  # SELL - Correct direction when MOUSE negative
-            be_price = entry - (fee / QTY)
-            halfway = entry - (entry - tp) * 0.5
-            if not hand['breakeven'] and price <= halfway:
-                hand['sl'] = be_price
-                hand['breakeven'] = True
-                print(f"[HAND {hid} SELL] 🛡️ BE! Price {price:.1f} halfway, SL to BE {be_price:.1f} | {get_score_str(price)}", flush=True)
-            if price <= tp:
-                profit = (entry - tp) * QTY
-                net = profit - fee
-                PAPER_WINS += 1
-                PAPER_PNL += net
-                ACCOUNT_BALANCE += net
-                print(f"[HAND {hid} SELL] ✅ TP $120! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} | Net ${net:.4f} | {get_score_str(price)}", flush=True)
-                place_order_paper("Buy", price)
-                HANDS.clear()
-                PREV_MOUSE_DOM = mouse_dom
-                return
-            if crossed or quick_profit:
+        else:
+            if crossed or weakening or quick_profit:
                 pnl_gross = (entry - price) * QTY
                 pnl_net = pnl_gross - fee
                 if pnl_net >= 0.01:
                     PAPER_WINS += 1
                     PAPER_PNL += pnl_net
                     ACCOUNT_BALANCE += pnl_net
-                    print(f"[HAND {hid} SELL] ⏰ GRAB COPY! CROSS={crossed} QUICK={quick_profit} Weak={weakening} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] ✅ TP @ 0.00! CROSS={crossed} WEAK={weakening} Weaken {weaken_amt:.3f} QUICK={quick_profit} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} Entry {entry:.1f} Entry% {entry_pct*100:.1f}% FeeMove ${fee_move:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
                 else:
                     PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] ⏰ GRAB COPY BE $0.00! CROSS={crossed} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} PnL $0.00, No Loss | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] ⏰ TP @ 0.00 BE $0.00! CROSS={crossed} WEAK={weakening} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold}s Price {price:.1f} PnL $0.00 No Loss | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            if price >= sl:
-                if hand['breakeven']:
-                    PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] 🛡️ BE HIT @ {price:.1f} Hold {hold}s | Loss $0.00, PnL $0.00 | {get_score_str(price)}", flush=True)
-                    place_order_paper("Buy", price)
-                    HANDS.clear()
-                    PREV_MOUSE_DOM = mouse_dom
-                    return
-                else:
-                    hand['sl'] = be_price
-                    hand['breakeven'] = True
-                    print(f"[HAND {hid} SELL] 🚫 BE KILLER - No loss, move SL to BE, HOLD | {get_score_str(price)}", flush=True)
-            if time.time() - hand['enter_time'] > 20:
-                pnl_gross = (entry - price) * QTY
-                pnl_net = pnl_gross - fee
-                if pnl_net >= 0.01:
-                    PAPER_WINS += 1
-                    PAPER_PNL += pnl_net
-                    ACCOUNT_BALANCE += pnl_net
-                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 20s - Comot Win | Hold {hold}s Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
-                else:
-                    PAPER_BREAKEVEN += 1
-                    print(f"[HAND {hid} SELL] 🛑 HEART STOP 20s - Comot BE $0.00, no loss | Hold {hold}s | {get_score_str(price)}", flush=True)
+            if price_stuck:
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} SELL] 🛑 PRICE STUCK 8s - Comot BE $0.00 | Hold {hold}s Price {price:.1f} | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 HANDS.clear()
                 PREV_MOUSE_DOM = mouse_dom
                 return
-            print(f"[HAND {hid} SELL] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Cross {crossed} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
+            if price >= entry + fee_move + 60:
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} SELL] 🛑 BE KILLER - Price go against, comot BE $0.00, no loss | Hold {hold}s Price {price:.1f} | {get_score_str(price)}", flush=True)
+                place_order_paper("Buy", price)
+                HANDS.clear()
+                PREV_MOUSE_DOM = mouse_dom
+                return
+            print(f"[HAND {hid} SELL] Hold... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct*100:.1f}% Weak {weakening} Price {price:.1f} Entry {entry:.1f} TP @ 0.00 FeeMove ${fee_move:.1f} Hold {hold}s | {get_score_str(price)}", flush=True)
             PREV_MOUSE_DOM = mouse_dom
             return
 
-    # NO HAND - ENTER CORRECT DIRECTION, CONTINUOUS
-    if abs(mouse_dom) < 0.01:
-        print(f"[ROOF] MOUSE {mouse_dom:.3f} na 0.00, wait 0.5s for new foundation | {get_score_str(price)}", flush=True)
+    # NO HAND - % CHECK: Only enter if order % enough to cover fees
+    order_pct = abs(mouse_dom)
+    if order_pct < 0.01:
+        print(f"[ROOF] MOUSE {mouse_dom:.3f} na 0.00, Order% 0%, wait 0.5s | {get_score_str(price)}", flush=True)
         PREV_MOUSE_DOM = mouse_dom
         return
-    # V16 DILIGENT FIX: MOUSE negative = sellers strong = SELL, MOUSE positive = buyers strong = BUY
+    # V19 % CHECK: If order % < 20%, e no go cover fee, SKIP
+    if order_pct < MIN_ORDER_PCT:
+        print(f"[SKIP] Order% {order_pct*100:.1f}% too small, no go cover fee, skip heart -0.02 to 0.00, wait stronger heart | MOUSE {mouse_dom:.3f} Price {price:.1f} | {get_score_str(price)}", flush=True)
+        PREV_MOUSE_DOM = mouse_dom
+        return
+    # Order % >=20%, e go cover fee, ENTER, TP always at 0.00
     direction = "SELL" if mouse_dom < 0 else "BUY"
     hand_id = 2 if direction == 'SELL' else 1
     ENTRY = price
-    if direction == 'BUY':
-        TP_PRICE = ENTRY + TP_MOVE
-        SL_PRICE = ENTRY - (TP_MOVE * 0.5)
-    else:
-        TP_PRICE = ENTRY - TP_MOVE
-        SL_PRICE = ENTRY + (TP_MOVE * 0.5)
-    HANDS.append({'entry': ENTRY, 'tp': TP_PRICE, 'sl': SL_PRICE, 'id': hand_id, 'enter_time': time.time(), 'breakeven': False, 'side': direction})
     fee = get_fee(ENTRY)
-    net = TP_MOVE * QTY - fee
-    print(f"[HAND {hand_id} {direction}] 🔥 ENTER CORRECT @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} CORRECT DIRECTION, GRAB COPY ON CROSS | TP {TP_PRICE:.1f} SL {SL_PRICE:.1f} BE $0.00 ONLY | Net if TP ${net:.4f} | {get_score_str(price)} | V16 DILIGENT - PAPER", flush=True)
+    fee_move = fee / QTY
+    HANDS.append({'entry': ENTRY, 'id': hand_id, 'enter_time': time.time(), 'breakeven': False, 'side': direction, 'entry_pct': order_pct})
+    print(f"[HAND {hand_id} {direction}] 🔥 ENTER %CHECK PASS @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Order% {order_pct*100:.1f}% >=20% go cover fee FeeMove ${fee_move:.1f} | TP ALWAYS @ 0.00, no $500 wick wait | {get_score_str(price)} | V19 TP@0.00 - PAPER", flush=True)
     place_order_paper("Buy" if direction == 'BUY' else "Sell", price)
     PREV_MOUSE_DOM = mouse_dom
 
@@ -303,7 +250,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER V16 DILIGENT!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V19 TP@0.00 %CHECK!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -319,7 +266,7 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset
-    print("[WATCHER] Watcher start - V16 DILIGENT 0.5s...", flush=True)
+    print("[WATCHER] Watcher start - V19 TP@0.00 %CHECK 0.5s...", flush=True)
     while True:
         time.sleep(0.5)
         if time.time() - last_vol_reset > 60:
@@ -334,5 +281,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V16 DILIGENT Heart Bot start! Paper!", flush=True)
+    print("V19 TP@0.00 %CHECK Heart Bot start! Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
