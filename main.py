@@ -1,10 +1,9 @@
-# main.py - HEART - V24 - PERCENTAGE ONLY, NO PRICE WIN - PAPER FIRST
-# V22 love + V23 two hands + V24 BE to WIN with PERCENTAGE
-# User correct: We no dey do price, we dey do percentage. TP na for 0.00, HOLD na for 0.00.
-# Fix for 8 Wins / 203 BE: Before we dey wait full 0.00, e dey reverse turn BE. Now if MOUSE move 30% towards 0.00 from Entry, grab WIN.
-# MOUSE 7s (not 5s jitter, not 10s slow), % CHECK 18% (not 15% weak, not 20% slow), WEAK High 0.04 Mid 0.03 Low 0.01
-# Price only for: Fee cover $8 + BE Killer $40 safety. No price WIN.
-# Flow: Hand 1 enter >=18%, Hand 2 join if MOUSE +0.08 and fee cover, both hold for 0.00 direction, if MOUSE move 30% towards 0.00 -> WIN, else CROSS -> WIN, else Max Hold 40s -> BE.
+# main.py - HEART - V25 - FIX WIN_GRAB TO % OF ENTRY + % CHECK 35% - PAPER FIRST
+# Fix V24 Bug: V24 use 0.30 absolute. For Entry 18.7%, 0.30 impossible -> 8442 BE, 336 Wins, 4% WinRate.
+# V25: WIN_GRAB = 30% OF Entry. Entry 0.35 -> need 0.105 move -> MOUSE 0.245 = WIN. Entry 0.94 -> need 0.282 -> MOUSE 0.658 = WIN.
+# % CHECK 35% - No more 18% weak heart. 35% heart get power to move and cover fee $8.
+# Fee Safety: WIN only if total_net >= 0.002. If MOUSE move but price never move $8 to cover fee, e go count as BE, no be WIN.
+# MOUSE 7s, WEAK High 0.04 Mid 0.03 Low 0.01, CROSS 0.00, BE Killer $40, Max Hold 40s. TP ALWAYS @ 0.00% direction, HOLD for 0.00%, Percentage Only.
 
 import time, os, threading, json, hmac, hashlib
 from flask import Flask
@@ -13,10 +12,10 @@ import websocket
 
 QTY = 0.001
 LEV = 120
-MIN_ORDER_PCT = 0.18  # V24: 18% - not 15% weak, not 20% slow
-MOUSE_WINDOW = 7  # V24: 7s - not 5s jitter, not 10s slow
+MIN_ORDER_PCT = 0.35  # V25: 35% - No more 18% weak heart
+MOUSE_WINDOW = 7  # V25: 7s
 MAKER_FEE_RATE = 0.0001
-WIN_GRAB_MOVE = 0.30  # V24: If MOUSE move 30% towards 0.00 from Entry, WIN
+WIN_GRAB_PCT_OF_ENTRY = 0.30  # V25: 30% OF Entry, no be 0.30 absolute
 REAL_MODE = os.getenv("REAL_MODE", "false").lower() == "true"
 
 PAPER_WINS = 0
@@ -75,7 +74,7 @@ def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
     mode = "REAL $3" if REAL_MODE else "PAPER"
-    return f"Heart Bot {mode} V24 PERCENTAGE - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot {mode} V25 % OF ENTRY - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -134,7 +133,7 @@ def check_heart(mouse_dom, price):
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
         mode = "REAL $3" if REAL_MODE else "PAPER"
-        print(f"[SUMMARY] 1min {mode} | {get_score_str(price)} | Hands {len(HANDS)}/2 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% | Bal ${ACCOUNT_BALANCE:.2f} | V24 MOUSE 7s % 18% WIN GRAB 30%", flush=True)
+        print(f"[SUMMARY] 1min {mode} | {get_score_str(price)} | Hands {len(HANDS)}/2 | Price {price:.1f} | MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% | Bal ${ACCOUNT_BALANCE:.2f} | V25 MOUSE 7s % 35% WIN GRAB 30% OF ENTRY", flush=True)
 
     if len(HANDS) > 0:
         side = HANDS[0]['side']
@@ -147,10 +146,11 @@ def check_heart(mouse_dom, price):
             crossed = True
         if abs(mouse_dom) < 0.05:
             crossed = True
-        # V24 PERCENTAGE: Move towards 0.00 from Entry
+        # V25 FIX: Move towards 0.00 vs 30% OF Entry, no be 0.30 absolute
         move_towards_zero = entry_pct_1 - abs(mouse_dom)
-        win_grab = move_towards_zero >= WIN_GRAB_MOVE
-        # V24 WEAK: Percentage weaken, not price
+        win_grab_needed = entry_pct_1 * WIN_GRAB_PCT_OF_ENTRY  # e.g. 0.35 * 0.30 = 0.105
+        win_grab = move_towards_zero >= win_grab_needed
+        # V25 WEAK: Percentage weaken
         weakening = False
         weaken_amt = 0
         if PREV_MOUSE_DOM != 0:
@@ -194,16 +194,15 @@ def check_heart(mouse_dom, price):
                     total_gross += (h['entry'] - price) * QTY
                 total_fee += get_fee(h['entry'])
             total_net = total_gross - total_fee
-            # V24: If WIN trigger (CROSS / WEAK / WIN_GRAB) and net >=0.002, na WIN. If only MaxHold/Stuck and net small, na BE.
             is_win_trigger = crossed or weakening or win_grab
             if is_win_trigger and total_net >= 0.002:
                 PAPER_WINS += 1
                 PAPER_PNL += total_net
                 ACCOUNT_BALANCE += total_net
-                print(f"[HANDS {len(HANDS)}x {side}] ✅ WIN @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} MoveToZero {move_towards_zero:.3f} (Entry {entry_pct_1:.3f} -> Now {abs(mouse_dom):.3f}) Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Hands {len(HANDS)} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} DOUBLE WIN! | {get_score_str(price)}", flush=True)
+                print(f"[HANDS {len(HANDS)}x {side}] ✅ WIN @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} (Entry {entry_pct_1:.3f} -> Now {abs(mouse_dom):.3f} = 30% OF Entry) Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Hands {len(HANDS)} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} DOUBLE WIN! Fee Covered! | {get_score_str(price)}", flush=True)
             else:
                 PAPER_BREAKEVEN += 1
-                print(f"[HANDS {len(HANDS)}x {side}] ⏰ BE @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} MoveToZero {move_towards_zero:.3f} MAXHOLD={max_hold} STUCK={price_stuck} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} No Loss | {get_score_str(price)}", flush=True)
+                print(f"[HANDS {len(HANDS)}x {side}] ⏰ BE @ 0.00%! CROSS={crossed} WEAK={weakening} WIN_GRAB={win_grab} MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} MAXHOLD={max_hold} STUCK={price_stuck} Prev {PREV_MOUSE_DOM:.3f} -> Now {mouse_dom:.3f} | Hold {hold1}s Price {price:.1f} Gross ${total_gross:.4f} Fee ${total_fee:.4f} Net ${total_net:.4f} No Loss | {get_score_str(price)}", flush=True)
             place_order_real("Sell" if side == 'BUY' else "Buy", price)
             HANDS.clear()
             PREV_MOUSE_DOM = mouse_dom
@@ -222,7 +221,7 @@ def check_heart(mouse_dom, price):
             HANDS.clear()
             PREV_MOUSE_DOM = mouse_dom
             return
-        print(f"[HANDS {len(HANDS)}x {side}] Hold for 0.00%... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct_1*100:.1f}% MoveToZero {move_towards_zero:.3f}/0.30 Weak {weakening} Weaken {weaken_amt:.3f} Price {price:.1f} Entry {HANDS[0]['entry']:.1f} TP @ 0.00% Hold {hold1}s | {get_score_str(price)}", flush=True)
+        print(f"[HANDS {len(HANDS)}x {side}] Hold for 0.00%... MOUSE {mouse_dom:.3f} Prev {PREV_MOUSE_DOM:.3f} Order% {abs(mouse_dom)*100:.1f}% Entry% {entry_pct_1*100:.1f}% MoveToZero {move_towards_zero:.3f}/{win_grab_needed:.3f} Weak {weakening} Weaken {weaken_amt:.3f} Price {price:.1f} Entry {HANDS[0]['entry']:.1f} TP @ 0.00% Hold {hold1}s | {get_score_str(price)}", flush=True)
         PREV_MOUSE_DOM = mouse_dom
         return
 
@@ -240,7 +239,7 @@ def check_heart(mouse_dom, price):
     fee = get_fee(ENTRY)
     fee_move = fee / QTY
     HANDS.append({'entry': ENTRY, 'id': 2 if direction == 'SELL' else 1, 'enter_time': time.time(), 'breakeven': False, 'side': direction, 'entry_pct': order_pct})
-    print(f"[HAND 1 {direction}] 🔥 ENTER %CHECK PASS @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Order% {order_pct*100:.1f}% >=18% Maker Fee ${fee:.4f} FeeMove ${fee_move:.1f} | TP ALWAYS @ 0.00%, Hand 2 go join if stronger | {get_score_str(price)} | V24 PAPER FIRST", flush=True)
+    print(f"[HAND 1 {direction}] 🔥 ENTER %CHECK PASS @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | MOUSE {mouse_dom:.3f} Order% {order_pct*100:.1f}% >=35% Maker Fee ${fee:.4f} FeeMove ${fee_move:.1f} | TP ALWAYS @ 0.00%, Hand 2 go join if stronger | {get_score_str(price)} | V25 PAPER FIRST", flush=True)
     place_order_real("Buy" if direction == 'BUY' else "Sell", price)
     PREV_MOUSE_DOM = mouse_dom
 
@@ -264,7 +263,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! V24 PERCENTAGE PAPER!", flush=True)
+    print("[EYE] 👁️ Eye don open! V25 PERCENTAGE OF ENTRY PAPER!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -280,7 +279,7 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset
-    print("[WATCHER] Watcher start - V24 0.3s...", flush=True)
+    print("[WATCHER] Watcher start - V25 0.3s...", flush=True)
     while True:
         time.sleep(0.3)
         if time.time() - last_vol_reset > 60:
@@ -295,5 +294,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V24 Heart Bot start! Paper First!", flush=True)
+    print("V25 Heart Bot start! Paper First!", flush=True)
     app.run(host="0.0.0.0", port=10000)
