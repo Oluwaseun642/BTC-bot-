@@ -1,13 +1,18 @@
-# main.py - HEART - V11.4 NO HOLD + BYBIT MIN 0.001 - PAPER MODE
-# Fix: No Max Hold 3mins, No Roof Extra, QTY always 0.001 (Bybit Min), Dynamic = Hands count for $3
-# Smell BUY/SELL, Follow to TP, No Wick Down, Heart Pump = Stay, Heart Stop = Comot Instantly
+# main.py - HEART - V11.5 FULL - NO FLOATING + PROFIT COVER FEES - PAPER MODE
+# Combine all: V11.3 + V11.4 + V11.4.1 + V11.5 Floating Killer
+# - Inside heart only -0.02 to 0.00, Thrice steps, No Wick Down, No Hold
+# - Bybit Min QTY 0.001, Dynamic Hands for $3, Smell BUY/SELL Follow to TP
+# - Auto-Config: Bot set Lev 120x, Isolated, One-Way by itself
+# - Floating Killer: Dom comot from heart = comot instantly, no floating
+# - Profit must cover Fees + Lev Fees: Exp Gross >= 2x Fee, else skip
+# - Heart pump = Stay, Heart stop 10s = Comot, Heart reach 0.00 = Comot Instant Win
 
-import time, os, threading, json
+import time, os, threading, json, hmac, hashlib
 from flask import Flask
 import requests
 import websocket
 
-QTY = 0.001  # Bybit Min, no below this
+QTY = 0.001  # Bybit Min, no below this, no 0.0006 again
 LEV = 120
 MIN_VOL = 400_000
 MIN_CVD = 5_000
@@ -19,8 +24,8 @@ DOM_CRASH = -0.20
 DOM_FOUNDATION_BUY = -0.025
 DOM_FOUNDATION_SELL = 0.025
 MAX_CVD_CRASH = -1_000_000
-# NO HOLD: No MAX_HOLD_SECS, No ROOF_EXTRA. Heart pump = stay, Heart stop = comot
 HEART_STOP_SECS = 10  # If Dom no move toward 0.00 for 10 secs, heart don stop, comot instantly
+FLOATING_KILLER_DOM = 0.03  # If Dom > 0.03, heart don break, kill floating instantly
 
 PAPER_WINS = 0
 PAPER_LOSSES = 0
@@ -41,12 +46,45 @@ LAST_SUMMARY_TIME = 0
 LAST_DOM = 0
 LAST_DOM_MOVE_TIME = time.time()
 
+# V11.4.1 AUTO-CONFIG
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+BYBIT_BASE = "https://api.bybit.com"
+
+def bybit_sign(params, secret):
+    query = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
+    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+
+def auto_config_bybit():
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        print("[AUTO-CONFIG] No API Keys for Paper, skip auto-config, use public only", flush=True)
+        return
+    try:
+        ts = str(int(time.time()*1000))
+        p = {"api_key": BYBIT_API_KEY, "timestamp": ts, "recv_window": 5000, "symbol": "BTCUSDT", "tradeMode": 1}
+        p["sign"] = bybit_sign(p, BYBIT_API_SECRET)
+        r = requests.post(f"{BYBIT_BASE}/v5/account/set-margin-mode", json=p, timeout=10)
+        print(f"[AUTO-CONFIG] Margin Mode Isolated: {r.text[:200]}", flush=True)
+        ts = str(int(time.time()*1000))
+        p2 = {"api_key": BYBIT_API_KEY, "timestamp": ts, "recv_window": 5000, "category": "linear", "symbol": "BTCUSDT", "buyLeverage": "120", "sellLeverage": "120"}
+        p2["sign"] = bybit_sign(p2, BYBIT_API_SECRET)
+        r2 = requests.post(f"{BYBIT_BASE}/v5/position/set-leverage", json=p2, timeout=10)
+        print(f"[AUTO-CONFIG] Leverage 120x: {r2.text[:200]}", flush=True)
+        ts = str(int(time.time()*1000))
+        p3 = {"api_key": BYBIT_API_KEY, "timestamp": ts, "recv_window": 5000, "category": "linear", "coin": "USDT", "mode": 0}
+        p3["sign"] = bybit_sign(p3, BYBIT_API_SECRET)
+        r3 = requests.post(f"{BYBIT_BASE}/v5/position/switch-mode", json=p3, timeout=10)
+        print(f"[AUTO-CONFIG] Position Mode One-Way: {r3.text[:200]}", flush=True)
+        print(f"[AUTO-CONFIG] Done! Lev 120x, Isolated, One-Way, QTY {QTY} - Bot don set am by itself!", flush=True)
+    except Exception as e:
+        print(f"[AUTO-CONFIG] Fail: {e}, bot go retry next deploy", flush=True)
+
 app = Flask(__name__)
 @app.route("/")
 def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
-    return f"Heart Bot PAPER V11.4 NO HOLD - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot PAPER V11.5 NO FLOATING - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -65,6 +103,7 @@ def place_order_paper(side, price):
     print(f"[PAPER] {side} {QTY} @ {price:.1f} - PAPER FILL", flush=True)
 
 def get_fee(entry):
+    # Fee = 0.12% = Taker 0.055% x2 + Funding 0.01% - Cover Lev Fees + Trading Fees
     return entry * QTY * 0.0012
 
 def get_score_str(price):
@@ -107,6 +146,33 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
     if abs(dominance - LAST_DOM) > 0.001:
         LAST_DOM_MOVE_TIME = time.time()
         LAST_DOM = dominance
+
+    # V11.5 FIX: FLOATING KILLER - If Dom don comot from heart > 0.03, kill floating instantly, no hold
+    if len(HANDS) > 0 and abs(dominance) > FLOATING_KILLER_DOM:
+        for hand in HANDS:
+            entry = hand['entry']; hid = hand['id']; side = hand['side']
+            hold = int(time.time() - hand['enter_time'])
+            fee = get_fee(entry)
+            if side == 'BUY':
+                pnl_gross = (price - entry) * QTY
+            else:
+                pnl_gross = (entry - price) * QTY
+            pnl_net = pnl_gross - fee
+            if pnl_net >= 0.01:
+                PAPER_WINS += 1
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot from heart, comot Instant Win, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+            elif pnl_net >= -0.005:
+                PAPER_BREAKEVEN += 1
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot, comot Break-Even, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+            else:
+                PAPER_LOSSES += 1
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot, comot Small Loss, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+            PAPER_PNL += pnl_net
+            ACCOUNT_BALANCE += pnl_net
+            place_order_paper("Sell" if side == 'BUY' else "Buy", price)
+        HANDS.clear()
+        CONFIRM_COUNT = 0
+        return
 
     # NO HOLD: Roof = Instant TP, comot, no hold
     if len(HANDS) > 0 and abs(dominance) < 0.002:
@@ -248,7 +314,11 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
                 place_order_paper("Buy", price)
                 hands_to_remove.append(i)
                 continue
-        print(f"[HAND {hid} {side}] Hold INSIDE heart... Dom {dominance:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s - Heart dey pump, NO HOLD beyond roof, NO WICK DOWN | {get_score_str(price)}", flush=True)
+        # V11.5 FIX: No lie again - If Dom don comot, no print Inside Heart
+        if abs(dominance) > 0.025:
+            print(f"[HAND {hid} {side}] Dom {dominance:.3f} don comot from heart, go comot next check, NO FLOATING | {get_score_str(price)}", flush=True)
+        else:
+            print(f"[HAND {hid} {side}] Hold INSIDE heart... Dom {dominance:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s - Heart dey pump, NO HOLD beyond roof, NO WICK DOWN | {get_score_str(price)}", flush=True)
     for idx in reversed(hands_to_remove):
         HANDS.pop(idx)
         if len(HANDS) == 1:
@@ -269,15 +339,30 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
         return
 
     direction = smell_direction()
+    # V11.5 FIX: Smell must match Dom sign, no mixed hand, no floating
+    # If Dom negative (-0.02), na BUY heart. If Dom positive (+0.02), na SELL heart.
+    if dominance < 0 and direction == "SELL":
+        print(f"[SMELL FIX] SKIP - Smell SELL but Dom {dominance:.3f} na negative (BUY side), mixed hand go cause floating, skip | {get_score_str(price)}", flush=True)
+        return
+    if dominance > 0 and direction == "BUY":
+        print(f"[SMELL FIX] SKIP - Smell BUY but Dom {dominance:.3f} na positive (SELL side), mixed hand go cause floating, skip | {get_score_str(price)}", flush=True)
+        return
+    # Force direction = Dom sign, to avoid floating
+    direction = "BUY" if dominance < 0 else "SELL"
     abs_dom = abs(dominance)
     max_hands = max_hands_for_balance()
+    can_enter = False
+    exp_move_final = 0
+    hand_id = 1
+    reason = ""
     if len(HANDS) == 0:
         if 0.015 < abs_dom < 0.025:
             exp_move = vol_drip * abs_dom * 0.01
             exp_gross = exp_move * QTY
             fee = get_fee(price)
+            # PROFIT COVER FEES: Exp Gross must be >= 2x Fee, else skip, no 0.00 loss
             if exp_gross < fee * 2:
-                print(f"[FEE CHECK] SKIP Hand 1 - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[FEE CHECK] SKIP Hand 1 - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} - Profit no go cover fees, skip | {get_score_str(price)}", flush=True)
                 return
             can_enter = True
             hand_id = 1
@@ -318,7 +403,7 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
         print(f"[CHECK] Dom {dominance:.3f} Abs {abs_dom:.3f} Smell {direction} Vol ${vol_drip:.0f} CVD ${cvd_val:.0f} Pressure {pressure:.2f} Exp {exp_pct:.2f}% Hands {len(HANDS)}/{max_hands} Confirm {CONFIRM_COUNT}/1 - {reason} | {get_score_str(price)}", flush=True)
         if exp_pct < MIN_EXP_PCT:
             CONFIRM_COUNT = 0
-            print(f"[-0.02] SKIP - Exp {exp_pct:.2f}% too small | {get_score_str(price)}", flush=True)
+            print(f"[-0.02] SKIP - Exp {exp_pct:.2f}% too small, profit no go cover fees | {get_score_str(price)}", flush=True)
             return
         must_pass = (vol_drip >= MIN_VOL)
         cvd_pass = abs(cvd_val) >= MIN_CVD
@@ -341,7 +426,7 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             net = exp_move_final * QTY - fee
             margin = ENTRY * QTY / LEV
             pct = (net / margin * 100) if margin else 0
-            print(f"[HAND {hand_id} {direction}] 🔥 ENTER INSIDE HEART @ {ENTRY:.1f} QTY {QTY} (Bybit Min) LEV {LEV}x | Vol ${vol_drip:.0f} | Dom {dominance:.3f} Smell {direction} Follow to TP | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} Only foundation break, NO WICK DOWN | NO HOLD, Heart pump = Stay, Heart stop = Comot | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V11.4 NO HOLD - PAPER", flush=True)
+            print(f"[HAND {hand_id} {direction}] 🔥 ENTER INSIDE HEART @ {ENTRY:.1f} QTY {QTY} (Bybit Min) LEV {LEV}x | Vol ${vol_drip:.0f} | Dom {dominance:.3f} Smell {direction} Follow to TP | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} Only foundation break, NO WICK DOWN | NO HOLD, Heart pump = Stay, Heart stop = Comot, NO FLOATING | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V11.5 NO FLOATING - PAPER", flush=True)
             place_order_paper("Buy" if direction == 'BUY' else "Sell", price)
         else:
             CONFIRM_COUNT = 0
@@ -370,7 +455,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER V11.4 NO HOLD BYBIT MIN!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V11.5 NO FLOATING!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT", "orderbook.1.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -386,7 +471,7 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset, cvd
-    print("[WATCHER] Watcher start - V11.4 NO HOLD...", flush=True)
+    print("[WATCHER] Watcher start - V11.5 NO FLOATING...", flush=True)
     while True:
         time.sleep(2)
         if time.time() - last_vol_reset > 60:
@@ -400,8 +485,9 @@ def heart_watcher():
                 print(f"[WATCHER] No heart yet - Dom {dominance:.3f} Vol ${total_vol_1min:.0f} Price {last_price:.1f} | {get_score_str(last_price)}", flush=True)
 
 if __name__ == "__main__":
+    auto_config_bybit()
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V11.4 NO HOLD Heart Bot start! Paper!", flush=True)
+    print("V11.5 NO FLOATING Heart Bot start! Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
