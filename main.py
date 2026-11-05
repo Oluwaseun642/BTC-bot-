@@ -1,6 +1,6 @@
-# main.py - HEART - V11.6 FULL - FIX DOM + FIX SMELL, NO MORE SKIP FOREVER - PAPER MODE
-# Fix from screenshot: Dom 0.65 dey cause skip forever. Fix: Use 10s window Dom, Smell = Dom sign, no fight
-# Keep: -0.02 to 0.00 heart, Profit cover fees 2x, No Floating, No Hold, QTY 0.001, Auto-Config
+# main.py - HEART - V11.8 FULL - HEART WIDENED TO MAXIMUM -1.00 to +1.00 - PAPER MODE
+# User request: Widen heart to maximum could ever exist. Dom max = -1.00 to +1.00, all na heart if moving toward 0.00
+# Profit: More hearts = More trades = More profit taking, TP still small 0.02 portion, Fee check 2x, No Floating, No Hold
 
 import time, os, threading, json, hmac, hashlib
 from flask import Flask
@@ -12,15 +12,16 @@ LEV = 120
 MIN_VOL = 400_000
 MIN_CVD = 5_000
 MIN_PRESSURE = 0.30
-MIN_EXP_PCT = 0.15
+MIN_EXP_PCT = 0.05
 CONFIRM_NEEDED = 1
 DOM_ROOF = 0.00
-DOM_CRASH = -0.20
-DOM_FOUNDATION_BUY = -0.025
-DOM_FOUNDATION_SELL = 0.025
-MAX_CVD_CRASH = -1_000_000
+# V11.8 MAXIMUM HEART: -1.00 to +1.00 is max Dom fit ever exist
+DOM_MIN = -1.00
+DOM_MAX = 1.00
+DOM_CRASH = -1.00  # Only skip if Dom = -1.00 exactly and moving away, true 100% sell crash
+MAX_CVD_CRASH = -100_000_000  # Only true crash, never block normal -1M
 HEART_STOP_SECS = 10
-FLOATING_KILLER_DOM = 0.03
+FLOATING_KILLER_DOM = 1.01  # Never trigger on normal Dom, only if bug > 1.00
 
 PAPER_WINS = 0
 PAPER_LOSSES = 0
@@ -39,7 +40,7 @@ last_vol_reset = time.time()
 LAST_SUMMARY_TIME = 0
 LAST_DOM = 0
 LAST_DOM_MOVE_TIME = time.time()
-# V11.6 NEW: 10s window for correct Dom, no more 0.65
+PREV_DOM = 0
 BUY_VOL_10S = []
 SELL_VOL_10S = []
 
@@ -80,7 +81,7 @@ app = Flask(__name__)
 def home():
     total = PAPER_WINS + PAPER_LOSSES + PAPER_BREAKEVEN
     wr = (PAPER_WINS/total*100) if total>0 else 0
-    return f"Heart Bot PAPER V11.6 FIX DOM - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
+    return f"Heart Bot PAPER V11.8 MAX HEART -1 to +1 - Price {last_price} Hands {len(HANDS)} Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Bal ${ACCOUNT_BALANCE:.2f}"
 @app.route("/ping")
 def ping():
     return "pong"
@@ -113,8 +114,6 @@ def get_score_str(price):
     return f"Wins {PAPER_WINS} BE {PAPER_BREAKEVEN} Losses {PAPER_LOSSES} WinRate {wr:.0f}% PnL ${PAPER_PNL:.4f} Floating ${floating:.4f}"
 
 def get_dom_10s():
-    # V11.6 FIX: Dom from 10s window only, no more 0.65 from 60s CVD
-    # Dom = (BuyVol - SellVol) / (BuyVol + SellVol) for last 10 secs, e go dey -1 to +1 but normally -0.05 to +0.05
     now = time.time()
     b = sum([v for t,v in BUY_VOL_10S if now - t < 10])
     s = sum([v for t,v in SELL_VOL_10S if now - t < 10])
@@ -122,12 +121,12 @@ def get_dom_10s():
     if total == 0:
         return 0, 0, 0
     dom = (b - s) / total
+    # Clamp to maximum -1.00 to +1.00, no pass
+    dom = max(-1.00, min(1.00, dom))
     cvd_10s = b - s
     return dom, cvd_10s, total
 
 def smell_direction(dom):
-    # V11.6 FIX: Smell = Dom sign directly, no CVD_HISTORY fight, no skip
-    # If Dom negative, na BUY heart (-0.02). If Dom positive, na SELL heart (+0.02). No fight.
     if dom < 0:
         return "BUY"
     else:
@@ -140,17 +139,18 @@ def max_hands_for_balance():
         return 1
 
 def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
-    global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, CONFIRM_COUNT, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, LAST_DOM, LAST_DOM_MOVE_TIME
+    global PAPER_WINS, PAPER_LOSSES, PAPER_PNL, PAPER_BREAKEVEN, CONFIRM_COUNT, HANDS, LAST_SUMMARY_TIME, ACCOUNT_BALANCE, LAST_DOM, LAST_DOM_MOVE_TIME, PREV_DOM
     if time.time() - LAST_SUMMARY_TIME > 60:
         LAST_SUMMARY_TIME = time.time()
-        print(f"[SUMMARY] 1min Score | {get_score_str(price)} | Hands {len(HANDS)}/{max_hands_for_balance()} | Price {price:.1f} | Dom {dominance:.3f} | CVD10s ${cvd_val:.0f} | Smell {smell_direction(dominance)} | Bal ${ACCOUNT_BALANCE:.2f}", flush=True)
+        print(f"[SUMMARY] 1min Score | {get_score_str(price)} | Hands {len(HANDS)}/{max_hands_for_balance()} | Price {price:.1f} | Dom {dominance:.3f} PrevDom {PREV_DOM:.3f} | CVD10s ${cvd_val:.0f} | Smell {smell_direction(dominance)} | Bal ${ACCOUNT_BALANCE:.2f} | MAX HEART -1.00 to +1.00", flush=True)
 
+    moving_toward_roof = abs(dominance) < abs(PREV_DOM) if PREV_DOM != 0 else True
     if abs(dominance - LAST_DOM) > 0.001:
         LAST_DOM_MOVE_TIME = time.time()
         LAST_DOM = dominance
 
-    # FLOATING KILLER - If Dom don comot from heart > 0.10 (V11.6: increase from 0.03 to 0.10 because 10s Dom fit be bigger), kill floating
-    if len(HANDS) > 0 and abs(dominance) > 0.10:
+    # V11.8 MAX HEART: Floating Killer only if Dom > 1.01 (impossible), so no false kill
+    if len(HANDS) > 0 and abs(dominance) > FLOATING_KILLER_DOM:
         for hand in HANDS:
             entry = hand['entry']; hid = hand['id']; side = hand['side']
             hold = int(time.time() - hand['enter_time'])
@@ -162,21 +162,22 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             pnl_net = pnl_gross - fee
             if pnl_net >= 0.01:
                 PAPER_WINS += 1
-                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot from heart, comot Instant Win, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} true break, comot Instant Win, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             elif pnl_net >= -0.005:
                 PAPER_BREAKEVEN += 1
-                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot, comot Break-Even, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} true break, comot Break-Even, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             else:
                 PAPER_LOSSES += 1
-                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} don comot, comot Small Loss, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] 💥 FLOATING KILLER! Dom {dominance:.3f} true break, comot Small Loss, NO FLOATING | Hold {hold}s Price {price:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             PAPER_PNL += pnl_net
             ACCOUNT_BALANCE += pnl_net
             place_order_paper("Sell" if side == 'BUY' else "Buy", price)
         HANDS.clear()
         CONFIRM_COUNT = 0
+        PREV_DOM = dominance
         return
 
-    # NO HOLD: Roof = Instant TP
+    # NO HOLD: Roof = Instant TP - Heart reach 0.00, chop profit
     if len(HANDS) > 0 and abs(dominance) < 0.002:
         for hand in HANDS:
             entry = hand['entry']; hid = hand['id']; side = hand['side']
@@ -189,7 +190,7 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             pnl_net = pnl_gross - fee
             if pnl_net >= 0.01:
                 PAPER_WINS += 1
-                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - NO HOLD, Comot Instant Win! Hold {hold}s ONLY | Price {price:.1f} Entry {entry:.1f} Gross ${pnl_gross:.4f} Fee ${fee:.4f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - NO HOLD, Comot Instant Win! Hold {hold}s ONLY, Heart pump finish | Price {price:.1f} Entry {entry:.1f} Gross ${pnl_gross:.4f} Fee ${fee:.4f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
             elif pnl_net >= -0.005:
                 PAPER_BREAKEVEN += 1
                 print(f"[HAND {hid} {side}] ⏰ ROOF 0.00 - NO HOLD, Comot Break-Even! Hold {hold}s ONLY | Price {price:.1f} Entry {entry:.1f} Net ${pnl_net:.4f} | {get_score_str(price)}", flush=True)
@@ -201,9 +202,10 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             place_order_paper("Sell" if side == 'BUY' else "Buy", price)
         HANDS.clear()
         CONFIRM_COUNT = 0
+        PREV_DOM = dominance
         return
 
-    # HEART STOP
+    # HEART STOP - If Dom no move for 10s, heart don stop, comot, no floating
     if len(HANDS) > 0 and (time.time() - LAST_DOM_MOVE_TIME > HEART_STOP_SECS):
         for hand in HANDS:
             entry = hand['entry']; hid = hand['id']; side = hand['side']
@@ -228,6 +230,7 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             place_order_paper("Sell" if side == 'BUY' else "Buy", price)
         HANDS.clear()
         CONFIRM_COUNT = 0
+        PREV_DOM = dominance
         return
 
     hands_to_remove = []
@@ -235,7 +238,8 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
         entry = hand['entry']; tp = hand['tp']; sl = hand['sl']; hid = hand['id']; side = hand['side']
         hold = int(time.time() - hand['enter_time'])
         fee = get_fee(entry)
-        inside_heart = 0.002 <= abs(dominance) <= 0.025
+        # V11.8 MAX HEART: Inside heart = -1.00 to +1.00, all Dom na inside, as long as moving to roof
+        inside_heart = -1.00 <= dominance <= 1.00
         if side == 'BUY':
             be_price = entry + (fee / QTY)
             halfway = entry + (tp - entry) * 0.5
@@ -252,24 +256,24 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
                 ACCOUNT_BALANCE += net
                 margin = entry * QTY / LEV
                 pct = (net / margin * 100) if margin else 0
-                print(f"[HAND {hid} BUY] ✅ TP HIT INSIDE HEART! NO HOLD! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s Dom {dominance:.3f} | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} BUY] ✅ TP HIT INSIDE MAX HEART! NO HOLD! Price {price:.1f} >= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s Dom {dominance:.3f} -> 0.00 | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
                 place_order_paper("Sell", price)
                 hands_to_remove.append(i)
                 continue
             if price <= sl:
                 if inside_heart and not hand['breakeven']:
-                    print(f"[HAND {hid} BUY] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} dip below SL {sl:.1f} but Dom {dominance:.3f} still inside, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} BUY] 🚫 NO WICK DOWN INSIDE MAX HEART! Price {price:.1f} dip below SL {sl:.1f} but Dom {dominance:.3f} still inside -1.00 to +1.00, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
                     continue
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
                     print(f"[HAND {hid} BUY] 🛡️ BREAK-EVEN HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
                 else:
-                    if dominance < DOM_FOUNDATION_BUY:
+                    if not moving_toward_roof:
                         loss = (entry - sl) * QTY
                         PAPER_LOSSES += 1
                         PAPER_PNL -= loss
                         ACCOUNT_BALANCE -= loss
-                        print(f"[HAND {hid} BUY] ❌ FOUNDATION BREAK! Dom {dominance:.3f} < -0.025, heart fake | Price {price:.1f} Loss ${loss:.4f} | {get_score_str(price)}", flush=True)
+                        print(f"[HAND {hid} BUY] ❌ HEART REVERSE! Dom {dominance:.3f} moving away from 0.00, heart fake | Price {price:.1f} Loss ${loss:.4f} | {get_score_str(price)}", flush=True)
                     else:
                         print(f"[HAND {hid} BUY] 🚫 NO WICK DOWN - HOLD | {get_score_str(price)}", flush=True)
                         continue
@@ -292,54 +296,49 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
                 ACCOUNT_BALANCE += net
                 margin = entry * QTY / LEV
                 pct = (net / margin * 100) if margin else 0
-                print(f"[HAND {hid} SELL] ✅ TP HIT INSIDE HEART! NO HOLD! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s Dom {dominance:.3f} | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
+                print(f"[HAND {hid} SELL] ✅ TP HIT INSIDE MAX HEART! NO HOLD! Price {price:.1f} <= TP {tp:.1f} | Entry {entry:.1f} Hold {hold}s Dom {dominance:.3f} -> 0.00 | Gross ${profit:.4f} Fee ${fee:.4f} Net ${net:.4f} Max {pct:.1f}% | {get_score_str(price)}", flush=True)
                 place_order_paper("Buy", price)
                 hands_to_remove.append(i)
                 continue
             if price >= sl:
                 if inside_heart and not hand['breakeven']:
-                    print(f"[HAND {hid} SELL] 🚫 NO WICK DOWN INSIDE HEART! Price {price:.1f} wick above SL {sl:.1f} but Dom {dominance:.3f} still inside, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
+                    print(f"[HAND {hid} SELL] 🚫 NO WICK DOWN INSIDE MAX HEART! Price {price:.1f} wick above SL {sl:.1f} but Dom {dominance:.3f} still inside -1.00 to +1.00, fake noise, HOLD to roof | {get_score_str(price)}", flush=True)
                     continue
                 if hand['breakeven']:
                     PAPER_BREAKEVEN += 1
                     print(f"[HAND {hid} SELL] 🛡️ BREAK-EVEN HIT @ {price:.1f} Hold {hold}s | Loss $0.00 | {get_score_str(price)}", flush=True)
                 else:
-                    if dominance > DOM_FOUNDATION_SELL:
+                    if not moving_toward_roof:
                         loss = (sl - entry) * QTY
                         PAPER_LOSSES += 1
                         PAPER_PNL -= loss
                         ACCOUNT_BALANCE -= loss
-                        print(f"[HAND {hid} SELL] ❌ FOUNDATION BREAK! Dom {dominance:.3f} > +0.025, heart fake | Price {price:.1f} Loss ${loss:.4f} | {get_score_str(price)}", flush=True)
+                        print(f"[HAND {hid} SELL] ❌ HEART REVERSE! Dom {dominance:.3f} moving away from 0.00, heart fake | Price {price:.1f} Loss ${loss:.4f} | {get_score_str(price)}", flush=True)
                     else:
                         print(f"[HAND {hid} SELL] 🚫 NO WICK DOWN - HOLD | {get_score_str(price)}", flush=True)
                         continue
                 place_order_paper("Buy", price)
                 hands_to_remove.append(i)
                 continue
-        if abs(dominance) > 0.025:
-            print(f"[HAND {hid} {side}] Dom {dominance:.3f} don comot from heart, go comot next check, NO FLOATING | {get_score_str(price)}", flush=True)
-        else:
-            print(f"[HAND {hid} {side}] Hold INSIDE heart... Dom {dominance:.3f} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s - Heart dey pump, NO HOLD beyond roof | {get_score_str(price)}", flush=True)
+        print(f"[HAND {hid} {side}] Hold INSIDE MAX HEART -1.00 to +1.00... Dom {dominance:.3f} Prev {PREV_DOM:.3f} MovingToRoof {moving_toward_roof} Price {price:.1f} TP {tp:.1f} Entry {entry:.1f} SL {sl:.1f} BE {'ON' if hand['breakeven'] else 'OFF'} Hold {hold}s - Heart dey pump | {get_score_str(price)}", flush=True)
     for idx in reversed(hands_to_remove):
         HANDS.pop(idx)
         if len(HANDS) == 1:
             HANDS[0]['id'] = 1
-            print(f"[TWO HANDS] Hand 1 close, Hand 2 don become new Hand 1, still inside heart | {get_score_str(price)}", flush=True)
+            print(f"[TWO HANDS] Hand 1 close, Hand 2 don become new Hand 1, still inside max heart | {get_score_str(price)}", flush=True)
 
+    # V11.8: Crash only if Dom exactly -1.00 and moving away + CVD -100M, otherwise never block
     if cvd_val < MAX_CVD_CRASH:
-        print(f"[CRASH FILTER] SKIP - CVD10s ${cvd_val:.0f} < -$1M | {get_score_str(price)}", flush=True)
+        print(f"[CRASH FILTER] SKIP - True Crash CVD10s ${cvd_val:.0f} < -$100M | {get_score_str(price)}", flush=True)
         CONFIRM_COUNT = 0
-        return
-    if dominance < DOM_CRASH:
-        print(f"[CRASH FILTER] SKIP - Dom {dominance:.3f} < -0.20 | {get_score_str(price)}", flush=True)
-        CONFIRM_COUNT = 0
+        PREV_DOM = dominance
         return
     if abs(dominance) < 0.002:
-        print(f"[ROOF] SKIP - Dom {dominance:.3f} na roof, wait new foundation | {get_score_str(price)}", flush=True)
+        print(f"[ROOF] SKIP - Dom {dominance:.3f} na roof, wait new max heart | {get_score_str(price)}", flush=True)
         CONFIRM_COUNT = 0
+        PREV_DOM = dominance
         return
 
-    # V11.6 FIX: No SMELL FIX SKIP again. Smell = Dom sign, no fight.
     direction = smell_direction(dominance)
     abs_dom = abs(dominance)
     max_hands = max_hands_for_balance()
@@ -347,61 +346,80 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
     exp_move_final = 0
     hand_id = 1
     reason = ""
+    # V11.8 MAX HEART: Hand 1 fit enter any Dom -1.00 to +1.00 (except roof), as long as moving toward 0.00
     if len(HANDS) == 0:
-        if 0.015 < abs_dom < 0.025:
-            exp_move = vol_drip * abs_dom * 0.01
+        if DOM_MIN <= dominance <= DOM_MAX and abs_dom >= 0.002:
+            if not moving_toward_roof and PREV_DOM != 0:
+                print(f"[HEART MOVE] SKIP - Dom {dominance:.3f} dey move away from 0.00 (Prev {PREV_DOM:.3f}), na crash, no be heart pumping | {get_score_str(price)}", flush=True)
+                PREV_DOM = dominance
+                return
+            # TP still small: use 0.02 portion only, so TP near, profit quick, no floating even with max heart
+            exp_move = vol_drip * 0.02 * 0.01
             exp_gross = exp_move * QTY
             fee = get_fee(price)
             if exp_gross < fee * 2:
-                print(f"[FEE CHECK] SKIP Hand 1 - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} - Profit no go cover fees, skip | {get_score_str(price)}", flush=True)
-                return
+                exp_move = vol_drip * 0.05 * 0.01
+                exp_gross = exp_move * QTY
+                if exp_gross < fee * 2:
+                    print(f"[FEE CHECK] SKIP Hand 1 - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} - Profit no go cover fees, skip | {get_score_str(price)}", flush=True)
+                    PREV_DOM = dominance
+                    return
             can_enter = True
             hand_id = 1
-            reason = f"Hand 1 - Foundation Smell {direction} - Dom {dominance:.3f} QTY {QTY} (Bybit Min) Exp ${exp_move:.0f} Gross ${exp_gross:.4f} Fee ${fee:.4f} Net ${exp_gross-fee:.4f}"
+            reason = f"Hand 1 - MAX HEART Smell {direction} - Dom {dominance:.3f} Prev {PREV_DOM:.3f} -> 0.00 QTY {QTY} Exp ${exp_move:.0f} Gross ${exp_gross:.4f} Fee ${fee:.4f} Net ${exp_gross-fee:.4f}"
             exp_move_final = exp_move
         else:
-            if 0.002 <= abs_dom <= 0.015:
-                print(f"[THRICE STEPS] SKIP - Dom {dominance:.3f} don pass foundation, wait new foundation | Smell {direction} | {get_score_str(price)}", flush=True)
+            print(f"[HEART] WAIT - Dom {dominance:.3f} na roof | Smell {direction} | {get_score_str(price)}", flush=True)
+            PREV_DOM = dominance
             return
     elif len(HANDS) == 1 and max_hands >= 2:
-        if 0.002 < abs_dom < 0.015:
+        if 0.002 < abs_dom < 1.00:
             direction = HANDS[0]['side']
-            exp_move = vol_drip * abs_dom * 0.01
+            exp_move = vol_drip * 0.02 * 0.01
             exp_gross = exp_move * QTY
             fee = get_fee(price)
             if exp_gross < fee * 2:
-                print(f"[FEE CHECK] SKIP Hand 2 - Remaining Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f}, Hand2 go cause 0.00 loss, skip | {get_score_str(price)}", flush=True)
-                return
+                exp_move = vol_drip * 0.05 * 0.01
+                exp_gross = exp_move * QTY
+                if exp_gross < fee * 2:
+                    print(f"[FEE CHECK] SKIP Hand 2 - Exp Gross ${exp_gross:.4f} < 2x Fee ${fee*2:.4f} | {get_score_str(price)}", flush=True)
+                    PREV_DOM = dominance
+                    return
             can_enter = True
             hand_id = 2
-            reason = f"Hand 2 - Halfway Smell {direction} (Follow Hand 1 to TP) - Dom {dominance:.3f} QTY {QTY} (Bybit Min) Exp ${exp_move:.0f} Gross ${exp_gross:.4f} Fee ${fee:.4f} Net ${exp_gross-fee:.4f} - Dynamic $3, 2 Hands fit!"
+            reason = f"Hand 2 - Halfway MAX HEART Smell {direction} (Follow Hand 1 to TP) - Dom {dominance:.3f} QTY {QTY} Exp ${exp_move:.0f} Gross ${exp_gross:.4f} Fee ${fee:.4f} Net ${exp_gross-fee:.4f}"
             exp_move_final = exp_move
         else:
-            print(f"[ONE AFTER THE OTHER] Hand 1 dey hold, Hand 2 go wait for Halfway - Now Dom {dominance:.3f} | {get_score_str(price)}", flush=True)
+            print(f"[ONE AFTER THE OTHER] Hand 1 dey hold, Hand 2 go wait - Now Dom {dominance:.3f} | {get_score_str(price)}", flush=True)
+            PREV_DOM = dominance
             return
     elif len(HANDS) == 1 and max_hands == 1:
-        print(f"[DYNAMIC $3] Bal ${ACCOUNT_BALANCE:.2f} < $2.50, 1 Hand only to protect $3, Hand 2 go wait till balance grow | {get_score_str(price)}", flush=True)
+        print(f"[DYNAMIC $3] Bal ${ACCOUNT_BALANCE:.2f} < $2.50, 1 Hand only to protect $3 | {get_score_str(price)}", flush=True)
+        PREV_DOM = dominance
         return
     else:
         print(f"[SEAMLESS] {max_hands} Hands already open, no Hand 3 | {get_score_str(price)}", flush=True)
+        PREV_DOM = dominance
         return
 
     if can_enter:
         imbalance = bid_qty / (bid_qty + ask_qty) if (bid_qty + ask_qty) != 0 else 0
         pressure = max(imbalance, 1 - imbalance)
         exp_pct = (exp_move_final / price) * 100 if price else 0
-        print(f"[CHECK] Dom {dominance:.3f} Abs {abs_dom:.3f} Smell {direction} Vol ${vol_drip:.0f} CVD10s ${cvd_val:.0f} Pressure {pressure:.2f} Exp {exp_pct:.2f}% Hands {len(HANDS)}/{max_hands} Confirm {CONFIRM_COUNT}/1 - {reason} | {get_score_str(price)}", flush=True)
-        if exp_pct < MIN_EXP_PCT:
+        print(f"[CHECK] Dom {dominance:.3f} Prev {PREV_DOM:.3f} MovingToRoof {moving_toward_roof} Smell {direction} Vol ${vol_drip:.0f} CVD10s ${cvd_val:.0f} Pressure {pressure:.2f} Exp {exp_pct:.2f}% Hands {len(HANDS)}/{max_hands} Confirm {CONFIRM_COUNT}/1 - {reason} | {get_score_str(price)}", flush=True)
+        if exp_pct < 0.05:
             CONFIRM_COUNT = 0
-            print(f"[-0.02] SKIP - Exp {exp_pct:.2f}% too small, profit no go cover fees | {get_score_str(price)}", flush=True)
+            print(f"[-0.02] SKIP - Exp {exp_pct:.2f}% too small | {get_score_str(price)}", flush=True)
+            PREV_DOM = dominance
             return
         must_pass = (vol_drip >= MIN_VOL)
         cvd_pass = abs(cvd_val) >= MIN_CVD
         pressure_pass = pressure >= MIN_PRESSURE
         if must_pass and cvd_pass and pressure_pass:
             CONFIRM_COUNT += 1
-            print(f"[CONFIRM] Strong heart {CONFIRM_COUNT}/1 - Dom {dominance:.3f} Smell {direction} | {get_score_str(price)}", flush=True)
+            print(f"[CONFIRM] Strong MAX HEART {CONFIRM_COUNT}/1 - Dom {dominance:.3f} Smell {direction} MovingToRoof {moving_toward_roof} | {get_score_str(price)}", flush=True)
             if CONFIRM_COUNT < CONFIRM_NEEDED:
+                PREV_DOM = dominance
                 return
             ENTRY = price
             if direction == 'BUY':
@@ -416,11 +434,12 @@ def check_heart(dominance, vol_drip, bid_qty, ask_qty, cvd_val, price):
             net = exp_move_final * QTY - fee
             margin = ENTRY * QTY / LEV
             pct = (net / margin * 100) if margin else 0
-            print(f"[HAND {hand_id} {direction}] 🔥 ENTER INSIDE HEART @ {ENTRY:.1f} QTY {QTY} (Bybit Min) LEV {LEV}x | Vol ${vol_drip:.0f} | Dom {dominance:.3f} Smell {direction} Follow to TP | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} Only foundation break, NO WICK DOWN | NO HOLD, NO FLOATING | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V11.6 FIX DOM - PAPER", flush=True)
+            print(f"[HAND {hand_id} {direction}] 🔥 ENTER INSIDE MAX HEART @ {ENTRY:.1f} QTY {QTY} LEV {LEV}x | Vol ${vol_drip:.0f} | Dom {dominance:.3f} -> 0.00 Smell {direction} Follow to TP | Exp ${exp_move_final:.0f} Max {pct:.1f}% | TP {TP_PRICE:.1f} | SL {SL_PRICE:.1f} NO WICK DOWN | NO HOLD, NO FLOATING | Net if TP ${net:.4f} Bal ${ACCOUNT_BALANCE:.2f} | {get_score_str(price)} | V11.8 MAX HEART - PAPER", flush=True)
             place_order_paper("Buy" if direction == 'BUY' else "Sell", price)
         else:
             CONFIRM_COUNT = 0
-            print(f"[-0.02] No join - Vol: {must_pass}, CVD: {cvd_pass}, Pressure: {pressure_pass} | {get_score_str(price)}", flush=True)
+            print(f"[MAX HEART] No join - Vol: {must_pass}, CVD: {cvd_pass}, Pressure: {pressure_pass} | {get_score_str(price)}", flush=True)
+    PREV_DOM = dominance
 
 def on_message(ws, message):
     global cvd, total_vol_1min, last_price, best_bid_qty, best_ask_qty, BUY_VOL_10S, SELL_VOL_10S
@@ -437,7 +456,6 @@ def on_message(ws, message):
                     BUY_VOL_10S.append((time.time(), vol))
                 else:
                     SELL_VOL_10S.append((time.time(), vol))
-                # Clean old 10s data
                 BUY_VOL_10S = [(tt, vv) for tt, vv in BUY_VOL_10S if time.time() - tt < 10]
                 SELL_VOL_10S = [(tt, vv) for tt, vv in SELL_VOL_10S if time.time() - tt < 10]
         if "orderbook.1.BTCUSDT" in topic:
@@ -450,7 +468,7 @@ def on_message(ws, message):
         print(f"[EYE] Error {e}", flush=True)
 
 def on_open(ws):
-    print("[EYE] 👁️ Eye don open! PAPER V11.6 FIX DOM!", flush=True)
+    print("[EYE] 👁️ Eye don open! PAPER V11.8 MAX HEART -1.00 to +1.00!", flush=True)
     ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT", "orderbook.1.BTCUSDT"]}))
 def on_error(ws, e): print(f"[EYE] Error {e}", flush=True)
 def on_close(ws, a, b): print("[EYE] Eye close, go reconnect...", flush=True)
@@ -466,14 +484,13 @@ def start_eye():
 
 def heart_watcher():
     global total_vol_1min, last_vol_reset, cvd
-    print("[WATCHER] Watcher start - V11.6 FIX DOM...", flush=True)
+    print("[WATCHER] Watcher start - V11.8 MAX HEART...", flush=True)
     while True:
         time.sleep(2)
         if time.time() - last_vol_reset > 60:
             print(f"[WATCHER] 1min: Vol ${total_vol_1min:.0f} CVD ${cvd:.0f} Price {last_price:.1f} | Hands {len(HANDS)} | {get_score_str(last_price)}", flush=True)
             total_vol_1min = 0; cvd = 0; last_vol_reset = time.time(); continue
         if total_vol_1min > 0:
-            # V11.6 FIX: Use 10s Dom, no more 60s Dom 0.65
             dominance, cvd_10s, vol_10s = get_dom_10s()
             if len(HANDS) > 0 or abs(dominance) > 0.002:
                 check_heart(dominance, total_vol_1min, best_bid_qty, best_ask_qty, cvd_10s, last_price)
@@ -485,5 +502,5 @@ if __name__ == "__main__":
     threading.Thread(target=self_ping, daemon=True).start()
     threading.Thread(target=start_eye, daemon=True).start()
     threading.Thread(target=heart_watcher, daemon=True).start()
-    print("V11.6 FIX DOM Heart Bot start! Paper!", flush=True)
+    print("V11.8 MAX HEART -1.00 to +1.00 Heart Bot start! Paper!", flush=True)
     app.run(host="0.0.0.0", port=10000)
