@@ -1,5 +1,5 @@
-# V29.7 ONLY BE WITH PROFIT - FOR REAL $2.20 BYBIT - NO MORE BE LOSS
-# RULE: NO BE at Entry. Only BE when Best +$4.00, SL to Entry +$3.50 = Net +$0.03 profit after real fee. Else WIN or LOSS.
+# V29.8 BALANCED - FOR REAL $2.20 BYBIT - FIX V29.7 MISTAKE - SL WIDER, BE 2-STEP BUT NO BIG LOSS
+# FIX: SL $0.80 -> $1.50 (noise no go kill us), BE Step1 +$1.20 -> Entry +$0.30 = -$0.18 small, BE Step2 +$4.00 -> +$3.50 = +$0.03 profit, STOP $1.50 -> $0.80
 import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -18,17 +18,15 @@ MIN_WHALE_BTC = 0.30
 MIN_WICK_USD = 12.0
 TP_WICK_PCT = 0.50
 SLIPPAGE_USD = 0.5
-LOSS_CUT_USD = 0.80
-# V29.7 ONLY BE WITH PROFIT
-BE_TRIGGER_USD = 4.00  # Only BE when price don move +$4.00
-BE_LOCK_USD = 3.50    # SL to Entry + $3.50 = Gross $0.28 - Fee $0.25 = +$0.03 profit
-TIME_BE_SEC = 0.5
-TIME_BE_MIN = 0.30
+LOSS_CUT_USD = 1.50
+BE1_TRIGGER = 1.20
+BE1_LOCK = 0.30
+BE2_TRIGGER = 4.00
+BE2_LOCK = 3.50
 MAX_HOLD_SEC = 3
 MIN_NET_WIN = 0.15
-MIN_BALANCE_STOP = 1.50
+MIN_BALANCE_STOP = 0.80
 REAL_FEE_PER_TRADE = 0.18
-REAL_BE_COST = 0.25
 REAL_LATENCY_SEC = 0.3
 
 balance = BASE_BALANCE
@@ -68,7 +66,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER-V29.7-BE-PROFIT"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V29.8-BALANCED"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -195,9 +193,10 @@ def place_stealth_trio(side, entry_price, tp_price, sl_price, qty):
 def run_alive_trade(side, entry_price, tp_price, sl_price):
     start = time.time()
     best_move = 0.0
-    be_profit_active = False
-    be_sl = sl_price
-    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP 50% ${tp_price:.1f} SL ${sl_price:.1f} | ONLY BE WITH PROFIT: If Best +${BE_TRIGGER_USD} -> SL to Entry +${BE_LOCK_USD} = +$0.03 profit | NO BE at Entry", flush=True)
+    be1 = False
+    be2 = False
+    current_sl = sl_price
+    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP ${tp_price:.1f} SL ${sl_price:.1f} | BE1 +${BE1_TRIGGER} -> +${BE1_LOCK} (-$0.18) | BE2 +${BE2_TRIGGER} -> +${BE2_LOCK} (+$0.03) | SL Wider $1.50", flush=True)
     while True:
         elapsed = time.time() - start
         live = get_live_price()
@@ -206,38 +205,38 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
             continue
         cur_move = (live - entry_price) if side == "Buy" else (entry_price - live)
         if cur_move > best_move: best_move = cur_move
-        # V29.7: ONLY BE WITH PROFIT - No BE at +$0.50, No BE at +$1.50
-        if not be_profit_active and best_move >= BE_TRIGGER_USD:
-            be_profit_active = True
-            be_sl = entry_price + BE_LOCK_USD if side == "Buy" else entry_price - BE_LOCK_USD
-            print(f"[BE-PROFIT-ACTIVE] {side} Best +${best_move:.2f} - SL moved to ${be_sl:.1f} (Entry +${BE_LOCK_USD}) = Net +$0.03 profit locked, NO LOSS AGAIN", flush=True)
-        # TP check
-        if side == "Buy" and live >= tp_price: return ("WIN", cur_move, elapsed, live, be_profit_active)
-        if side == "Sell" and live <= tp_price: return ("WIN", cur_move, elapsed, live, be_profit_active)
-        # BE-PROFIT hit
-        if be_profit_active:
-            if side == "Buy" and live <= be_sl:
-                return ("BE-PROFIT", BE_LOCK_USD, elapsed, live, be_profit_active)
-            if side == "Sell" and live >= be_sl:
-                return ("BE-PROFIT", BE_LOCK_USD, elapsed, live, be_profit_active)
-        # Normal LOSS - only if BE-PROFIT never activate
-        if not be_profit_active and cur_move <= -LOSS_CUT_USD:
-            return ("LOSS", cur_move, elapsed, live, be_profit_active)
+        if not be1 and best_move >= BE1_TRIGGER:
+            be1 = True
+            current_sl = entry_price + BE1_LOCK if side == "Buy" else entry_price - BE1_LOCK
+            print(f"[BE1-SMALL] {side} Best +${best_move:.2f} - SL to ${current_sl:.1f} (Entry +${BE1_LOCK}) = -$0.18 small, save from -$1.65 LOSS", flush=True)
+        if be1 and not be2 and best_move >= BE2_TRIGGER:
+            be2 = True
+            current_sl = entry_price + BE2_LOCK if side == "Buy" else entry_price - BE2_LOCK
+            print(f"[BE2-PROFIT] {side} Best +${best_move:.2f} - SL to ${current_sl:.1f} (Entry +${BE2_LOCK}) = +$0.03 profit locked", flush=True)
+        if side == "Buy" and live >= tp_price: return ("WIN", cur_move, elapsed, live, be1)
+        if side == "Sell" and live <= tp_price: return ("WIN", cur_move, elapsed, live, be1)
+        if be1:
+            if side == "Buy" and live <= current_sl:
+                return ("BE-PROFIT", BE2_LOCK, elapsed, live, be1) if be2 else ("BE-SMALL", BE1_LOCK, elapsed, live, be1)
+            if side == "Sell" and live >= current_sl:
+                return ("BE-PROFIT", BE2_LOCK, elapsed, live, be1) if be2 else ("BE-SMALL", BE1_LOCK, elapsed, live, be1)
+        if not be1 and cur_move <= -LOSS_CUT_USD:
+            return ("LOSS", cur_move, elapsed, live, be1)
         if elapsed >= MAX_HOLD_SEC:
-            return ("TIMEOUT", cur_move, elapsed, live, be_profit_active)
+            return ("TIMEOUT", cur_move, elapsed, live, be1)
         time.sleep(LIVE_CHECK)
 
 def bot_loop():
     global balance, wins, be_count, losses, pnl, last_trade_time, stopped
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} ${BASE_BALANCE} REAL START Lev {LEVERAGE}x Qty {QTY_FIXED} V29.7 ONLY BE WITH PROFIT", flush=True)
-    print(f"[EYE] V29.7 REAL - WS Price + REST Trades | Cooldown 15s | Whale ONLY 0.30 | Wick $12 | TP 50% | Real Fee $0.18 | ONLY BE WITH PROFIT +$4.00 -> +$3.50 = +$0.03 | WIN +$0.30 | LOSS -$0.95 | STOP < $1.50", flush=True)
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} ${BASE_BALANCE} REAL START Lev {LEVERAGE}x Qty {QTY_FIXED} V29.8 BALANCED", flush=True)
+    print(f"[EYE] V29.8 BALANCED - SL $1.50 | BE1 +$1.20 -> +$0.30 (-$0.18) | BE2 +$4.00 -> +$3.50 (+$0.03) | STOP $0.80 | Whale 0.30 | Wick $12 | Cooldown 15s", flush=True)
     while True:
         try:
             if stopped:
                 time.sleep(10); continue
             if balance < MIN_BALANCE_STOP:
                 stopped = True
-                print(f"[STOP] Balance ${balance:.2f} < ${MIN_BALANCE_STOP} - BOT STOP to protect $2.20", flush=True)
+                print(f"[STOP] Balance ${balance:.2f} < ${MIN_BALANCE_STOP} - BOT STOP", flush=True)
                 time.sleep(10); continue
             now = time.time()
             trades = get_recent_trades()
@@ -272,37 +271,39 @@ def bot_loop():
             est_tag = tp_price
             wick_pct = sig["wick_pct"]
             if expected_net < MIN_NET_WIN:
-                print(f"[WIN-STRICTLY-REAL] Expected Net ${expected_net:.4f} < +$0.15 after real fee $0.18 - Skip", flush=True)
+                print(f"[WIN-STRICTLY-REAL] Expected Net ${expected_net:.4f} < +$0.15 - Skip", flush=True)
                 time.sleep(CHECK_INTERVAL); continue
-            print(f"[{sig['type']}] {side} SINGLE-CONFIRM! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({wick_pct:.4f}%) | Current ${current:.1f} | Margin ${margin_needed:.2f} OK | Real Fee ${REAL_FEE_PER_TRADE}", flush=True)
-            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} SL ${sl_price:.1f} Move ${tp_move:.2f} | Expected Net ${expected_net:.4f} = {net_pct_bal:.2f}% after REAL fee | BE ONLY WITH PROFIT", flush=True)
+            print(f"[{sig['type']}] {side} SINGLE-CONFIRM! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({wick_pct:.4f}%) | Current ${current:.1f} | Margin ${margin_needed:.2f} OK", flush=True)
+            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} SL ${sl_price:.1f} Move ${tp_move:.2f} | Expected Net ${expected_net:.4f} = {net_pct_bal:.2f}%", flush=True)
             if REAL_MODE:
                 place_stealth_trio(side, entry_price, tp_price, sl_price, QTY_FIXED)
             else:
-                print(f"[PAPER-REAL-SIM] HIDDEN Entry+TP+SL - TP TAG ${est_tag:.1f} - Watching WS price 0.02s + Real Delay 0.3s", flush=True)
+                print(f"[PAPER-REAL-SIM] HIDDEN Entry+TP+SL - TP TAG ${est_tag:.1f} - Watching WS price 0.02s", flush=True)
             result, real_move, elapsed, live_price, be_protected = run_alive_trade(side, entry_price, tp_price, sl_price)
-            # V29.7 REAL PnL - ONLY BE WITH PROFIT
             real_gross = (real_move / entry_price) * notional if entry_price else 0
             real_net = real_gross - REAL_FEE_PER_TRADE
             if result == "BE-PROFIT":
-                # BE_LOCK $3.50 -> Gross $0.28 - Fee $0.25 = +$0.03 profit
-                real_gross = (BE_LOCK_USD / entry_price) * notional
-                real_net = real_gross - REAL_FEE_PER_TRADE - 0.07  # +$0.03
-            if result == "LOSS": real_net = -0.95
+                real_gross = (BE2_LOCK / entry_price) * notional
+                real_net = real_gross - REAL_FEE_PER_TRADE - 0.07
+            if result == "BE-SMALL":
+                real_gross = (BE1_LOCK / entry_price) * notional
+                real_net = real_gross - REAL_FEE_PER_TRADE - 0.07
+            if result == "LOSS": real_net = -1.65
             if result == "TIMEOUT" and real_net < 0:
                 real_net = real_net - 0.02
-            real_net_pct = (real_net / balance * 100) if balance else 0
-            real_gross_pct, real_lev_pct = calc_pct(real_move, entry_price)
             last_trade_time = time.time()
             if result == "WIN":
                 wins += 1; pnl += real_net; balance += real_net
-                print(f"[WIN] {side} Entry {entry_price:.1f} -> LIVE ${live_price:.1f} in {elapsed:.1f}s Net +${real_net:.4f} (after real fee $0.18) Bal ${balance:.2f}", flush=True)
+                print(f"[WIN] {side} Entry {entry_price:.1f} -> LIVE ${live_price:.1f} in {elapsed:.1f}s Net +${real_net:.4f} Bal ${balance:.2f}", flush=True)
             elif result == "BE-PROFIT":
                 be_count += 1; pnl += real_net; balance += real_net
-                print(f"[BE-PROFIT] {side} BE WITH PROFIT Net +${real_net:.4f} Bal ${balance:.2f} - NO LOSS, profit locked +$0.03", flush=True)
+                print(f"[BE-PROFIT] {side} Net +${real_net:.4f} Bal ${balance:.2f} - profit locked", flush=True)
+            elif result == "BE-SMALL":
+                be_count += 1; pnl += real_net; balance += real_net
+                print(f"[BE-SMALL] {side} Net {real_net:.4f} Bal ${balance:.2f} - small loss, saved from -$1.65", flush=True)
             elif result == "LOSS":
                 losses += 1; pnl += real_net; balance += real_net
-                print(f"[LOSS] {side} CUT Net {real_net:.4f} Bal ${balance:.2f} - Real loss with fee, no fake BE", flush=True)
+                print(f"[LOSS] {side} CUT Net {real_net:.4f} Bal ${balance:.2f} - SL $1.50 wider", flush=True)
             else:
                 if real_net >= MIN_NET_WIN:
                     wins += 1; pnl += real_net; balance += real_net
@@ -315,10 +316,10 @@ def bot_loop():
                     print(f"[LOSS] TIMEOUT Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
             total = wins + be_count + losses
             wr = (wins / total * 100) if total > 0 else 0
-            print(f"[SUMMARY] $2.20 REAL START | Wins {wins} BE-PROFIT {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | Cooldown 15s | Whale ONLY 0.30 | Wick $12 | BE ONLY WITH PROFIT +$0.03 | WIN +$0.30 | LOSS -$0.95", flush=True)
+            print(f"[SUMMARY] $2.20 REAL START | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | SL $1.50 | BE1 -$0.18 | BE2 +$0.03 | STOP $0.80", flush=True)
             if balance < MIN_BALANCE_STOP:
                 stopped = True
-                print(f"[STOP] Balance ${balance:.2f} - BOT STOP - Protect $2.20", flush=True)
+                print(f"[STOP] Balance ${balance:.2f} - BOT STOP", flush=True)
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
             print(f"[ERR LOOP] {e}", flush=True)
@@ -327,7 +328,7 @@ def bot_loop():
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V29.7 ONLY BE WITH PROFIT ALIVE")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V29.8 BALANCED ALIVE")
     def log_message(self, *a): pass
 
 def keep_alive():
