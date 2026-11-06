@@ -1,5 +1,6 @@
-# V28.6 REAL-THINKING + % EATING + EST-TAG - LEV 80x QTY 0.001
-# Rule: Bot dey eat from %, e dey calculate TP % + Lev % + Net % + EST-TAG for every trade
+# V28.7 - BALANCE RESET + BANKRUPTCY PROTECTION + SMALLER LOSS - LEV 80x QTY 0.001
+# Rule: Bot go STOP if Bal < $1.00, never go negative again. Loss Cut -$1.50, BE Lock +$1.50
+# TP 50% Wick, Min Wick $8, % Eating, EST-TAG, Double Confirm, Real SL Trio, Live 0.5s
 import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -8,7 +9,7 @@ API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 SYMBOL = "BTCUSDT"
-BASE_BALANCE = 2.20
+BASE_BALANCE = 2.20  # FRESH RESET - V28.7 start from $2.20 again, -$1.17 run don die
 LEVERAGE = 80
 QTY_FIXED = 0.001
 
@@ -20,12 +21,13 @@ MIN_SPIKE_BTC = 0.1
 MIN_WICK_USD = 8.0
 TP_WICK_PCT = 0.50
 SLIPPAGE_USD = 0.5
-LOSS_CUT_USD = 2.0
-BE_LOCK_USD = 2.0
-TRAIL_PULLBACK = 1.0
+LOSS_CUT_USD = 1.50  # V28.7: Was $2.00, now $1.50 - smaller loss
+BE_LOCK_USD = 1.50  # V28.7: Was $2.00, now $1.50 - faster BE lock
+TRAIL_PULLBACK = 0.75  # V28.7: Was 1.0, now 0.75 - lock BE quicker
 MAX_HOLD_SEC = 5
 MIN_NET_WIN = 0.10
 MIN_NET_BE = 0.03
+MIN_BALANCE_STOP = 1.00  # V28.7 BANKRUPTCY PROTECTION: If Bal < $1.00, bot STOP, never go negative
 
 balance = BASE_BALANCE
 wins = 0
@@ -34,6 +36,7 @@ losses = 0
 pnl = 0.0
 last_trade_time = 0
 last_signal_side = None
+stopped = False
 
 def bybit_get(path, params={}):
     try:
@@ -51,7 +54,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER-REAL-THINKING-%"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V28.7"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -140,11 +143,20 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
         time.sleep(LIVE_CHECK)
 
 def bot_loop():
-    global balance, wins, be_count, losses, pnl, last_trade_time, last_signal_side
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-THINKING'} ${BASE_BALANCE} Lev {LEVERAGE}x Qty {QTY_FIXED} V28.6 % EATING", flush=True)
-    print(f"[EYE] Eye open WIDE! V28.6 - We dey eat from % | TP 50% Wick | Min Wick ${MIN_WICK_USD} | Trailing BE +${BE_LOCK_USD} | Cut -${LOSS_CUT_USD} | Real SL | Live 0.5s | EST-TAG", flush=True)
+    global balance, wins, be_count, losses, pnl, last_trade_time, last_signal_side, stopped
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-THINKING'} ${BASE_BALANCE} FRESH RESET Lev {LEVERAGE}x Qty {QTY_FIXED} V28.7", flush=True)
+    print(f"[EYE] Eye open WIDE! V28.7 - We dey eat from % | TP 50% Wick | Min Wick ${MIN_WICK_USD} | Loss Cut -${LOSS_CUT_USD} | BE Lock +${BE_LOCK_USD} | STOP if Bal < ${MIN_BALANCE_STOP} | Real SL | Live 0.5s | EST-TAG", flush=True)
     while True:
         try:
+            # V28.7 BANKRUPTCY PROTECTION - Check every loop
+            if stopped:
+                time.sleep(10)
+                continue
+            if balance < MIN_BALANCE_STOP:
+                stopped = True
+                print(f"[STOP] Balance too low Bal ${balance:.2f} < ${MIN_BALANCE_STOP} - BOT DON STOP to protect your $2.20. E no go trade again. Redeploy to reset. PnL ${pnl:.4f} Wins {wins} BE {be_count} Losses {losses}", flush=True)
+                time.sleep(10)
+                continue
             now = time.time()
             trades = get_recent_trades()
             sig = detect_signal(trades)
@@ -168,7 +180,7 @@ def bot_loop():
             current = sig["current"]
             margin_needed = (current * QTY_FIXED) / LEVERAGE
             if margin_needed > balance:
-                print(f"[MARGIN] Margin needed ${margin_needed:.2f} > Bal ${balance:.2f} - REJECT like Bybit", flush=True)
+                print(f"[MARGIN] Margin needed ${margin_needed:.2f} > Bal ${balance:.2f} - REJECT like Bybit, no enter", flush=True)
                 time.sleep(CHECK_INTERVAL)
                 continue
             raw_entry = current - 1.0 if side == "Buy" else current + 1.0
@@ -176,14 +188,12 @@ def bot_loop():
             tp_move = sig["wick"] * TP_WICK_PCT
             tp_price = entry_price + tp_move if side == "Buy" else entry_price - tp_move
             sl_price = entry_price - LOSS_CUT_USD if side == "Buy" else entry_price + LOSS_CUT_USD
-            # ===== % EATING + EST-TAG CALCULATION - THE PROMISE =====
             gross_pct, lev_pct = calc_pct(tp_move, entry_price)
             notional = entry_price * QTY_FIXED * LEVERAGE
             expected_gross = (tp_move / entry_price) * notional
             real_fee = 0.092
             expected_net = expected_gross - real_fee
             net_pct_bal = (expected_net / balance * 100) if balance else 0
-            # EST-TAG: Estimated market price tag where TP go sit
             est_tag = tp_price
             wick_pct = sig["wick_pct"]
             if expected_net < MIN_NET_BE:
@@ -191,7 +201,6 @@ def bot_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
             print(f"[{sig['type']}] {side} CONFIRMED x2! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({wick_pct:.4f}%) | Current ${current:.1f} | Margin ${margin_needed:.2f} OK", flush=True)
-            # THIS NA THE % LINE - BOT DEY EAT FROM % AND SHOW EST-TAG
             print(f"[STEALTH] Follow {sig['type']} {side} -> HIDDEN Entry ${entry_price:.1f} (slip ${SLIPPAGE_USD}) TP 50% ${tp_price:.1f} Real SL ${sl_price:.1f} Move ${tp_move:.2f}", flush=True)
             print(f"[% -EAT] Wick {wick_pct:.4f}% | TP Move ${tp_move:.2f} = {gross_pct:.4f}% gross x {LEVERAGE}x = {lev_pct:.3f}% lev | Expected Net ${expected_net:.4f} = {net_pct_bal:.2f}% of Bal ${balance:.2f} | Fee ${real_fee}", flush=True)
             print(f"[EST-TAG] Estimated Market Price Tag: Entry ${entry_price:.1f} -> TP TAG ${est_tag:.1f} ({side} {'+' if side=='Buy' else '-'}{tp_move:.2f}) | SL TAG ${sl_price:.1f} | Bot go place HIDDEN TP for ${est_tag:.1f}", flush=True)
@@ -239,7 +248,11 @@ def bot_loop():
                     print(f"[LOSS-STEALTH] {sig['type']} {side} TIMEOUT 5s Entry {entry_price:.1f} -> LIVE ${live_price:.1f} Real Move ${real_move:.2f} Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
             total = wins + be_count + losses
             wr = (wins / total * 100) if total > 0 else 0
-            print(f"[SUMMARY] PAPER-REAL-THINKING $2.20 | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Lev 80x | TP 50% | Wick $8 | Real Fee $0.092 | We dey eat from %", flush=True)
+            print(f"[SUMMARY] PAPER-REAL-THINKING $2.20 | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Lev 80x | TP 50% | Wick $8 | Loss -${LOSS_CUT_USD} | BE +${BE_LOCK_USD} | We dey eat from %", flush=True)
+            # Check bankruptcy right after trade
+            if balance < MIN_BALANCE_STOP:
+                stopped = True
+                print(f"[STOP] Balance don drop to ${balance:.2f} < ${MIN_BALANCE_STOP} - BOT DON STOP to protect you. No more trades.", flush=True)
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
             print(f"[ERR LOOP] {e}", flush=True)
@@ -247,7 +260,7 @@ def bot_loop():
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V28.6 REAL-THINKING % EATING EST-TAG")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V28.7 BANKRUPTCY PROTECTION ALIVE")
     def log_message(self, *a): pass
 
 def keep_alive():
