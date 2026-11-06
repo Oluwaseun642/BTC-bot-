@@ -1,5 +1,6 @@
-# V29 LOW-LATENCY + BE-PROTECT - START $0.94 (Remaining) - LEV 80x QTY 0.001
-# Rule: Fast eye 0.2s, Live 0.1s, Single Confirm Whale 0.15, Wick $6, TP 50% = Min +$0.148 over fees
+# V29.1 LOW-LATENCY + BE-PROTECT - REAL $2.20 START - LEV 80x QTY 0.001
+# FIX: BASE $2.20 (Real money still dey), Margin $0.95 < $2.20 = ENTER, no more margin shout
+# Fast eye 0.2s, Live 0.1s, Single Confirm Whale 0.15, Wick $6, TP 50% = Min +$0.148 over fees
 # BE Protect: At +$1.00, move SL to +$1.50 lock, no close, let am run to TP. Time BE after 1s at +$0.50
 import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -9,27 +10,27 @@ API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 SYMBOL = "BTCUSDT"
-BASE_BALANCE = 0.94  # V29: Remaining balance wey V28.7 save, no be $2.20 again
+BASE_BALANCE = 2.20  # V29.1 FIX: REAL $2.20 wey still remain for Bybit, paper loss no count
 LEVERAGE = 80
 QTY_FIXED = 0.001
 
-CHECK_INTERVAL = 0.2  # V29: Was 1.0, now 0.2 - 5x faster eye
-LIVE_CHECK = 0.1  # V29: Was 0.5, now 0.1 - 5x faster live check
-COOLDOWN_SEC = 3  # V29: Was 5, now 3 - catch next whale faster
-MIN_WHALE_BTC = 0.15  # V29: Was 0.10, now 0.15 - bigger whale, single confirm still strong
-MIN_SPIKE_BTC = 0.15  # V29: Was 0.10, now 0.15
-MIN_WICK_USD = 6.0  # V29: Was 8.0, now 6.0 - catch early, no wait for wick finish
+CHECK_INTERVAL = 0.2  # V29: 5x faster eye
+LIVE_CHECK = 0.1  # V29: 5x faster live check
+COOLDOWN_SEC = 3
+MIN_WHALE_BTC = 0.15  # V29: Bigger whale, single confirm still strong
+MIN_SPIKE_BTC = 0.15
+MIN_WICK_USD = 6.0  # V29: Catch early, no wait for wick finish
 TP_WICK_PCT = 0.50
-SLIPPAGE_USD = 0.3  # V29: Was 0.5, now 0.3 - faster entry, less slip
+SLIPPAGE_USD = 0.3
 LOSS_CUT_USD = 1.50
-BE_LOCK_USD = 1.00  # V29: Was 1.50, now 1.00 - lock faster
-BE_PROTECT_USD = 1.50  # V29 NEW: When BE lock trigger, move SL to +$1.50 profit lock, no close
-TIME_BE_SEC = 1.0  # V29 NEW: After 1 sec, if in profit +$0.50, move SL to entry
+BE_LOCK_USD = 1.00  # V29: Lock faster
+BE_PROTECT_USD = 1.50  # V29: When BE lock trigger, move SL to +$1.50 profit lock, no close
+TIME_BE_SEC = 1.0  # V29: After 1 sec, if in profit +$0.50, move SL to entry
 TIME_BE_MIN = 0.50
 MAX_HOLD_SEC = 5
 MIN_NET_WIN = 0.10
 MIN_NET_BE = 0.03
-MIN_BALANCE_STOP = 0.50  # V29: Was 1.00, now 0.50 - because we start from $0.94
+MIN_BALANCE_STOP = 1.00  # V29.1 FIX: Was 0.50, now 1.00 - because we start from REAL $2.20
 
 balance = BASE_BALANCE
 wins = 0
@@ -38,7 +39,6 @@ losses = 0
 pnl = 0.0
 last_trade_time = 0
 stopped = False
-# Pre-armed price cache - bot dey hold live price always, no calculation delay
 live_price_cache = [None]
 live_price_time = [0]
 
@@ -58,7 +58,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER-V29"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V29.1"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -72,7 +72,6 @@ def bybit_post(path, body):
         return None
 
 def price_feeder():
-    # V29 LOW-LATENCY FEEDER: Always hold live price, update every 0.2s in background - like websocket
     while True:
         try:
             d = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": SYMBOL})
@@ -89,7 +88,6 @@ def get_recent_trades():
     return []
 
 def get_live_price():
-    # Use cache if fresh (<0.5s), else fetch
     if live_price_cache[0] is not None and time.time() - live_price_time[0] < 0.5:
         return live_price_cache[0]
     d = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": SYMBOL})
@@ -112,11 +110,7 @@ def detect_signal(trades):
     biggest_side = biggest.get("side", "")
     buy_sum = sum(float(t["size"]) for t in trades if t.get("side") == "Buy")
     sell_sum = sum(float(t["size"]) for t in trades if t.get("side") == "Sell")
-    # V29 SINGLE CONFIRM: Bigger whale 0.15, imbalance >2x - no need double confirm
     if biggest_size >= MIN_WHALE_BTC:
-        # Check imbalance for strength
-        if biggest_side == "Buy" and buy_sum < sell_sum * 0.5 and biggest_size < 0.3:
-            pass  # Still allow if whale big, but log it
         return {"type": "WHALE", "side": biggest_side, "size": biggest_size, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0, "buy_sum": buy_sum, "sell_sum": sell_sum}
     if buy_sum >= MIN_SPIKE_BTC and buy_sum > sell_sum * 2.0:
         return {"type": "SMALL-SPIKE", "side": "Buy", "size": buy_sum, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0, "buy_sum": buy_sum, "sell_sum": sell_sum}
@@ -143,7 +137,6 @@ def place_stealth_trio(side, entry_price, tp_price, sl_price, qty):
     return r1, r2, r3
 
 def run_alive_trade(side, entry_price, tp_price, sl_price):
-    # V29 BE-PROTECT: At +$1.00, move SL to +$1.50 lock, no close, let am run to TP
     start = time.time()
     best_move = 0.0
     be_protected = False
@@ -160,43 +153,30 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
         cur_move = (live - entry_price) if side == "Buy" else (entry_price - live)
         if cur_move > best_move:
             best_move = cur_move
-        # V29 BE-PROTECT: Lock SL, no exit
         if not be_protected and best_move >= BE_LOCK_USD:
             be_protected = True
-            # Move SL to +$1.50 profit lock
             if side == "Buy":
                 current_sl = entry_price + BE_PROTECT_USD
             else:
                 current_sl = entry_price - BE_PROTECT_USD
             print(f"[BE-PROTECT] {side} Best +${best_move:.2f} >= +${BE_LOCK_USD} - SL moved to ${current_sl:.1f} (+${BE_PROTECT_USD} lock). No close, let am run to TP ${tp_price:.1f}", flush=True)
-        # V29 TIME BE: After 1 sec, if in profit +$0.50, move SL to entry
         if not time_be_done and elapsed >= TIME_BE_SEC:
             time_be_done = True
             if cur_move >= TIME_BE_MIN and not be_protected:
-                if side == "Buy":
-                    current_sl = entry_price
-                else:
-                    current_sl = entry_price
+                current_sl = entry_price
                 print(f"[TIME-BE] {side} After {elapsed:.1f}s still +${cur_move:.2f} - SL moved to Entry ${current_sl:.1f} to protect from loss", flush=True)
-        # TP hit
         if side == "Buy" and live >= tp_price:
             return ("WIN", cur_move, elapsed, live, be_protected)
         if side == "Sell" and live <= tp_price:
             return ("WIN", cur_move, elapsed, live, be_protected)
-        # BE-PROTECT SL hit - if price reverse to protected SL, we collect BE profit, no be loss
         if be_protected:
             if side == "Buy" and live <= current_sl:
-                # Price pulled back to protected SL - collect BE profit
-                protected_move = BE_PROTECT_USD
-                return ("BE-PROTECT", protected_move, elapsed, live, be_protected)
+                return ("BE-PROTECT", BE_PROTECT_USD, elapsed, live, be_protected)
             if side == "Sell" and live >= current_sl:
-                protected_move = BE_PROTECT_USD
-                return ("BE-PROTECT", protected_move, elapsed, live, be_protected)
-        # Original SL hit (if BE not yet protected)
+                return ("BE-PROTECT", BE_PROTECT_USD, elapsed, live, be_protected)
         if not be_protected:
             if cur_move <= -LOSS_CUT_USD:
                 return ("LOSS", cur_move, elapsed, live, be_protected)
-        # Time BE SL hit - if SL moved to entry and price hits it
         if time_be_done and not be_protected and current_sl == entry_price:
             if side == "Buy" and live <= current_sl:
                 return ("BE-TIME", 0.0, elapsed, live, be_protected)
@@ -208,8 +188,8 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
 
 def bot_loop():
     global balance, wins, be_count, losses, pnl, last_trade_time, stopped
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-THINKING'} ${BASE_BALANCE} START (Remaining) Lev {LEVERAGE}x Qty {QTY_FIXED} V29 LOW-LATENCY", flush=True)
-    print(f"[EYE] Eye open WIDE! V29 - Fast 0.2s | Live 0.1s | Single Confirm Whale 0.15 | Wick $6 | TP 50% Min +$0.148 | BE-Protect +$1.00 -> +$1.50 lock | STOP if Bal < ${MIN_BALANCE_STOP} | EST-TAG | % EAT", flush=True)
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-THINKING'} ${BASE_BALANCE} REAL START Lev {LEVERAGE}x Qty {QTY_FIXED} V29.1", flush=True)
+    print(f"[EYE] Eye open WIDE! V29.1 - Fast 0.2s | Live 0.1s | Single Confirm Whale 0.15 | Wick $6 | TP 50% Min +$0.148 | BE-Protect +$1.00 -> +$1.50 lock | STOP if Bal < ${MIN_BALANCE_STOP} | EST-TAG | % EAT", flush=True)
     while True:
         try:
             if stopped:
@@ -233,10 +213,8 @@ def bot_loop():
                 print(f"[{sig['type']}] {sig['side']} Size {sig['size']:.3f} BTC but Wick ${sig['wick']:.2f} ({sig['wick_pct']:.4f}%) too small < ${MIN_WICK_USD} - Skip", flush=True)
                 time.sleep(CHECK_INTERVAL)
                 continue
-            # V29 SINGLE CONFIRM - No double confirm delay, enter immediately
             side = sig["side"]
             current = sig["current"]
-            # Use cached live price if fresher - pre-armed entry
             cached = get_live_price()
             if cached is not None:
                 current = cached
@@ -262,7 +240,7 @@ def bot_loop():
                 print(f"[FEE-AWARE-REAL] {sig['type']} Expected Net ${expected_net:.4f} after REAL fee ${real_fee} too small - Skip", flush=True)
                 time.sleep(CHECK_INTERVAL)
                 continue
-            print(f"[{sig['type']}] {side} SINGLE-CONFIRM! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({wick_pct:.4f}%) | Current ${current:.1f} | Margin ${margin_needed:.2f} OK - ENTER IMMEDIATELY, no double delay", flush=True)
+            print(f"[{sig['type']}] {side} SINGLE-CONFIRM! Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} ({wick_pct:.4f}%) | Current ${current:.1f} | Margin ${margin_needed:.2f} OK - ENTER IMMEDIATELY", flush=True)
             print(f"[STEALTH] Follow {sig['type']} {side} -> HIDDEN Entry ${entry_price:.1f} (slip ${SLIPPAGE_USD}) TP 50% ${tp_price:.1f} SL ${sl_price:.1f} Move ${tp_move:.2f}", flush=True)
             print(f"[% -EAT] Wick {wick_pct:.4f}% | TP Move ${tp_move:.2f} = {gross_pct:.4f}% gross x {LEVERAGE}x = {lev_pct:.3f}% lev | Expected Net ${expected_net:.4f} = {net_pct_bal:.2f}% of Bal ${balance:.2f} | Fee ${real_fee} | Min TP +$0.148 over fees", flush=True)
             print(f"[EST-TAG] Estimated Market Price Tag: Entry ${entry_price:.1f} -> TP TAG ${est_tag:.1f} ({side} {'+' if side=='Buy' else '-'}{tp_move:.2f}) | SL TAG ${sl_price:.1f} | BE-Protect TAG ${entry_price + BE_PROTECT_USD if side=='Buy' else entry_price - BE_PROTECT_USD:.1f}", flush=True)
@@ -274,13 +252,10 @@ def bot_loop():
             result, real_move, elapsed, live_price, be_protected = run_alive_trade(side, entry_price, tp_price, sl_price)
             real_gross = (real_move / entry_price) * notional if entry_price else 0
             real_net = real_gross - real_fee
-            # For BE-PROTECT, real_net is from protected move $1.50
             if result == "BE-PROTECT":
                 real_gross = (BE_PROTECT_USD / entry_price) * notional
                 real_net = real_gross - real_fee
             if result == "BE-TIME":
-                real_net = -real_fee + 0.01  # Break-even minus fee, approx $ -0.08, but we call it BE to avoid loss label - actually net = -fee, we set to -0.08
-                # Correction: Time BE at entry = 0 move, net = -fee = -$0.092, but we protect from bigger loss, so count as BE with -$0.092
                 real_net = -0.092
             real_net_pct = (real_net / balance * 100) if balance else 0
             real_gross_pct, real_lev_pct = calc_pct(real_move, entry_price)
@@ -323,7 +298,7 @@ def bot_loop():
                     print(f"[LOSS-STEALTH] {sig['type']} {side} TIMEOUT 5s Entry {entry_price:.1f} -> LIVE ${live_price:.1f} Real Move ${real_move:.2f} Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
             total = wins + be_count + losses
             wr = (wins / total * 100) if total > 0 else 0
-            print(f"[SUMMARY] PAPER-REAL-THINKING $0.94 START | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Lev 80x | TP 50% | Wick $6 | BE-Protect +${BE_PROTECT_USD} | We dey eat from %", flush=True)
+            print(f"[SUMMARY] PAPER-REAL-THINKING $2.20 REAL START | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} Lev 80x | TP 50% | Wick $6 | BE-Protect +${BE_PROTECT_USD} | We dey eat from %", flush=True)
             if balance < MIN_BALANCE_STOP:
                 stopped = True
                 print(f"[STOP] Balance don drop to ${balance:.2f} < ${MIN_BALANCE_STOP} - BOT DON STOP to protect you.", flush=True)
@@ -334,7 +309,7 @@ def bot_loop():
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V29 LOW-LATENCY BE-PROTECT ALIVE")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V29.1 LOW-LATENCY BE-PROTECT ALIVE")
     def log_message(self, *a): pass
 
 def keep_alive():
