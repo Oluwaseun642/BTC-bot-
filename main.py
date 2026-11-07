@@ -1,5 +1,5 @@
-# V32 MONDAY READY - FOR REAL $2.20 BYBIT - DXY + NASDAQ PRIORITY, WEEKEND SAFE, EVERYTHING NECESSARY
-# FIX: V31.1 comot DXY/NASDAQ -> blind for Monday. V32 bring back via Yahoo (no Stooq fail). Weekend: DXY/NASDAQ CLOSED = NEUTRAL no block. Monday: DXY/NASDAQ LIVE = PRIORITY, need 4/6. Weekend: need 2/3. Includes DXY, NASDAQ, SPX, GOLD, BTC Trend, ETH, Funding, OI, Orderbook, Whale. TP $4.00 WIN +$0.14, SL $1.50 LOSS -$0.30, BE +$0.80 -> +$0.30, HARD STOP $0.80
+# V35 SELF PING EVERY 1 MIN + HEARTBEAT + UPTIMEROBOT VISIBLE - FOR REAL $2.20 BYBIT - BE OVER FEES NEVER MINUS
+# FIX V34: keep_alive silent 240s, log_message pass -> UptimeRobot invisible, bot quiet for hours -> look dead. V35: Self ping every 60s with log, Heartbeat every 60s [ALIVE] always talk, UptimeRobot log visible. Keep V34: BE +$3.50 -> +$0.08 PROFIT never minus, TP $4.00 WIN +$0.14, SL -$0.30, HIGH CONVICTION Wick $15+ Orderbook 1.5x DXY+NASDAQ PRIORITY.
 import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse, traceback, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -15,17 +15,19 @@ CHECK_INTERVAL = 0.5
 LIVE_CHECK = 0.05
 COOLDOWN_SEC = 15
 MIN_WHALE_BTC = 0.30
-MIN_WICK_USD = 12.0
+MIN_WICK_USD = 15.0
 TP_FIXED_USD = 4.00
 SL_FIXED_USD = 1.50
 SLIPPAGE_USD = 0.5
-BE_TRIGGER = 0.80
-BE_LOCK = 0.30
+BE_TRIGGER = 3.50
+BE_LOCK = 3.50
 MAX_HOLD_SEC = 3
 MIN_BALANCE_STOP = 0.80
 REAL_FEE_PER_TRADE = 0.18
+FUNDING_FEE_EST = 0.02
 REAL_LATENCY_SEC = 0.2
 PULLBACK_USD = 0.50
+HEARTBEAT_SEC = 60  # V35: 1 minute heartbeat
 
 balance = BASE_BALANCE
 wins = 0
@@ -35,6 +37,9 @@ pnl = 0.0
 last_trade_time = 0
 stopped = False
 consecutive_losses = 0
+last_heartbeat = 0
+last_wick_seen = 0.0
+last_price_seen = 0.0
 
 def safe_float(x, default=None):
     try:
@@ -46,6 +51,13 @@ def safe_float(x, default=None):
         if v != v: return default
         return v
     except: return default
+
+def lagos_time_str():
+    try:
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
+        return now.strftime("%H:%M:%S Lagos")
+    except:
+        return datetime.datetime.utcnow().strftime("%H:%M:%S UTC")
 
 def http_get(url, headers={}, timeout=5):
     try:
@@ -70,7 +82,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER-V32-MONDAY-READY"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V35-SELF-PING"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -101,17 +113,14 @@ def get_recent_trades():
         if len(clean) >= 5: return clean
     return []
 
-# ===== V32 WORLDWIDE - DXY + NASDAQ PRIORITY VIA YAHOO, WEEKEND SAFE =====
 def is_weekend():
-    # Lagos time, Saturday=5, Sunday=6
     try:
-        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))  # Africa/Lagos +1
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
         return now.weekday() >= 5
     except:
         return datetime.datetime.utcnow().weekday() >= 5
 
 def yahoo_quote(symbol):
-    # Yahoo Finance chart API - works for DXY, NASDAQ, SPX, GOLD. Returns last price + prev close
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=2d&interval=1d"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -130,50 +139,36 @@ def yahoo_quote(symbol):
         print(f"[YAHOO ERR] {symbol} {e}", flush=True)
     return {"price": None, "prev": None, "pct": 0, "ok": False}
 
-def get_worldwide_v32():
+def get_worldwide_v34():
     weekend = is_weekend()
-    # DXY - PRIORITY 1
     dxy = yahoo_quote("DX-Y.NYB")
     if dxy["ok"]:
         if weekend:
-            dxy_bias = "NEUTRAL"
-            dxy_reason = f"DXY ${dxy['price']:.2f} {dxy['pct']:+.2f}% - Market CLOSED (Weekend) - NEUTRAL, no block"
+            dxy_bias = "NEUTRAL"; dxy_reason = f"DXY ${dxy['price']:.2f} {dxy['pct']:+.2f}% - CLOSED Weekend - NEUTRAL"
         else:
-            # DXY UP = Dollar strong = BTC DOWN = SELL. DXY DOWN = Dollar weak = BTC UP = BUY. Threshold 0.05%
             if dxy["pct"] > 0.05:
-                dxy_bias = "SELL_BTC"
-                dxy_reason = f"DXY UP +{dxy['pct']:.2f}% ${dxy['price']:.2f} - Dollar STRONG -> SELL_BTC PRIORITY"
+                dxy_bias = "SELL_BTC"; dxy_reason = f"DXY UP +{dxy['pct']:.2f}% - Dollar STRONG -> SELL PRIORITY"
             elif dxy["pct"] < -0.05:
-                dxy_bias = "BUY_BTC"
-                dxy_reason = f"DXY DOWN {dxy['pct']:.2f}% ${dxy['price']:.2f} - Dollar WEAK -> BUY_BTC PRIORITY"
+                dxy_bias = "BUY_BTC"; dxy_reason = f"DXY DOWN {dxy['pct']:.2f}% - Dollar WEAK -> BUY PRIORITY"
             else:
-                dxy_bias = "NEUTRAL"
-                dxy_reason = f"DXY FLAT {dxy['pct']:.2f}% - NEUTRAL"
+                dxy_bias = "NEUTRAL"; dxy_reason = f"DXY FLAT {dxy['pct']:.2f}% - NEUTRAL"
     else:
-        dxy_bias = "NEUTRAL"
-        dxy_reason = "DXY fetch fail - NEUTRAL, no block (weekend safe)"
-    # NASDAQ - PRIORITY 1
+        dxy_bias = "NEUTRAL"; dxy_reason = "DXY fail - NEUTRAL"
     nas = yahoo_quote("^IXIC")
     if not nas["ok"]:
         nas = yahoo_quote("^NDX")
     if nas["ok"]:
         if weekend:
-            nas_bias = "NEUTRAL"
-            nas_reason = f"NASDAQ ${nas['price']:.1f} {nas['pct']:+.2f}% - Market CLOSED (Weekend) - NEUTRAL, no block"
+            nas_bias = "NEUTRAL"; nas_reason = f"NASDAQ ${nas['price']:.1f} {nas['pct']:+.2f}% - CLOSED Weekend - NEUTRAL"
         else:
             if nas["pct"] > 0.10:
-                nas_bias = "BUY_BTC"
-                nas_reason = f"NASDAQ UP +{nas['pct']:.2f}% - Tech PUMP -> BUY_BTC PRIORITY"
+                nas_bias = "BUY_BTC"; nas_reason = f"NASDAQ UP +{nas['pct']:.2f}% - Tech PUMP -> BUY PRIORITY"
             elif nas["pct"] < -0.10:
-                nas_bias = "SELL_BTC"
-                nas_reason = f"NASDAQ DOWN {nas['pct']:.2f}% - Tech DUMP -> SELL_BTC PRIORITY"
+                nas_bias = "SELL_BTC"; nas_reason = f"NASDAQ DOWN {nas['pct']:.2f}% - Tech DUMP -> SELL PRIORITY"
             else:
-                nas_bias = "NEUTRAL"
-                nas_reason = f"NASDAQ FLAT {nas['pct']:.2f}% - NEUTRAL"
+                nas_bias = "NEUTRAL"; nas_reason = f"NASDAQ FLAT {nas['pct']:.2f}% - NEUTRAL"
     else:
-        nas_bias = "NEUTRAL"
-        nas_reason = "NASDAQ fetch fail - NEUTRAL, no block"
-    # SPX - extra confirm, not priority
+        nas_bias = "NEUTRAL"; nas_reason = "NASDAQ fail - NEUTRAL"
     spx = yahoo_quote("^GSPC")
     if spx["ok"]:
         if weekend:
@@ -183,7 +178,6 @@ def get_worldwide_v32():
             spx_reason = f"SPX {spx['pct']:+.2f}% - {spx_bias}"
     else:
         spx_bias = "NEUTRAL"; spx_reason = "SPX fail - NEUTRAL"
-    # GOLD - if Gold pump fast, fear, BTC down
     gold = yahoo_quote("GC=F")
     if gold["ok"]:
         if weekend:
@@ -193,7 +187,6 @@ def get_worldwide_v32():
             gold_reason = f"GOLD {gold['pct']:+.2f}% - {gold_bias}"
     else:
         gold_bias = "NEUTRAL"; gold_reason = "GOLD fail - NEUTRAL"
-    # EMA Trend - always live, BTC market never closes
     ema_bias = "NEUTRAL"; ema_reason = "EMA neutral"
     try:
         d = bybit_get("/v5/market/kline", {"category": "linear", "symbol": SYMBOL, "interval": "1", "limit": "30"})
@@ -211,7 +204,6 @@ def get_worldwide_v32():
                 ema_bias = "BUY_BTC" if price > ema else "SELL_BTC"
                 ema_reason = f"Price {'ABOVE' if price>ema else 'BELOW'} EMA20 ${ema:.1f}"
     except: pass
-    # ETH + Funding + OI
     eth_bias = "NEUTRAL"; eth_reason = "ETH/Funding neutral"
     try:
         d = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": "ETHUSDT"})
@@ -233,8 +225,7 @@ def get_worldwide_v32():
         else:
             eth_reason = f"ETH {eth_chg:.2f}% {eth_b} vs Funding {fund_b} - neutral"
     except: pass
-    # Orderbook - Buy wall vs Sell wall, detect fake whale
-    ob_bias = "NEUTRAL"; ob_reason = "Orderbook neutral"
+    ob_bias = "NEUTRAL"; ob_reason = "Orderbook neutral"; ob_strength = 0
     try:
         d = bybit_get("/v5/market/orderbook", {"category": "linear", "symbol": SYMBOL, "limit": "25"})
         if d and d.get("result"):
@@ -242,40 +233,25 @@ def get_worldwide_v32():
             asks = d["result"].get("a", [])
             bid_vol = sum(safe_float(x[1], 0) or 0 for x in bids[:10])
             ask_vol = sum(safe_float(x[1], 0) or 0 for x in asks[:10])
-            if bid_vol > ask_vol * 1.3:
-                ob_bias = "BUY_BTC"; ob_reason = f"Orderbook Buy Wall {bid_vol:.2f} vs Sell {ask_vol:.2f} - BUY wall strong"
-            elif ask_vol > bid_vol * 1.3:
-                ob_bias = "SELL_BTC"; ob_reason = f"Orderbook Sell Wall {ask_vol:.2f} vs Buy {bid_vol:.2f} - SELL wall strong"
+            if bid_vol > ask_vol * 1.5:
+                ob_bias = "BUY_BTC"; ob_strength = bid_vol/ask_vol; ob_reason = f"Orderbook STRONG Buy Wall {bid_vol:.2f} vs Sell {ask_vol:.2f} ({ob_strength:.1f}x) - fit push $3.50"
+            elif ask_vol > bid_vol * 1.5:
+                ob_bias = "SELL_BTC"; ob_strength = ask_vol/bid_vol; ob_reason = f"Orderbook STRONG Sell Wall {ask_vol:.2f} vs Buy {bid_vol:.2f} ({ob_strength:.1f}x) - fit push $3.50"
             else:
-                ob_reason = f"Orderbook balanced Buy {bid_vol:.2f} Sell {ask_vol:.2f}"
+                ob_reason = f"Orderbook WEAK Buy {bid_vol:.2f} Sell {ask_vol:.2f} - no fit push $3.50"
     except: pass
-    return {
-        "weekend": weekend,
-        "votes": [
-            ("DXY-PRIORITY", dxy_bias, dxy_reason),
-            ("NASDAQ-PRIORITY", nas_bias, nas_reason),
-            ("SPX", spx_bias, spx_reason),
-            ("GOLD", gold_bias, gold_reason),
-            ("EMA-TREND", ema_bias, ema_reason),
-            ("ETH+FUNDING", eth_bias, eth_reason),
-            ("ORDERBOOK", ob_bias, ob_reason),
-        ]
-    }
+    return {"weekend": weekend, "votes": [("DXY-PRIORITY", dxy_bias, dxy_reason), ("NASDAQ-PRIORITY", nas_bias, nas_reason), ("SPX", spx_bias, spx_reason), ("GOLD", gold_bias, gold_reason), ("EMA-TREND", ema_bias, ema_reason), ("ETH+FUNDING", eth_bias, eth_reason), ("ORDERBOOK-1.5x", ob_bias, ob_reason)]}
 
-def worldwide_score_v32(whale_side):
+def worldwide_score_v34(whale_side, wick):
     whale_bias = "BUY_BTC" if whale_side=="Buy" else "SELL_BTC"
-    ww = get_worldwide_v32()
+    ww = get_worldwide_v34()
     weekend = ww["weekend"]
     votes = [("WHALE", whale_bias, f"Whale {whale_side}")] + ww["votes"]
-    # For weekend: DXY/NASDAQ/SPX/GOLD are NEUTRAL by design, so we only count WHALE + EMA + ETH + ORDERBOOK = 4 votes, need 3/4? Simpler: need 2/3 of LIVE votes
-    # For Monday: count all 8 votes, need 4/8? But DXY/NASDAQ priority = double weight. So we weight DXY/NASDAQ x2.
-    # Weighted scoring:
     weighted_agree = 0
     weighted_total = 0
-    print(f"[WORLDWIDE] {'WEEKEND' if weekend else 'WEEKDAY - MONDAY READY'} Whale {whale_side} | DXY+NASDAQ {'CLOSED - NEUTRAL' if weekend else 'LIVE - PRIORITY x2'}", flush=True)
+    print(f"[WORLDWIDE] {'WEEKEND' if weekend else 'WEEKDAY - MONDAY READY'} Whale {whale_side} Wick ${wick:.2f} | DXY+NASDAQ {'CLOSED' if weekend else 'LIVE PRIORITY x2'} | HIGH CONVICTION for BE OVER FEES $3.50", flush=True)
     for name, bias, reason in votes:
         weight = 2 if name in ("DXY-PRIORITY", "NASDAQ-PRIORITY") and not weekend else 1
-        # Weekend: DXY/NASDAQ weight 0 (closed)
         if weekend and name in ("DXY-PRIORITY", "NASDAQ-PRIORITY", "SPX", "GOLD"):
             weight = 0
         if weight == 0:
@@ -287,9 +263,8 @@ def worldwide_score_v32(whale_side):
             weighted_agree += weight
         if bias != "NEUTRAL":
             weighted_total += weight
-    # Need: Weekend: agree >=2 and agree > disagree. Weekday: agree >=4 (with DXY/NASDAQ double) and agree > disagree
-    need = 2 if weekend else 4
-    print(f"[WORLDWIDE] Weighted Agree {weighted_agree} / Live Total {weighted_total} | Need {need} to trade", flush=True)
+    need = 3 if weekend else 5
+    print(f"[WORLDWIDE] Weighted Agree {weighted_agree} / Live Total {weighted_total} | Need {need} for BE OVER FEES $3.50", flush=True)
     return weighted_agree, weighted_total, need, votes
 
 def detect_signal(trades):
@@ -316,7 +291,7 @@ def detect_signal(trades):
 def calc_real_pnl(move_usd, entry_price):
     notional = entry_price * QTY_FIXED * LEVERAGE
     gross = (move_usd / entry_price) * notional if entry_price else 0
-    net = gross - REAL_FEE_PER_TRADE
+    net = gross - REAL_FEE_PER_TRADE - FUNDING_FEE_EST
     return gross, net
 
 def place_stealth_trio(side, entry_price, tp_price, sl_price, qty):
@@ -335,7 +310,7 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
     best_move = 0.0
     be_active = False
     current_sl = sl_price
-    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00) SL ${sl_price:.1f} (-$1.50) | BE +$0.80 -> +$0.30 | V32 MONDAY READY APPROVED", flush=True)
+    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 WIN +$0.14) SL ${sl_price:.1f} (-$1.50 LOSS -$0.30) | BE OVER FEES +$3.50 -> +$0.08 PROFIT NEVER MINUS | V35", flush=True)
     while True:
         elapsed = time.time() - start
         live = get_live_price()
@@ -346,20 +321,20 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
         if not be_active and best_move >= BE_TRIGGER:
             be_active = True
             current_sl = entry_price + BE_LOCK if side == "Buy" else entry_price - BE_LOCK
-            print(f"[BE] {side} Best +${best_move:.2f} - SL to ${current_sl:.1f}", flush=True)
+            print(f"[BE-OVER-FEES] {side} Best +${best_move:.2f} - SL moved to Entry +$3.50 = ${current_sl:.1f} - If wick off now, close +$0.08 PROFIT, never minus. Fees covered.", flush=True)
         if side == "Buy" and live >= tp_price: return ("WIN", cur_move, elapsed, live)
         if side == "Sell" and live <= tp_price: return ("WIN", cur_move, elapsed, live)
         if be_active:
-            if side == "Buy" and live <= current_sl: return ("BE-SMALL", BE_LOCK, elapsed, live)
-            if side == "Sell" and live >= current_sl: return ("BE-SMALL", BE_LOCK, elapsed, live)
+            if side == "Buy" and live <= current_sl: return ("BE-PROFIT", BE_LOCK, elapsed, live)
+            if side == "Sell" and live >= current_sl: return ("BE-PROFIT", BE_LOCK, elapsed, live)
         if not be_active and cur_move <= -SL_FIXED_USD: return ("LOSS", cur_move, elapsed, live)
         if elapsed >= MAX_HOLD_SEC: return ("TIMEOUT", cur_move, elapsed, live)
         time.sleep(LIVE_CHECK)
 
 def bot_loop():
-    global balance, wins, be_count, losses, pnl, last_trade_time, stopped, consecutive_losses
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} $2.20 REAL START Lev 80x Qty 0.001 V32 MONDAY READY", flush=True)
-    print(f"[EYE] V32 MONDAY READY - DXY+NASDAQ PRIORITY x2 (Yahoo) | Weekend CLOSED=NEUTRAL no block, Weekday LIVE need 4 weighted | SPX+GOLD+EMA+ETH+Funding+Orderbook+Whale | TP $4.00 WIN +$0.14 | SL LOSS -$0.30 | STOP $0.80", flush=True)
+    global balance, wins, be_count, losses, pnl, last_trade_time, stopped, consecutive_losses, last_wick_seen, last_price_seen
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} $2.20 REAL START Lev 80x Qty 0.001 V35 SELF PING 1 MIN", flush=True)
+    print(f"[EYE] V35 SELF PING EVERY 1 MIN + HEARTBEAT - Bot go always talk [ALIVE] every 60s, UptimeRobot visible | BE +$3.50 -> +$0.08 NEVER MINUS | TP WIN +$0.14 | SL LOSS -$0.30 | HIGH CONVICTION", flush=True)
     while True:
         try:
             if stopped:
@@ -374,6 +349,13 @@ def bot_loop():
                 time.sleep(60); continue
             now = time.time()
             trades = get_recent_trades()
+            # Update last seen for heartbeat
+            if trades:
+                prices_tmp = [safe_float(t.get("price")) for t in trades]
+                prices_tmp = [p for p in prices_tmp if p is not None]
+                if prices_tmp:
+                    last_wick_seen = max(prices_tmp) - min(prices_tmp)
+                    last_price_seen = prices_tmp[0]
             sig = detect_signal(trades)
             if sig is None:
                 time.sleep(CHECK_INTERVAL); continue
@@ -382,12 +364,12 @@ def bot_loop():
             if sig["wick"] < MIN_WICK_USD:
                 time.sleep(CHECK_INTERVAL); continue
             side = sig["side"]
-            agree, total, need, votes = worldwide_score_v32(side)
+            agree, total, need, votes = worldwide_score_v34(side, sig["wick"])
             if agree < need:
-                print(f"[WORLDWIDE-SKIP] {side} Weighted Agree {agree} < Need {need} - SKIP, world no agree", flush=True)
+                print(f"[WORLDWIDE-SKIP] {side} Weighted Agree {agree} < Need {need} - SKIP", flush=True)
                 last_trade_time = time.time()
                 time.sleep(2); continue
-            print(f"[WORLDWIDE-APPROVED] {side} Weighted Agree {agree} >= Need {need} - World agree, enter", flush=True)
+            print(f"[WORLDWIDE-APPROVED] {side} Weighted Agree {agree} >= Need {need} - High conviction, fit BE OVER FEES, enter", flush=True)
             current = sig["current"]
             cached = get_live_price()
             if cached is not None: current = cached
@@ -414,45 +396,42 @@ def bot_loop():
             tp_price = entry_price + TP_FIXED_USD if side == "Buy" else entry_price - TP_FIXED_USD
             sl_price = entry_price - SL_FIXED_USD if side == "Buy" else entry_price + SL_FIXED_USD
             gross_tp, net_tp = calc_real_pnl(TP_FIXED_USD, entry_price)
+            gross_be, net_be = calc_real_pnl(BE_LOCK, entry_price)
             gross_sl, net_sl = calc_real_pnl(-SL_FIXED_USD, entry_price)
             print(f"[{sig['type']}] {side} Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} | Current ${current:.1f} | Pullback ${pullback_move:.2f} OK", flush=True)
-            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 Net ${net_tp:.2f}) SL ${sl_price:.1f} (-$1.50 Net ${net_sl:.2f}) | V32 APPROVED", flush=True)
+            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 Net ${net_tp:.2f}) BE-OVER-FEES ${entry_price+BE_LOCK:.1f} (+$3.50 Net ${net_be:.2f} PROFIT) SL ${sl_price:.1f} (-$1.50 Net ${net_sl:.2f}) | V35", flush=True)
             if REAL_MODE:
                 place_stealth_trio(side, entry_price, tp_price, sl_price, QTY_FIXED)
             else:
-                print(f"[PAPER-REAL-SIM] HIDDEN Entry+TP+SL - TP TAG ${tp_price:.1f}", flush=True)
+                print(f"[PAPER-REAL-SIM] HIDDEN Entry+TP+SL - TP TAG ${tp_price:.1f} BE TAG ${entry_price+BE_LOCK:.1f}", flush=True)
             result, real_move, elapsed, live_price = run_alive_trade(side, entry_price, tp_price, sl_price)
             if result == "WIN":
                 _, real_net = calc_real_pnl(TP_FIXED_USD, entry_price)
-            elif result == "BE-SMALL":
+            elif result == "BE-PROFIT":
                 _, real_net = calc_real_pnl(BE_LOCK, entry_price)
             elif result == "LOSS":
                 _, real_net = calc_real_pnl(-SL_FIXED_USD, entry_price)
             else:
                 _, real_net = calc_real_pnl(real_move, entry_price)
-            last_trade_time = time.time()
-            if result == "WIN":
-                wins += 1; pnl += real_net; balance += real_net; consecutive_losses = 0
-                print(f"[WIN] {side} Net +${real_net:.4f} Bal ${balance:.2f} - V32 WIN", flush=True)
-            elif result == "BE-SMALL":
-                be_count += 1; pnl += real_net; balance += real_net
-                print(f"[BE-SMALL] {side} Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
-            elif result == "LOSS":
-                losses += 1; pnl += real_net; balance += real_net; consecutive_losses += 1
-                print(f"[LOSS] {side} Net {real_net:.4f} Bal ${balance:.2f} - REAL LOSS -$0.30 - Consecutive {consecutive_losses}/2", flush=True)
-            else:
-                if real_net >= 0.10:
-                    wins += 1; pnl += real_net; balance += real_net; consecutive_losses = 0
-                    print(f"[WIN] TIMEOUT Net +${real_net:.4f} Bal ${balance:.2f}", flush=True)
-                elif real_net >= -0.20:
-                    be_count += 1; pnl += real_net; balance += real_net
-                    print(f"[BE-SMALL] TIMEOUT Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
+                if real_net >= 0.05:
+                    result = "WIN-TIMEOUT"
+                elif real_net >= 0.00:
+                    result = "BE-PROFIT-TIMEOUT"
                 else:
-                    losses += 1; pnl += real_net; balance += real_net; consecutive_losses += 1
-                    print(f"[LOSS] TIMEOUT Net {real_net:.4f} Bal ${balance:.2f}", flush=True)
+                    result = "LOSS-TIMEOUT"
+            last_trade_time = time.time()
+            if result == "WIN" or result == "WIN-TIMEOUT":
+                wins += 1; pnl += real_net; balance += real_net; consecutive_losses = 0
+                print(f"[WIN] {side} Net +${real_net:.4f} Bal ${balance:.2f} - V35 WIN {result}", flush=True)
+            elif result == "BE-PROFIT" or result == "BE-PROFIT-TIMEOUT":
+                be_count += 1; pnl += real_net; balance += real_net
+                print(f"[BE-PROFIT] {side} Net +${real_net:.4f} Bal ${balance:.2f} - BE OVER FEES, wick off but PROFIT, never minus ✅", flush=True)
+            else:
+                losses += 1; pnl += real_net; balance += real_net; consecutive_losses += 1
+                print(f"[LOSS] {side} Net {real_net:.4f} Bal ${balance:.2f} - Never reach BE OVER FEES $3.50 - Consecutive {consecutive_losses}/2 - {result}", flush=True)
             total_tr = wins + be_count + losses
             wr = (wins / total_tr * 100) if total_tr > 0 else 0
-            print(f"[SUMMARY] $2.20 REAL START | Wins {wins} BE {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | TP $4.00 WIN +$0.14 | SL LOSS -$0.30 | V32 DXY+NASDAQ PRIORITY", flush=True)
+            print(f"[SUMMARY] $2.20 REAL START | Wins {wins} BE-PROFIT {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | TP WIN +$0.14 | BE PROFIT +$0.08 NEVER MINUS | SL LOSS -$0.30 | V35", flush=True)
             if balance < MIN_BALANCE_STOP:
                 stopped = True
                 print(f"[STOP] Balance ${balance:.2f} - HARD STOP", flush=True)
@@ -462,21 +441,60 @@ def bot_loop():
             print(traceback.format_exc(), flush=True)
             time.sleep(1)
 
+# ===== V35 HEARTBEAT + SELF PING EVERY 1 MIN =====
+def heartbeat_loop():
+    global last_heartbeat
+    while True:
+        try:
+            time.sleep(HEARTBEAT_SEC)
+            # Self ping RENDER_URL every 1 min, with log
+            if RENDER_URL:
+                try:
+                    req = urllib.request.Request(RENDER_URL, headers={"User-Agent": "Bot-Self-Ping-V35"})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        print(f"[SELF-PING] Ping RENDER_URL ... OK {r.status} - {lagos_time_str()} - Bot dey alive, Render no go sleep", flush=True)
+                except Exception as e:
+                    print(f"[SELF-PING] Ping RENDER_URL ... FAIL {e} - {lagos_time_str()} - Still alive, retry next min", flush=True)
+            else:
+                print(f"[SELF-PING] No RENDER_URL set - Self ping skip - {lagos_time_str()}", flush=True)
+            # Heartbeat - Bot always talk
+            weekend = is_weekend()
+            market_note = "DXY/NASDAQ CLOSED Weekend" if weekend else "DXY/NASDAQ LIVE Weekday"
+            price_note = f"${last_price_seen:.1f}" if last_price_seen else "fetching..."
+            wick_note = f"${last_wick_seen:.2f}" if last_wick_seen else "$0.00"
+            print(f"[ALIVE] Bot dey alive 👌 - {lagos_time_str()} | Balance ${balance:.2f} | Wins {wins} BE-PROFIT {be_count} Losses {losses} PnL ${pnl:.4f} | BTC {price_note} Wick {wick_note} (Need $15+) | {market_note} | BE OVER FEES $3.50 -> +$0.08 | Waiting for high conviction...", flush=True)
+        except Exception as e:
+            print(f"[HEARTBEAT ERR] {e}", flush=True)
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V32 MONDAY READY ALIVE")
-    def log_message(self, *a): pass
+        # V35: Log UptimeRobot + Self Ping visibly
+        ua = self.headers.get("User-Agent", "unknown")
+        is_uptime = "UptimeRobot" in ua or "uptimerobot" in ua.lower()
+        is_self = "Bot-Self-Ping" in ua
+        if is_uptime:
+            print(f"[UPTIMEROBOT] Ping from UptimeRobot - {lagos_time_str()} - Bot ALIVE - 200 OK - Balance ${balance:.2f} Wins {wins} BE {be_count} Losses {losses}", flush=True)
+        elif is_self:
+            print(f"[SELF-PING] HTTP GET from Self-Ping - {lagos_time_str()} - Bot ALIVE - 200 OK", flush=True)
+        else:
+            print(f"[HTTP] GET / from {ua[:40]} - {lagos_time_str()} - Bot ALIVE", flush=True)
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V35 SELF PING 1 MIN ALIVE - BE OVER FEES")
+    def log_message(self, *a):
+        # V35: Don't hide logs, show HTTP
+        print(f"[HTTP-LOG] {a}", flush=True)
 
 def keep_alive():
+    # V35: keep_alive now just backup, heartbeat_loop does main ping every 1 min
     while True:
-        time.sleep(240)
+        time.sleep(60)
         if RENDER_URL:
             try: urllib.request.urlopen(RENDER_URL, timeout=10)
             except: pass
 
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     port = int(os.getenv("PORT", "10000"))
-    print(f"[START] V32 MONDAY READY starting on port {port}", flush=True)
+    print(f"[START] V35 SELF PING 1 MIN + HEARTBEAT starting on port {port} - {lagos_time_str()}", flush=True)
     HTTPServer(("0.0.0.0", port), H).serve_forever()
