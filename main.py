@@ -1,5 +1,5 @@
-# V36 LOOSEN ENTRY RAPID WIN RATE - FOR REAL $2.20 BYBIT - BE OVER FEES STILL NEVER MINUS
-# FIX V35 TOO TIGHT: 5 hours = 1 WIN PnL +$0.12 Wick $2.70 Need $15+ -> disaster. V36 LOOSEN: Wick $15->$6, Whale 0.30->0.15, Orderbook 1.5x->1.2x, Need Weekend 3->2 Weekday 5->3, Cooldown 15s->8s, Max Hold 3s->5s, Pullback $0.50->$0.80. KEEP BE OVER FEES $3.50 -> +$0.08 NEVER MINUS, TP $4.00 WIN +$0.14, SL $1.50 LOSS -$0.30. SELF PING 1 MIN + HEARTBEAT KEEP.
+# V38 NEVER STOP - SMART RECOVERY - FOR $1.51 BYBIT - FULL INTELLIGENCE
+# FIX V37: Daily STOP -$0.60 / 3 Losses = HARD STOP removed per user: Bot should never stop, just be very mindful of not losing but winning with full intelligence. V38: NO DAILY STOP, NO HARD STOP for losses. Instead Smart Recovery: NORMAL (Wick $8 Whale 0.20 Need 3 Momentum $1.50) -> CAREFUL after 2 consecutive losses (Wick $10 Whale 0.25 Need 4 Momentum $2.00 Cooldown 30s) -> RECOVERY after 3 total losses (Wick $12 Whale 0.30 Need 4 Momentum $2.50 Orderbook 1.5x Cooldown 60s). After 1 WIN, back to NORMAL automatically. KEEP BE $3.50 -> +$0.08 NEVER MINUS, TP $4.00 WIN +$0.14, SL $1.50 LOSS -$0.30. Momentum + Dead Market Filter KEEP. SELF PING 1 MIN + HEARTBEAT KEEP.
 import os, time, hmac, hashlib, json, threading, urllib.request, urllib.parse, traceback, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -8,37 +8,41 @@ API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 SYMBOL = "BTCUSDT"
-BASE_BALANCE = 2.20
 LEVERAGE = 80
 QTY_FIXED = 0.001
 CHECK_INTERVAL = 0.5
 LIVE_CHECK = 0.05
-COOLDOWN_SEC = 8  # V36: 15s -> 8s rapid
-MIN_WHALE_BTC = 0.15  # V36: 0.30 -> 0.15 loosen for weekend quiet
-MIN_WICK_USD = 6.0  # V36: $15 -> $6 loosen, Wick $2.70 -> $6 fit happen
 TP_FIXED_USD = 4.00
 SL_FIXED_USD = 1.50
 SLIPPAGE_USD = 0.5
-BE_TRIGGER = 3.50  # V36: KEEP BE OVER FEES, never loosen BE to minus
-BE_LOCK = 3.50  # V36: KEEP Entry + $3.50 = +$0.08 PROFIT never minus
-MAX_HOLD_SEC = 5  # V36: 3s -> 5s give price time to reach BE $3.50
-MIN_BALANCE_STOP = 0.80
+BE_TRIGGER = 3.50
+BE_LOCK = 3.50
+MAX_HOLD_SEC = 5
+MIN_BALANCE_STOP = 0.80  # V38: Only HARD STOP na if balance < $0.80 (no money to trade), not for losses. This na Bybit margin, not daily stop.
 REAL_FEE_PER_TRADE = 0.18
 FUNDING_FEE_EST = 0.02
 REAL_LATENCY_SEC = 0.2
-PULLBACK_USD = 0.80  # V36: $0.50 -> $0.80 loosen
 HEARTBEAT_SEC = 60
 
-balance = 2.32  # V36: Start from current balance $2.32 from screenshot, not $2.20
-wins = 1
+# V38 Base settings - will be adjusted by Smart Recovery, never stop
+BASE_WICK = 8.0
+BASE_WHALE = 0.20
+BASE_NEED = 3
+BASE_MOMENTUM = 1.50
+BASE_COOLDOWN = 15
+BASE_ORDERBOOK = 1.3
+
+balance = 1.51
+wins = 0
 be_count = 0
 losses = 0
-pnl = 0.12
+pnl = 0.0
 last_trade_time = 0
 stopped = False
 consecutive_losses = 0
 last_wick_seen = 0.0
 last_price_seen = 0.0
+wick_history = []
 
 def safe_float(x, default=None):
     try:
@@ -57,6 +61,22 @@ def lagos_time_str():
         return now.strftime("%H:%M:%S Lagos")
     except:
         return datetime.datetime.utcnow().strftime("%H:%M:%S UTC")
+
+def lagos_hour():
+    try:
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
+        return now.hour, now.weekday()
+    except:
+        return datetime.datetime.utcnow().hour, datetime.datetime.utcnow().weekday()
+
+def get_smart_mode():
+    # V38 NEVER STOP - Smart Recovery: Bot adjusts, never stops
+    if consecutive_losses >= 3 or losses >= 5:
+        return "RECOVERY", 12.0, 0.30, 4, 2.50, 60, 1.5, "RECOVERY MODE: 3+ losses - Very careful, only strongest trade. Wick $12 Whale 0.30 Need 4 Momentum $2.50 Orderbook 1.5x Cooldown 60s - NEVER STOP, just mindful"
+    elif consecutive_losses >= 2:
+        return "CAREFUL", 10.0, 0.25, 4, 2.00, 30, 1.4, "CAREFUL MODE: 2 losses in a row - More mindful. Wick $10 Whale 0.25 Need 4 Momentum $2.00 Cooldown 30s - NEVER STOP"
+    else:
+        return "NORMAL", 8.0, 0.20, 3, 1.50, 15, 1.3, "NORMAL MODE: Winning or balanced - Wick $8 Whale 0.20 Need 3 Momentum $1.50 - Full intelligence"
 
 def http_get(url, headers={}, timeout=5):
     try:
@@ -81,7 +101,7 @@ def bybit_get(path, params={}):
 
 def bybit_post(path, body):
     if not REAL_MODE:
-        return {"retCode": 0, "result": {"orderId": "PAPER-V36-LOOSEN"}}
+        return {"retCode": 0, "result": {"orderId": "PAPER-V38-NEVER-STOP"}}
     try:
         ts = str(int(time.time()*1000))
         payload = json.dumps(body)
@@ -119,6 +139,16 @@ def is_weekend():
     except:
         return datetime.datetime.utcnow().weekday() >= 5
 
+def is_dead_market():
+    hour, weekday = lagos_hour()
+    weekend = weekday >= 5
+    if weekend and 0 <= hour < 11:
+        if len(wick_history) >= 5:
+            avg_wick = sum(wick_history[-10:]) / len(wick_history[-10:])
+            if avg_wick < 2.0:
+                return True, f"Dead Market: Weekend {hour}:00 Lagos, Avg Wick ${avg_wick:.2f} < $2, market dey sleep, no force trade"
+    return False, ""
+
 def yahoo_quote(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=2d&interval=1d"
@@ -138,7 +168,7 @@ def yahoo_quote(symbol):
         print(f"[YAHOO ERR] {symbol} {e}", flush=True)
     return {"price": None, "prev": None, "pct": 0, "ok": False}
 
-def get_worldwide_v36():
+def get_worldwide_v38(orderbook_mult):
     weekend = is_weekend()
     dxy = yahoo_quote("DX-Y.NYB")
     if dxy["ok"]:
@@ -232,23 +262,23 @@ def get_worldwide_v36():
             asks = d["result"].get("a", [])
             bid_vol = sum(safe_float(x[1], 0) or 0 for x in bids[:10])
             ask_vol = sum(safe_float(x[1], 0) or 0 for x in asks[:10])
-            if bid_vol > ask_vol * 1.2:  # V36: 1.5x -> 1.2x loosen
-                ob_bias = "BUY_BTC"; ob_reason = f"Orderbook Buy Wall {bid_vol:.2f} vs Sell {ask_vol:.2f} (1.2x) - fit push $3.50"
-            elif ask_vol > bid_vol * 1.2:
-                ob_bias = "SELL_BTC"; ob_reason = f"Orderbook Sell Wall {ask_vol:.2f} vs Buy {bid_vol:.2f} (1.2x) - fit push $3.50"
+            if bid_vol > ask_vol * orderbook_mult:
+                ob_bias = "BUY_BTC"; ob_reason = f"Orderbook Buy Wall {bid_vol:.2f} vs Sell {ask_vol:.2f} ({orderbook_mult}x)"
+            elif ask_vol > bid_vol * orderbook_mult:
+                ob_bias = "SELL_BTC"; ob_reason = f"Orderbook Sell Wall {ask_vol:.2f} vs Buy {bid_vol:.2f} ({orderbook_mult}x)"
             else:
                 ob_reason = f"Orderbook balanced Buy {bid_vol:.2f} Sell {ask_vol:.2f}"
     except: pass
-    return {"weekend": weekend, "votes": [("DXY-PRIORITY", dxy_bias, dxy_reason), ("NASDAQ-PRIORITY", nas_bias, nas_reason), ("SPX", spx_bias, spx_reason), ("GOLD", gold_bias, gold_reason), ("EMA-TREND", ema_bias, ema_reason), ("ETH+FUNDING", eth_bias, eth_reason), ("ORDERBOOK-1.2x", ob_bias, ob_reason)]}
+    return {"weekend": weekend, "votes": [("DXY-PRIORITY", dxy_bias, dxy_reason), ("NASDAQ-PRIORITY", nas_bias, nas_reason), ("SPX", spx_bias, spx_reason), ("GOLD", gold_bias, gold_reason), ("EMA-TREND", ema_bias, ema_reason), ("ETH+FUNDING", eth_bias, eth_reason), ("ORDERBOOK", ob_bias, ob_reason)]}
 
-def worldwide_score_v36(whale_side, wick):
+def worldwide_score_v38(whale_side, wick, need, orderbook_mult):
     whale_bias = "BUY_BTC" if whale_side=="Buy" else "SELL_BTC"
-    ww = get_worldwide_v36()
+    ww = get_worldwide_v38(orderbook_mult)
     weekend = ww["weekend"]
     votes = [("WHALE", whale_bias, f"Whale {whale_side}")] + ww["votes"]
     weighted_agree = 0
     weighted_total = 0
-    print(f"[WORLDWIDE] {'WEEKEND' if weekend else 'WEEKDAY'} Whale {whale_side} Wick ${wick:.2f} | V36 LOOSEN Need {2 if weekend else 3}", flush=True)
+    print(f"[WORLDWIDE] {'WEEKEND' if weekend else 'WEEKDAY'} Whale {whale_side} Wick ${wick:.2f} | V38 NEVER STOP Need {need}", flush=True)
     for name, bias, reason in votes:
         weight = 2 if name in ("DXY-PRIORITY", "NASDAQ-PRIORITY") and not weekend else 1
         if weekend and name in ("DXY-PRIORITY", "NASDAQ-PRIORITY", "SPX", "GOLD"):
@@ -262,11 +292,10 @@ def worldwide_score_v36(whale_side, wick):
             weighted_agree += weight
         if bias != "NEUTRAL":
             weighted_total += weight
-    need = 2 if weekend else 3  # V36: Weekend 3->2, Weekday 5->3 loosen rapid
-    print(f"[WORLDWIDE] Weighted Agree {weighted_agree} / Live Total {weighted_total} | Need {need} V36 LOOSEN", flush=True)
+    print(f"[WORLDWIDE] Weighted Agree {weighted_agree} / Live Total {weighted_total} | Need {need} V38 NEVER STOP", flush=True)
     return weighted_agree, weighted_total, need, votes
 
-def detect_signal(trades):
+def detect_signal(trades, min_whale):
     if not trades: return None
     clean_trades = []
     for t in trades:
@@ -283,7 +312,7 @@ def detect_signal(trades):
     biggest = max(clean_trades, key=lambda t: safe_float(t.get("size"), 0) or 0)
     biggest_size = safe_float(biggest.get("size"), 0) or 0
     biggest_side = biggest.get("side", "")
-    if biggest_size >= MIN_WHALE_BTC:
+    if biggest_size >= min_whale:
         return {"type": "WHALE", "side": biggest_side, "size": biggest_size, "wick": wick, "current": current, "wick_pct": wick / current * 100 if current else 0}
     return None
 
@@ -309,7 +338,7 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
     best_move = 0.0
     be_active = False
     current_sl = sl_price
-    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 WIN +$0.14) SL ${sl_price:.1f} (-$1.50 LOSS -$0.30) | BE OVER FEES +$3.50 -> +$0.08 NEVER MINUS | V36 LOOSEN", flush=True)
+    print(f"[ALIVE] Trade open {side} Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 WIN +$0.14) SL ${sl_price:.1f} (-$1.50 LOSS -$0.30) | BE OVER FEES +$3.50 -> +$0.08 NEVER MINUS | V38 NEVER STOP", flush=True)
     while True:
         elapsed = time.time() - start
         live = get_live_price()
@@ -332,20 +361,21 @@ def run_alive_trade(side, entry_price, tp_price, sl_price):
 
 def bot_loop():
     global balance, wins, be_count, losses, pnl, last_trade_time, stopped, consecutive_losses, last_wick_seen, last_price_seen
-    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} $2.32 START Lev 80x Qty 0.001 V36 LOOSEN RAPID", flush=True)
-    print(f"[EYE] V36 LOOSEN - Wick $6 Whale 0.15 Orderbook 1.2x Need 2/3 Cooldown 8s Hold 5s | BE $3.50 -> +$0.08 NEVER MINUS | TP WIN +$0.14 | SL -$0.30", flush=True)
+    print(f"[AUTO-CONFIG] Done! {'REAL' if REAL_MODE else 'PAPER-REAL-SIM'} $1.51 START Lev 80x Qty 0.001 V38 NEVER STOP", flush=True)
+    print(f"[EYE] V38 NEVER STOP - NO DAILY STOP - Smart Recovery: NORMAL -> CAREFUL (2 losses) -> RECOVERY (3+ losses) -> Back to NORMAL after 1 WIN | BE $3.50 -> +$0.08 NEVER MINUS | TP WIN +$0.14 | SL -$0.30", flush=True)
     while True:
         try:
             if stopped:
+                # V38: Only stop if balance < $0.80 (no money), otherwise NEVER STOP - even this will try to wait, not die
+                print(f"[LOW-BALANCE] Balance ${balance:.2f} < $0.80 - Waiting for balance, NEVER STOP forever, just waiting...", flush=True)
                 time.sleep(10); continue
             if balance < MIN_BALANCE_STOP:
                 stopped = True
-                print(f"[STOP] Balance ${balance:.2f} < $0.80 - HARD STOP", flush=True)
+                print(f"[LOW-BALANCE-WAIT] Balance ${balance:.2f} - Bot waiting, not stopped forever. Add funds or wait.", flush=True)
                 time.sleep(10); continue
-            if consecutive_losses >= 2:
-                print(f"[PAUSE] 2 LOSS in a row - Pause 60s", flush=True)
-                consecutive_losses = 0
-                time.sleep(60); continue
+            # V38: NO DAILY STOP - NO PAUSE FOR LOSSES THAT STOPS BOT. Only Smart Recovery adjusts filters.
+            # Get current smart mode - bot learns from losses, never stops
+            mode, cur_wick, cur_whale, cur_need, cur_momentum, cur_cooldown, cur_ob, mode_reason = get_smart_mode()
             now = time.time()
             trades = get_recent_trades()
             if trades:
@@ -354,36 +384,53 @@ def bot_loop():
                 if prices_tmp:
                     last_wick_seen = max(prices_tmp) - min(prices_tmp)
                     last_price_seen = prices_tmp[0]
-            sig = detect_signal(trades)
+                    wick_history.append(last_wick_seen)
+                    if len(wick_history) > 20: wick_history.pop(0)
+            dead, dead_reason = is_dead_market()
+            if dead:
+                time.sleep(CHECK_INTERVAL); continue
+            sig = detect_signal(trades, cur_whale)
             if sig is None:
                 time.sleep(CHECK_INTERVAL); continue
-            if now - last_trade_time < COOLDOWN_SEC:
+            if now - last_trade_time < cur_cooldown:
                 time.sleep(CHECK_INTERVAL); continue
-            if sig["wick"] < MIN_WICK_USD:
+            if sig["wick"] < cur_wick:
                 time.sleep(CHECK_INTERVAL); continue
             side = sig["side"]
-            agree, total, need, votes = worldwide_score_v36(side, sig["wick"])
+            agree, total, need, votes = worldwide_score_v38(side, sig["wick"], cur_need, cur_ob)
             if agree < need:
-                print(f"[WORLDWIDE-SKIP] {side} Weighted Agree {agree} < Need {need} - SKIP V36", flush=True)
+                print(f"[WORLDWIDE-SKIP] {side} Weighted Agree {agree} < Need {need} - SKIP V38 [{mode} MODE] - {mode_reason}", flush=True)
                 last_trade_time = time.time()
                 time.sleep(2); continue
-            print(f"[WORLDWIDE-APPROVED] {side} Weighted Agree {agree} >= Need {need} - V36 LOOSEN enter", flush=True)
+            # V38 Momentum - must still move same direction
+            price_before_mom = get_live_price()
+            if price_before_mom is None: price_before_mom = sig["current"]
+            time.sleep(1.0)
+            price_after_mom = get_live_price()
+            if price_after_mom is None: price_after_mom = price_before_mom
+            mom_move = (price_after_mom - price_before_mom) if side == "Buy" else (price_before_mom - price_after_mom)
+            if mom_move < cur_momentum:
+                print(f"[MOMENTUM-SKIP] {side} Fake Wick! Wick ${sig['wick']:.2f} but after 1s price only move ${mom_move:.2f} < ${cur_momentum:.2f} - SKIP, no blind entry. [{mode} MODE]", flush=True)
+                last_trade_time = time.time()
+                time.sleep(2); continue
+            print(f"[MOMENTUM-OK] {side} Wick ${sig['wick']:.2f} + Momentum +${mom_move:.2f} in 1s - Real move, enter [{mode} MODE]", flush=True)
+            print(f"[WORLDWIDE-APPROVED] {side} Weighted Agree {agree} >= Need {need} - V38 NEVER STOP [{mode}] enter - {mode_reason}", flush=True)
             current = sig["current"]
             cached = get_live_price()
             if cached is not None: current = cached
             if balance - 0.30 < 0:
-                print(f"[MARGIN] Balance ${balance:.2f} no fit cover worst loss -$0.30 - REJECT", flush=True)
+                print(f"[MARGIN] Balance ${balance:.2f} no fit cover worst loss -$0.30 - REJECT, waiting, NEVER STOP", flush=True)
                 time.sleep(CHECK_INTERVAL); continue
             margin_needed = (current * QTY_FIXED) / LEVERAGE
             if margin_needed > balance:
-                print(f"[MARGIN] Margin ${margin_needed:.2f} > Bal ${balance:.2f} - REJECT", flush=True)
+                print(f"[MARGIN] Margin ${margin_needed:.2f} > Bal ${balance:.2f} - REJECT, waiting", flush=True)
                 time.sleep(CHECK_INTERVAL); continue
             price_before = current
             time.sleep(0.5)
             price_after = get_live_price()
             if price_after is None: price_after = price_before
             pullback_move = (price_after - price_before) if side == "Buy" else (price_before - price_after)
-            if pullback_move < -PULLBACK_USD:
+            if pullback_move < -0.50:
                 print(f"[PULLBACK-SKIP] {side} Price waka against us ${pullback_move:.2f} - SKIP", flush=True)
                 time.sleep(CHECK_INTERVAL); continue
             time.sleep(REAL_LATENCY_SEC)
@@ -396,8 +443,8 @@ def bot_loop():
             gross_tp, net_tp = calc_real_pnl(TP_FIXED_USD, entry_price)
             gross_be, net_be = calc_real_pnl(BE_LOCK, entry_price)
             gross_sl, net_sl = calc_real_pnl(-SL_FIXED_USD, entry_price)
-            print(f"[{sig['type']}] {side} Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} | Current ${current:.1f} | Pullback ${pullback_move:.2f} OK", flush=True)
-            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 Net ${net_tp:.2f}) BE-OVER-FEES ${entry_price+BE_LOCK:.1f} (+$3.50 Net ${net_be:.2f} PROFIT) SL ${sl_price:.1f} (-$1.50 Net ${net_sl:.2f}) | V36", flush=True)
+            print(f"[{sig['type']}] {side} Size {sig['size']:.3f} BTC | Wick ${sig['wick']:.2f} | Momentum +${mom_move:.2f} | Current ${current:.1f} | Pullback ${pullback_move:.2f} OK | Mode {mode}", flush=True)
+            print(f"[STEALTH] {side} -> Entry ${entry_price:.1f} TP ${tp_price:.1f} (+$4.00 Net ${net_tp:.2f}) BE-OVER-FEES ${entry_price+BE_LOCK:.1f} (+$3.50 Net ${net_be:.2f} PROFIT) SL ${sl_price:.1f} (-$1.50 Net ${net_sl:.2f}) | V38 {mode}", flush=True)
             if REAL_MODE:
                 place_stealth_trio(side, entry_price, tp_price, sl_price, QTY_FIXED)
             else:
@@ -420,19 +467,22 @@ def bot_loop():
             last_trade_time = time.time()
             if result == "WIN" or result == "WIN-TIMEOUT":
                 wins += 1; pnl += real_net; balance += real_net; consecutive_losses = 0
-                print(f"[WIN] {side} Net +${real_net:.4f} Bal ${balance:.2f} - V36 WIN {result}", flush=True)
+                print(f"[WIN] {side} Net +${real_net:.4f} Bal ${balance:.2f} - V38 WIN {result} - Willing to win ✅ - Back to NORMAL MODE", flush=True)
             elif result == "BE-PROFIT" or result == "BE-PROFIT-TIMEOUT":
                 be_count += 1; pnl += real_net; balance += real_net
                 print(f"[BE-PROFIT] {side} Net +${real_net:.4f} Bal ${balance:.2f} - BE OVER FEES, wick off but PROFIT ✅", flush=True)
             else:
                 losses += 1; pnl += real_net; balance += real_net; consecutive_losses += 1
-                print(f"[LOSS] {side} Net {real_net:.4f} Bal ${balance:.2f} - Never reach BE $3.50 - Consecutive {consecutive_losses}/2 - {result}", flush=True)
+                # V38 NEVER STOP: After loss, bot does NOT stop, it just goes to CAREFUL/RECOVERY mode next trade
+                next_mode, _, _, _, _, _, _, _ = get_smart_mode()
+                print(f"[LOSS] {side} Net {real_net:.4f} Bal ${balance:.2f} - Never reach BE $3.50 - Consecutive {consecutive_losses} - Next Mode: {next_mode} - NEVER STOP, just more mindful 👌", flush=True)
             total_tr = wins + be_count + losses
             wr = (wins / total_tr * 100) if total_tr > 0 else 0
-            print(f"[SUMMARY] $2.32 START | Wins {wins} BE-PROFIT {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | TP WIN +$0.14 | BE PROFIT +$0.08 NEVER MINUS | SL -$0.30 | V36 LOOSEN", flush=True)
+            mode_now, _, _, _, _, _, _, _ = get_smart_mode()
+            print(f"[SUMMARY] $1.51 START | Wins {wins} BE-PROFIT {be_count} Losses {losses} WinRate {wr:.0f}% PnL ${pnl:.4f} Bal ${balance:.2f} | Mode {mode_now} | TP WIN +$0.14 | BE PROFIT +$0.08 NEVER MINUS | SL -$0.30 | V38 NEVER STOP", flush=True)
             if balance < MIN_BALANCE_STOP:
                 stopped = True
-                print(f"[STOP] Balance ${balance:.2f} - HARD STOP", flush=True)
+                print(f"[LOW-BALANCE] Balance ${balance:.2f} - Waiting, not dead, NEVER STOP forever", flush=True)
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
             print(f"[ERR LOOP] {e}", flush=True)
@@ -445,7 +495,7 @@ def heartbeat_loop():
             time.sleep(HEARTBEAT_SEC)
             if RENDER_URL:
                 try:
-                    req = urllib.request.Request(RENDER_URL, headers={"User-Agent": "Bot-Self-Ping-V36"})
+                    req = urllib.request.Request(RENDER_URL, headers={"User-Agent": "Bot-Self-Ping-V38"})
                     with urllib.request.urlopen(req, timeout=10) as r:
                         print(f"[SELF-PING] Ping RENDER_URL ... OK {r.status} - {lagos_time_str()} - Bot dey alive, Render no go sleep", flush=True)
                 except Exception as e:
@@ -456,7 +506,10 @@ def heartbeat_loop():
             market_note = "DXY/NASDAQ CLOSED Weekend" if weekend else "DXY/NASDAQ LIVE Weekday"
             price_note = f"${last_price_seen:.1f}" if last_price_seen else "fetching..."
             wick_note = f"${last_wick_seen:.2f}" if last_wick_seen else "$0.00"
-            print(f"[ALIVE] Bot dey alive 👌 - {lagos_time_str()} | Balance ${balance:.2f} | Wins {wins} BE-PROFIT {be_count} Losses {losses} PnL ${pnl:.4f} | BTC {price_note} Wick {wick_note} (Need $6+ V36 LOOSEN) | {market_note} | BE OVER FEES $3.50 -> +$0.08 | Waiting...", flush=True)
+            dead, _ = is_dead_market()
+            dead_note = "DEAD MARKET - NO TRADE" if dead else "Market OK"
+            mode_now, _, _, _, _, _, _, mode_reason = get_smart_mode()
+            print(f"[ALIVE] Bot dey alive 👌 - {lagos_time_str()} | Balance ${balance:.2f} | Wins {wins} BE-PROFIT {be_count} Losses {losses} PnL ${pnl:.4f} | Mode {mode_now} | BTC {price_note} Wick {wick_note} | {market_note} | {dead_note} | BE OVER FEES $3.50 -> +$0.08 | NEVER STOP - Smart Recovery", flush=True)
         except Exception as e:
             print(f"[HEARTBEAT ERR] {e}", flush=True)
 
@@ -471,7 +524,7 @@ class H(BaseHTTPRequestHandler):
             print(f"[SELF-PING] HTTP GET from Self-Ping - {lagos_time_str()} - Bot ALIVE - 200 OK", flush=True)
         else:
             print(f"[HTTP] GET / from {ua[:40]} - {lagos_time_str()} - Bot ALIVE", flush=True)
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V36 LOOSEN ALIVE - BE OVER FEES")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"V38 NEVER STOP ALIVE - BE OVER FEES")
     def log_message(self, *a):
         print(f"[HTTP-LOG] {a}", flush=True)
 
@@ -487,5 +540,5 @@ if __name__ == "__main__":
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     port = int(os.getenv("PORT", "10000"))
-    print(f"[START] V36 LOOSEN RAPID starting on port {port} - {lagos_time_str()}", flush=True)
+    print(f"[START] V38 NEVER STOP starting on port {port} - {lagos_time_str()}", flush=True)
     HTTPServer(("0.0.0.0", port), H).serve_forever()
