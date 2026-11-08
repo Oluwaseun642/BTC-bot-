@@ -1,12 +1,11 @@
-import os, time, math, requests, datetime
+import os, time, math, requests, datetime, re, xml.etree.ElementTree as ET
 import threading
 
-# --- RENDER KEEP-ALIVE ---
 try:
     from flask import Flask
     app = Flask(__name__)
     @app.route('/')
-    def home(): return "V5.1 Human Skull Brain is alive!"
+    def home(): return "V5.5 Nasdaq Futures + Cash is alive!"
     def run_web():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
@@ -14,7 +13,6 @@ try:
     print("Keep-alive started", flush=True)
 except Exception as e:
     print(f"Keep-alive skip: {e}", flush=True)
-# --- END ---
 
 START_BAL = 10.0
 paper_balance = START_BAL
@@ -24,14 +22,18 @@ open_pos = None; waiting = None
 history = []
 consecutive_losses = 0
 consecutive_wins = 0
-# Backup memory - if API fail, use last good value, never 0 blind
-last_macro = {"DXY":0.0,"SPX":0.0,"NQ":0.0,"DAX":0.0,"FTSE":0.0,"NIKKEI":0.0,"OIL":0.0,"GOLD":0.0}
+BYBIT_MIN_QTY = 0.001
+BYBIT_QTY_STEP = 0.001
+BYBIT_MIN_ORDER_USD = 5.0
+BYBIT_MAKER_FEE = 0.00055
+BYBIT_TAKER_FEE = 0.0006
+last_macro = {"DXY":0.0,"SPX":0.0,"SPX_FUT":0.0,"NQ_FUT":0.0,"NQ_CASH":0.0,"NDX100":0.0,"DAX":0.0,"FTSE":0.0,"NIKKEI":0.0,"OIL":0.0,"GOLD":0.0}
+last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0}
 
 def log(msg):
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"{now} [V5.1-HUMAN] {msg}", flush=True)
+    print(f"{now} [V5.5-NASDAQ] {msg}", flush=True)
 
-# ============ FAST DATA WITH 3 BACKUPS - NO YFINANCE ============
 def yahoo_direct(symbol, host):
     try:
         url = f"https://{host}/v8/finance/chart/{symbol}?range=2d&interval=1d"
@@ -39,21 +41,18 @@ def yahoo_direct(symbol, host):
         r = requests.get(url, headers=headers, timeout=5).json()
         closes = r["chart"]["result"][0]["indicators"]["quote"][0]["close"]
         closes = [c for c in closes if c is not None]
-        if len(closes) >= 2:
+        if len(closes) >= 2 and closes[-2] != 0:
             return (closes[-1]-closes[-2])/closes[-2]*100
         return None
     except:
         return None
 
 def stooq_backup(symbol):
-    # Stooq - never blocks, CSV format, best backup
     try:
         url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
         r = requests.get(url, timeout=5).text.strip().split("\n")
-        # Format: Date,Open,High,Low,Close,Volume
         if len(r) >= 3:
-            last = r[-1].split(",")
-            prev = r[-2].split(",")
+            last = r[-1].split(","); prev = r[-2].split(",")
             c1 = float(last[4]); c0 = float(prev[4])
             if c0 != 0:
                 return (c1-c0)/c0*100
@@ -61,14 +60,12 @@ def stooq_backup(symbol):
     except:
         return None
 
-def fast_yahoo(symbol, stooq_symbol):
-    # Try 1: Yahoo query1, Try 2: Yahoo query2, Try 3: Stooq
-    v = yahoo_direct(symbol, "query1.finance.yahoo.com")
-    if v is not None:
-        return v
-    v = yahoo_direct(symbol, "query2.finance.yahoo.com")
-    if v is not None:
-        return v
+def fast_yahoo_multi(yahoo_symbols, stooq_symbol):
+    for ys in yahoo_symbols:
+        for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
+            v = yahoo_direct(ys, host)
+            if v is not None:
+                return v
     v = stooq_backup(stooq_symbol)
     if v is not None:
         return v
@@ -76,25 +73,27 @@ def fast_yahoo(symbol, stooq_symbol):
 
 def get_macro_all():
     global last_macro
-    # symbol map: (yahoo_symbol, stooq_symbol)
+    # NASDAQ FUTURES + CASH SEPARATED - NEW IN V5.5
     mapping = {
-        "DXY": ("DX-Y.NYB", "dx-y.nyb"),
-        "SPX": ("%5EGSPC", "^spx"),
-        "NQ": ("%5EIXIC", "^ixic"),
-        "DAX": ("%5EGDAXI", "^gdaxi"),
-        "FTSE": ("%5EFTSE", "^ftse"),
-        "NIKKEI": ("%5EN225", "^n225"),
-        "OIL": ("CL%3DF", "cl.f"),
-        "GOLD": ("GC%3DF", "gc.f"),
+        "DXY": (["DX-Y.NYB", "DX=F", "DXY", "%5EDXY"], "dx.f"),
+        "SPX": (["%5EGSPC", "SPY"], "^spx"),
+        "SPX_FUT": (["ES%3DF", "ES=F", "SPX"], "es.f"),  # S&P 500 Futures
+        "NQ_FUT": (["NQ%3DF", "NQ=F"], "nq.f"),  # NASDAQ 100 FUTURES - LEADS MARKET
+        "NQ_CASH": (["%5EIXIC", "QQQ"], "^ixic"),  # NASDAQ COMPOSITE CASH
+        "NDX100": (["%5ENDX", "NDX", "QQQ"], "^ndx"),  # NASDAQ 100 CASH - Tech heavy
+        "DAX": (["%5EGDAXI", "DAX"], "^gdaxi"),
+        "FTSE": (["%5EFTSE", "FTSE"], "^ftse"),
+        "NIKKEI": (["%5EN225", "NIKKEI"], "^n225"),
+        "OIL": (["CL%3DF", "CL=F", "USO"], "cl.f"),
+        "GOLD": (["GC%3DF", "GC=F", "GLD"], "gc.f"),
     }
     out = {}
-    for k, (ys, ss) in mapping.items():
-        v = fast_yahoo(ys, ss)
+    for k, (ys_list, ss) in mapping.items():
+        v = fast_yahoo_multi(ys_list, ss)
         if v is not None:
-            out[k] = v
-            last_macro[k] = v
+            out[k] = v; last_macro[k] = v
         else:
-            out[k] = last_macro[k]  # Use last good, never blind 0
+            out[k] = last_macro[k]
             log(f"Macro backup used for {k}: {out[k]:+.2f}% (last good)")
     return out
 
@@ -129,13 +128,11 @@ def get_bybit_smart_money():
     return out
 
 def get_fear_greed():
-    # Backup: if alternative.me fails, try Bybit sentiment via funding as proxy
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5).json()
         return int(r["data"][0]["value"]), r["data"][0]["value_classification"]
     except:
         try:
-            # Backup 2: CoinMarketCap Fear Greed via alternative endpoint
             r2 = requests.get("https://api.alternative.me/v2/fng/?limit=1", timeout=5).json()
             return int(r2["data"][0]["value"]), r2["data"][0]["value_classification"]
         except:
@@ -148,12 +145,67 @@ def get_session():
     elif 20 <= h < 23: return "NY_LATE", 0.8
     else: return "ASIA", 0.6
 
-def get_news_risk():
+DANGER_WORDS = ["hack", "exploit", "breach", "stolen", "lawsuit", "sue", "sec", "ban", "crash", "collapse", "bankrupt", "war", "attack", "sanction", "regulation crackdown", "etf reject", "fraud", "liquidation cascade", "emergency", "martial"]
+BULLISH_WORDS = ["etf approve", "etf approved", "adoption", "bullish", "record high", "institutional", "partnership", "upgrade"]
+CALENDAR_WORDS = ["cpi", "fomc", "nfp", "nonfarm", "rate decision", "interest rate", "fed chair", "powell"]
+
+def parse_rss_titles(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=6)
+        root = ET.fromstring(r.content)
+        titles = []
+        for item in root.iter("item"):
+            t = item.find("title")
+            if t is not None and t.text:
+                titles.append(t.text)
+            if len(titles) >= 5:
+                break
+        return titles
+    except:
+        return []
+
+def get_live_news():
+    global last_news
+    if time.time() - last_news["time"] < 300 and last_news["time"] != 0:
+        return last_news
+    titles = []
+    titles += parse_rss_titles("https://www.coindesk.com/arc/outboundfeed/rss/")
+    titles += parse_rss_titles("https://cointelegraph.com/rss")
+    danger = False; headline_hit = ""; score = 0.0; calendar_hit = False
+    for t in titles:
+        low = t.lower()
+        for w in DANGER_WORDS:
+            if w in low:
+                danger = True; headline_hit = t; score -= 2.0; break
+        for w in BULLISH_WORDS:
+            if w in low:
+                score += 0.8
+                if not headline_hit: headline_hit = t
+        for w in CALENDAR_WORDS:
+            if w in low:
+                calendar_hit = True
+                if not headline_hit: headline_hit = t
+        if danger:
+            break
+    out = {"danger": danger, "headline": headline_hit, "score": score, "calendar": calendar_hit, "titles": titles[:3], "time": time.time()}
+    last_news = out
+    if danger:
+        log(f"📰 LIVE NEWS DANGER: {headline_hit}")
+    elif headline_hit:
+        log(f"📰 LIVE NEWS: {headline_hit} | Score {score:+.1f}")
+    return out
+
+def get_news_risk(live_news):
     now = datetime.datetime.utcnow()
     h, wd = now.hour, now.weekday()
-    if wd == 4 and 12 <= h < 14: return True, "NFP NEWS - WAIT"
-    if wd == 2 and 12 <= h < 14: return True, "CPI NEWS - WAIT"
-    if wd == 2 and 18 <= h < 20: return True, "FOMC NEWS - WAIT"
+    if wd == 4 and 12 <= h < 14: return True, "NFP NEWS - WAIT (Calendar)"
+    if wd == 2 and 12 <= h < 14: return True, "CPI NEWS - WAIT (Calendar)"
+    if wd == 2 and 18 <= h < 20: return True, "FOMC NEWS - WAIT (Calendar)"
+    if live_news.get("danger"):
+        return True, f"LIVE BREAKING NEWS - WAIT: {live_news.get('headline','')[:80]}"
+    if live_news.get("calendar"):
+        return True, f"LIVE CALENDAR NEWS IN HEADLINES - WAIT: {live_news.get('headline','')[:80]}"
     return False, ""
 
 def ema(data, n):
@@ -195,7 +247,7 @@ def smc_analysis(closes, highs, lows):
         if highs[-1] < lows[-3]: score -= 1.0; signal += " + BEARISH FVG"
     return score, signal
 
-def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, news_block, news_msg):
+def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news):
     atr_pct = (atr / btc) * 100
     if atr_pct < 0.08: regime="CALM"; vol_mult=0.7
     elif atr_pct < 0.20: regime="NORMAL"; vol_mult=1.0
@@ -226,18 +278,34 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     risk_usd = paper_balance * risk_pct
     lev = max(5, min(20, int(1.5 / max(atr_pct,0.05) * 0.5)))
     if paper_balance < 20: lev = min(lev, 15)
-    qty = risk_usd / max(atr, 20)
-    qty = max(0.001, min(qty, 0.01)); qty = round(qty, 3)
+    qty_raw = risk_usd / max(atr, 20)
+    qty = max(qty_raw, 0.005)
+    qty = max(qty, BYBIT_MIN_QTY)
+    qty = min(qty, 0.01)
+    qty = round(qty / BYBIT_QTY_STEP) * BYBIT_QTY_STEP
+    qty = round(qty, 3)
     pos_usd = qty * btc
-    trade_fee = pos_usd * 0.0006; fund_fee = pos_usd * 0.0001; lev_fee = pos_usd * 0.0001
-    buffer = 0.02 * vol_mult
+    bybit_ok = pos_usd >= BYBIT_MIN_ORDER_USD or paper_balance < 20
+    trade_fee = pos_usd * BYBIT_TAKER_FEE
+    fund_fee = pos_usd * 0.0001
+    lev_fee = pos_usd * 0.0001
+    buffer = 0.005 * vol_mult
     total_fees = trade_fee + fund_fee + lev_fee + buffer
-    be_profit = max(paper_balance*0.02, total_fees*0.8, 0.10)
-    be_profit = min(be_profit, paper_balance*0.05)
+    be_profit = max(paper_balance*0.005 * vol_mult, total_fees*0.3, 0.03)
+    be_profit = min(be_profit, paper_balance*0.01 * vol_mult + 0.05)
     be_dist = (total_fees + be_profit) / qty
-    tp_mult = 1.8 + (trend_strength*0.5); tp_mult = tp_mult * vol_mult
+    tp_mult = 1.8 + (trend_strength*0.5)
+    tp_mult = tp_mult * vol_mult
     sl_mult = 0.8 + (0.2 * vol_mult)
-    tp_dist = atr * tp_mult; sl_dist = atr * sl_mult
+    tp_dist_raw = atr * tp_mult
+    sl_dist = atr * sl_mult
+    min_tp_for_be = be_dist * 2.5
+    min_tp_for_sl = sl_dist * 1.5
+    tp_dist = max(tp_dist_raw, min_tp_for_be, min_tp_for_sl)
+    if sl_dist >= tp_dist * 0.6:
+        sl_dist = tp_dist * 0.5
+    tp_covers_be = tp_dist > be_dist * 2.0
+    tp_covers_sl = tp_dist > sl_dist * 1.5
     r = rsi_calc(closes)
     score = 0.0
     if ema9>ema21: score += 1.5 * (trend_strength/2)
@@ -248,8 +316,24 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     else: score -= 0.5
     if r > 75: score -= 1.5
     if r < 25: score += 1.5
+    # === NASDAQ FUTURES + CASH LOGIC - NEW V5.5 ===
+    # Futures leads, Cash confirms. If both agree, strong. If they disagree, trap.
     if macro['SPX']>0: score += 0.8
     elif macro['SPX']<0: score -= 0.8
+    if macro['SPX_FUT']>0: score += 0.6
+    elif macro['SPX_FUT']<0: score -= 0.6
+    # NQ FUTURES - highest weight, na e dey lead BTC
+    if macro['NQ_FUT']>0: score += 1.2
+    elif macro['NQ_FUT']<0: score -= 1.2
+    # NQ CASH - confirmation
+    if macro['NQ_CASH']>0: score += 0.7
+    elif macro['NQ_CASH']<0: score -= 0.7
+    # NDX100 - tech
+    if macro['NDX100']>0: score += 0.5
+    elif macro['NDX100']<0: score -= 0.5
+    # Divergence check: Futures up, Cash down = fake pump, reduce score
+    if (macro['NQ_FUT']>0.3 and macro['NQ_CASH']<-0.3) or (macro['NQ_FUT']<-0.3 and macro['NQ_CASH']>0.3):
+        score = score * 0.5  # Divergence = trap, human dey careful
     if macro['DXY']<0: score += 0.8
     elif macro['DXY']>0: score -= 0.8
     if macro['GOLD']>0.5: score += 0.3
@@ -261,6 +345,7 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     if smart['oi_change'] > 2 and smart['long_short'] > 1.5: score -= 0.8
     if fear < 20: score += 1.0
     elif fear > 80: score -= 1.0
+    score += live_news.get("score", 0.0)
     score = score * session_mult
     threshold = 1.8 * ai_strictness
     win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)
@@ -272,16 +357,17 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     return {
         "regime":regime,"vol_mult":vol_mult,"trend_dir":trend_dir,"trend_strength":trend_strength,
         "vol_ratio":vol_ratio,"win_rate":win_rate,"ai_strictness":ai_strictness,"mindset":mindset,
-        "risk_pct":risk_pct,"risk_usd":risk_usd,"lev":lev,"qty":qty,"pos_usd":pos_usd,
+        "risk_pct":risk_pct,"risk_usd":risk_usd,"lev":lev,"qty":qty,"pos_usd":pos_usd,"bybit_ok":bybit_ok,
         "total_fees":total_fees,"be_profit":be_profit,"be_dist":be_dist,"tp_dist":tp_dist,"sl_dist":sl_dist,
         "tp_mult":tp_mult,"sl_mult":sl_mult,"score":score,"threshold":threshold,
         "win_prob":win_prob,"ev":ev,"rr":rr,"tp_profit":tp_profit,"sl_loss":sl_loss,"r":r,
-        "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":smc_signal,"smc_score":smc_score
+        "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":smc_signal,"smc_score":smc_score,
+        "tp_covers_be":tp_covers_be,"tp_covers_sl":tp_covers_sl,"tp_dist_raw":tp_dist_raw
     }
 
 def main_loop():
     global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history, consecutive_losses, consecutive_wins
-    log("V5.1 HUMAN SKULL BRAIN STARTED - NO YFINANCE, 3 BACKUPS, I NEVER GO BLIND, I PROTECT $10")
+    log(f"V5.5 STARTED - NASDAQ FUTURES + CASH SEPARATED, LIVE NEWS ON, DYNAMIC TP>BE x2.5, BYBIT MIN {BYBIT_MIN_QTY}")
     while True:
         try:
             closes, highs, lows, vols = get_bybit_klines()
@@ -294,12 +380,14 @@ def main_loop():
             smart = get_bybit_smart_money()
             fear, fear_label = get_fear_greed()
             session, session_mult = get_session()
-            news_block, news_msg = get_news_risk()
-            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, news_block, news_msg)
+            live_news = get_live_news()
+            news_block, news_msg = get_news_risk(live_news)
+            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news)
             log(f"BRAIN: {B['regime']} ATR ${atr:.0f} EMA9 ${B['ema9']:.0f} RSI {B['r']:.1f} Vol x{B['vol_ratio']:.2f} | {B['mindset']}")
-            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} News: {news_msg if news_block else 'Clear'} | SMC: {B['smc_signal']} ({B['smc_score']:+.1f})")
-            log(f"FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} = Fees + BE Profit ${B['be_profit']:.2f} | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits} Streak W{consecutive_wins} L{consecutive_losses}")
-            log(f"LIVE: DXY {macro['DXY']:+.2f}% SPX {macro['SPX']:+.2f}% NQ {macro['NQ']:+.2f}% DAX {macro['DAX']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}%")
+            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} | SMC: {B['smc_signal']} ({B['smc_score']:+.1f})")
+            log(f"NEWS: Danger={live_news.get('danger')} Score {live_news.get('score',0):+.1f} | Headline: {live_news.get('headline','No big news')[:100]} | Block: {news_msg if news_block else 'Clear'}")
+            log(f"DYNAMIC: FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} (Fees+Profit ${B['be_profit']:.2f}) | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} | TP>BE? {B['tp_covers_be']} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} | Qty {B['qty']:.3f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
+            log(f"NASDAQ: FUT NQ {macro['NQ_FUT']:+.2f}% | CASH NQ {macro['NQ_CASH']:+.2f}% | NDX100 {macro['NDX100']:+.2f}% | SPX Cash {macro['SPX']:+.2f}% SPX Fut {macro['SPX_FUT']:+.2f}% | DXY {macro['DXY']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}% DAX {macro['DAX']:+.2f}%")
             if news_block:
                 log(f"🛑 HUMAN WAIT: {news_msg} - I no go trade inside bomb, I protect $10")
                 time.sleep(60); continue
@@ -352,13 +440,19 @@ def main_loop():
                 if hit:
                     be_price=trig+B['be_dist'] if side=='LONG' else trig-B['be_dist']
                     open_pos={'side':side,'entry':trig,'tp':tp,'sl':sl,'be_price':be_price,'be_done':False,'start':time.time(),'total_fees':B['total_fees'],'qty':B['qty'],'be_profit':B['be_profit']}
-                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f}")
+                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f}")
                     waiting=None
                 elif expired or opposite:
                     log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - market change, I re-scan")
                     waiting=None
                 else:
                     log(f"👀 WAITING {side} Trig ${trig:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${sl:.0f}")
+                time.sleep(60); continue
+            if not B['tp_covers_be']:
+                log(f"⛔ SKIP TP ${B['tp_dist']:.0f} no > BE ${B['be_dist']:.0f} x2 - I WAIT")
+                time.sleep(60); continue
+            if not B['tp_covers_sl']:
+                log(f"⛔ SKIP TP ${B['tp_dist']:.0f} no > SL ${B['sl_dist']:.0f} x1.5 - I WAIT")
                 time.sleep(60); continue
             if abs(B['score']) < B['threshold']:
                 log(f"=> NO CLEAR: Score {B['score']:.2f} < Thr {B['threshold']:.2f}... I WAIT, I no rush my $10")
@@ -369,9 +463,6 @@ def main_loop():
             if B['ev'] <= 0:
                 log(f"⛔ SKIP EV ${B['ev']:.4f} <= 0 - This trade go lose on average, I WAIT")
                 time.sleep(60); continue
-            if B['tp_dist'] < B['be_dist']*1.5:
-                log(f"⛔ SKIP TP no cover BE x1.5 - I WAIT")
-                time.sleep(60); continue
             if B['rr'] < 1.5:
                 log(f"⛔ SKIP R:R {B['rr']:.1f} < 1.5 - Risk too big, I WAIT")
                 time.sleep(60); continue
@@ -381,6 +472,9 @@ def main_loop():
             if session == "ASIA" and abs(B['score']) < 3.5:
                 log(f"⛔ SKIP Asia session, score no strong enough - I go sleep, wait London")
                 time.sleep(60); continue
+            if B['qty'] < BYBIT_MIN_QTY:
+                log(f"⛔ SKIP Qty {B['qty']:.3f} < Bybit min {BYBIT_MIN_QTY} - I no go send invalid order")
+                time.sleep(60); continue
             side='LONG' if B['score']>=0 else 'SHORT'
             trig_offset = atr * (0.3 + (B['trend_strength']*0.1))
             if side=='LONG':
@@ -388,7 +482,7 @@ def main_loop():
             else:
                 trig=btc-trig_offset; tp=trig-B['tp_dist']; sl=trig+B['sl_dist']; be_price=trig-B['be_dist']
             waiting={'side':side,'trig':trig,'tp':tp,'sl':sl,'be_price':be_price,'start':time.time()}
-            log(f"✅ HUMAN HIDDEN {side} PLACED Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Fear {fear} Session {session} SMC {B['smc_signal']}")
+            log(f"✅ HUMAN HIDDEN {side} PLACED Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} | TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | NQ Fut {macro['NQ_FUT']:+.2f}% Cash {macro['NQ_CASH']:+.2f}% | News {live_news.get('headline','')[:60]}")
             time.sleep(60)
         except Exception as e:
             log(f"Error {e} retry 30s"); time.sleep(30)
