@@ -1,267 +1,310 @@
-import time, requests, datetime, threading, os
-from flask import Flask
-import statistics
+import os, time, math, requests, datetime
+import yfinance as yf
 
-# ===== V3.0 DYNAMIC EVERYTHING - PAPER $10 - BE OVER ALL FEES =====
-# NO FIXED PRICE. NO FIXED TP/SL. NO BLIND TRADE.
-# BE = Trading Fee + Funding Fee + Leverage Fee + Buffer
-# If TP no cover BE, SKIP. If trigger no update, TRAIL am.
-VIRTUAL_BALANCE = 10.00
-SYMBOL = "BTCUSDT"
-PORT = int(os.environ.get("PORT", 10000))
-app = Flask(__name__)
+# ============ NO FIXED VALUES - ALL DYNAMIC ============
+# Only starting balance is fixed, everything else bot calculates
+START_BAL = 10.0
+paper_balance = START_BAL
+paper_pnl = 0.0
+wins = 0; losses = 0; be_hits = 0
+open_pos = None; waiting = None
+history = []  # for AI learning: list of pnl
+trade_times = []
 
-@app.route("/")
-def home(): return "WarshBot V3.0 DYNAMIC EVERYTHING - PAPER $10 - BE OVER ALL FEES"
-@app.route("/health")
-def health(): return "OK"
-
-def keep_alive():
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT, threaded=True), daemon=True).start()
-    def ping():
-        while True:
-            try: requests.get(f"http://localhost:{PORT}/health", timeout=5)
-            except: pass
-            time.sleep(600)
-    threading.Thread(target=ping, daemon=True).start()
-
-def yahoo(t):
-    try:
-        r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{t}?interval=1m&range=1d", headers={"User-Agent": "Mozilla/5.0"}, timeout=8).json()
-        meta = r['chart']['result'][0]['meta']; price = meta['regularMarketPrice']; prev = meta.get('chartPreviousClose') or meta.get('previousClose')
-        return price, ((price-prev)/prev*100) if prev else 0
-    except: return None, 0
+def log(msg):
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"{now} [tnpbc] {msg}", flush=True)
 
 def get_btc():
-    try: return float(requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=8).json()['result']['list'][0]['lastPrice'])
-    except: return None
-
-def get_klines():
-    # For ATR + EMA + RSI - live
     try:
-        r = requests.get("https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit=50", timeout=8).json()
-        closes = [float(x[4]) for x in r['result']['list'][::-1]]
-        highs = [float(x[2]) for x in r['result']['list'][::-1]]
-        lows = [float(x[3]) for x in r['result']['list'][::-1]]
-        return closes, highs, lows
-    except: return [], [], []
+        r = requests.get("https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit=200", timeout=10).json()
+        kl = r["result"]["list"][::-1]
+        closes = [float(x[4]) for x in kl]
+        highs = [float(x[2]) for x in kl]
+        lows = [float(x[3]) for x in kl]
+        vols = [float(x[5]) for x in kl]
+        return closes, highs, lows, vols
+    except:
+        return None, None, None, None
 
-def calc_ema(prices, period):
-    if len(prices) < period: return prices[-1] if prices else 0
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = p * k + ema * (1 - k)
-    return ema
+def ema(data, n):
+    if len(data) < n: return data[-1]
+    k = 2/(n+1); e = data[0]
+    for v in data[1:]: e = v*k + e*(1-k)
+    return e
 
-def calc_rsi(prices, period=14):
-    if len(prices) < period + 1: return 50
-    gains, losses = [], []
-    for i in range(1, period+1):
-        d = prices[-i] - prices[-i-1]
-        gains.append(max(d, 0)); losses.append(max(-d, 0))
-    avg_g = sum(gains)/period; avg_l = sum(losses)/period
-    if avg_l == 0: return 100
-    rs = avg_g / avg_l
-    return 100 - (100 / (1 + rs))
+def rsi_calc(data, n=14):
+    if len(data) < n+1: return 50
+    gains=[]; loss=[]
+    for i in range(1, n+1):
+        d = data[-i]-data[-i-1]
+        gains.append(max(d,0)); loss.append(max(-d,0))
+    ag=sum(gains)/n; al=sum(loss)/n
+    if al==0: return 70
+    return 100-(100/(1+ag/al))
 
-def calc_atr(highs, lows, closes, period=14):
-    if len(closes) < 2: return 120
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+def atr_calc(highs, lows, closes, n=14):
+    trs=[]
+    for i in range(1,len(closes)):
+        tr=max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
         trs.append(tr)
-    atr = sum(trs[-period:]) / min(len(trs), period)
-    return max(atr, 60)  # floor so SL no too tight
+    if len(trs)<n: return sum(trs)/max(len(trs),1)
+    return sum(trs[-n:])/n
 
-def dynamic_params(balance, btc, atr):
-    # DYNAMIC LEVERAGE - based on volatility, not fixed
-    # High ATR = low lev (danger), Low ATR = higher lev (safe)
-    if atr > 250: lev = 10
-    elif atr > 150: lev = 15
-    elif atr > 80: lev = 20
-    else: lev = 25
-    # DYNAMIC QTY - risk 2% only, qty from ATR distance
-    risk_usd = balance * 0.02  # $0.20 for $10
-    qty_raw = risk_usd / max(atr, 1)  # risk / SL distance
-    qty = max(round(qty_raw, 3), 0.001)
+def get_macro():
+    tickers={"DXY":"DX-Y.NYB","NQ":"^IXIC","SPX":"^GSPC","DAX":"^GDAXI","FTSE":"^FTSE","NIKKEI":"^N225","OIL":"CL=F","GOLD":"GC=F"}
+    out={}
+    for k,t in tickers.items():
+        try:
+            df=yf.download(t, period="2d", interval="1d", progress=False, auto_adjust=True)
+            c=df["Close"]
+            out[k]=float((c.iloc[-1].item()-c.iloc[-2].item())/c.iloc[-2].item()*100) if len(c)>=2 else 0.0
+        except: out[k]=0.0
+    return out
+
+# ============ DYNAMIC BRAIN - HUMAN + AI ============
+def dynamic_brain(btc, closes, highs, lows, vols, macro, atr):
+    # --- 1. VOLATILITY REGIME (dynamic) ---
+    atr_pct = (atr / btc) * 100
+    if atr_pct < 0.08: regime="CALM"; vol_mult=0.7
+    elif atr_pct < 0.20: regime="NORMAL"; vol_mult=1.0
+    elif atr_pct < 0.40: regime="WILD"; vol_mult=1.4
+    else: regime="EXTREME"; vol_mult=1.8
+
+    # --- 2. TREND STRENGTH (dynamic, not fixed) ---
+    ema9=ema(closes,9); ema21=ema(closes,21); ema50=ema(closes,50); ema200=ema(closes,100)
+    ema_spread = abs(ema9-ema50)/btc*100
+    trend_strength = min(ema_spread*10, 3.0)  # 0 to 3
+    if ema9>ema21>ema50: trend_dir=1; trend_strength+=1
+    elif ema9<ema21<ema50: trend_dir=-1; trend_strength+=1
+    else: trend_dir=0
+
+    # --- 3. VOLUME CONFIRMATION (dynamic) ---
+    avg_vol=sum(vols[-20:])/20 if len(vols)>=20 else 1
+    vol_ratio=vols[-1]/avg_vol if avg_vol>0 else 1
+    vol_conf = 1.0 if vol_ratio>1.2 else 0.5 if vol_ratio>0.8 else 0.0
+
+    # --- 4. AI LEARNING: WIN RATE ADAPTIVE ---
+    total=wins+losses
+    win_rate = (wins/total) if total>=3 else 0.55  # start neutral 55%
+    recent = history[-5:] if history else []
+    recent_losses = sum(1 for x in recent if x<0)
+    # If losing streak, become strict + reduce risk. If winning, become confident.
+    if recent_losses>=3: ai_strictness=1.5; ai_risk_mult=0.5
+    elif recent_losses==2: ai_strictness=1.2; ai_risk_mult=0.7
+    elif wins>=3 and losses==0: ai_strictness=0.9; ai_risk_mult=1.2
+    else: ai_strictness=1.0; ai_risk_mult=1.0
+
+    # --- 5. DYNAMIC RISK (never fixed 2%) ---
+    # Base risk = win_rate driven: high win rate = slightly higher risk, low = lower
+    base_risk_pct = 0.01 + (win_rate*0.02)  # 1% to 3% dynamic
+    risk_pct = base_risk_pct * ai_risk_mult
+    risk_pct = max(0.005, min(risk_pct, 0.03))
+    risk_usd = paper_balance * risk_pct
+
+    # --- 6. DYNAMIC LEVERAGE (from volatility, not fixed) ---
+    # Calm market = can use more lev, Wild = less lev
+    # Target: position volatility should be ~ same always
+    lev = max(5, min(20, int(1.5 / max(atr_pct,0.05) * 0.5)))
+    # Example: atr_pct 0.08% -> lev ~18, atr_pct 0.3% -> lev ~5
+    # Cap by balance: small balance = cap lev
+    if paper_balance < 20: lev = min(lev, 15)
+    if paper_balance < 50: lev = min(lev, 18)
+
+    # --- 7. DYNAMIC QTY (from risk + ATR) ---
+    qty = risk_usd / max(atr, 20)
+    qty = max(0.001, min(qty, 0.01))
+    qty = round(qty, 3)
+    if qty<0.001: qty=0.001
     pos_usd = qty * btc
-    # Cap pos to 8x balance max
-    if pos_usd > balance * 8:
-        qty = round((balance * 8) / btc, 3)
-        qty = max(qty, 0.001)
-        pos_usd = qty * btc
-    return lev, qty, pos_usd
 
-def calc_all_fees(pos_usd, lev, qty):
-    trading_fee = pos_usd * 0.0012  # Bybit taker ~0.06% x2 (open+close) + buffer
-    funding_fee = pos_usd * 0.0001  # funding prorated
-    leverage_fee = pos_usd * (lev * 0.00005)  # borrow / interest
-    buffer = 0.08  # extra safety
-    total = trading_fee + funding_fee + leverage_fee + buffer
-    be_distance = total / max(qty, 0.001)  # price move needed to cover ALL fees
-    return trading_fee, funding_fee, leverage_fee, total, be_distance
+    # --- 8. DYNAMIC FEES (live calculation) ---
+    trade_fee = pos_usd * 0.0006
+    fund_fee = pos_usd * 0.0001
+    lev_fee = pos_usd * 0.0001
+    # Buffer dynamic: bigger in wild market
+    buffer = 0.02 * vol_mult
+    total_fees = trade_fee + fund_fee + lev_fee + buffer
 
-def bot_loop():
-    virtual_bal = VIRTUAL_BALANCE
-    pnl_today = 0; wins = 0; losses = 0; be_hits = 0
-    hidden = None; open_trade = None
-    price_history = []
-    print("=== V3.0 DYNAMIC EVERYTHING DEPLOYED - $10 PAPER - BE OVER ALL FEES ===", flush=True)
+    # --- 9. DYNAMIC BE PROFIT (human + AI: BE must grow balance) ---
+    # BE profit = max(2% of balance, 50% of total fees, $0.10) - scales with balance
+    be_profit = max(paper_balance*0.02, total_fees*0.8, 0.10)
+    be_profit = min(be_profit, paper_balance*0.05)  # never too greedy
+    be_target = total_fees + be_profit
+    be_dist = be_target / qty
+
+    # --- 10. DYNAMIC TP / SL (from trend + regime) ---
+    # Strong trend = bigger TP, Weak trend = smaller TP
+    tp_mult = 1.8 + (trend_strength*0.5)  # 1.8 to 3.3 dynamic
+    tp_mult = tp_mult * vol_mult
+    sl_mult = 0.8 + (0.2 * vol_mult)  # 0.94 to 1.16
+    tp_dist = atr * tp_mult
+    sl_dist = atr * sl_mult
+
+    # --- 11. DYNAMIC SCORE WITH WEIGHTS (not 1 point each) ---
+    r = rsi_calc(closes)
+    score = 0.0
+    # Trend weight = strongest
+    if ema9>ema21: score += 1.5 * (trend_strength/2)
+    else: score -= 1.5 * (trend_strength/2)
+    if r>55: score += 1.0
+    elif r<45: score -= 1.0
+    elif r>50: score += 0.5
+    else: score -= 0.5
+    # Macro weights
+    if macro['SPX']>0: score += 0.8
+    elif macro['SPX']<0: score -= 0.8
+    if macro['DXY']<0: score += 0.8
+    elif macro['DXY']>0: score -= 0.8
+    if macro['GOLD']>0.5: score += 0.3  # risk-on
+    if macro['OIL']>2: score = 0  # trap, kill score
+    # Volume confirmation boosts score
+    score = score * (1 + vol_conf*0.3)
+
+    # --- 12. DYNAMIC THRESHOLD (AI strictness) ---
+    threshold = 1.8 * ai_strictness  # 1.62 if winning, 2.7 if losing streak
+    # Win probability estimate
+    win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)  # 50% to 85%
+    win_prob = min(win_prob, 0.85)
+
+    # --- 13. EXPECTED VALUE (must be positive, strictly) ---
+    # EV = (win_prob * TP profit) - ((1-win_prob) * SL loss) - fees
+    tp_profit = tp_dist*qty - total_fees
+    sl_loss = sl_dist*qty + total_fees
+    ev = (win_prob * tp_profit) - ((1-win_prob) * sl_loss)
+    # Reward:Risk dynamic
+    rr = tp_dist / max(sl_dist,1)
+
+    return {
+        "regime":regime,"vol_mult":vol_mult,"trend_dir":trend_dir,"trend_strength":trend_strength,
+        "vol_ratio":vol_ratio,"win_rate":win_rate,"ai_strictness":ai_strictness,
+        "risk_pct":risk_pct,"risk_usd":risk_usd,"lev":lev,"qty":qty,"pos_usd":pos_usd,
+        "total_fees":total_fees,"trade_fee":trade_fee,"fund_fee":fund_fee,"lev_fee":lev_fee,
+        "be_profit":be_profit,"be_dist":be_dist,"tp_dist":tp_dist,"sl_dist":sl_dist,
+        "tp_mult":tp_mult,"sl_mult":sl_mult,"score":score,"threshold":threshold,
+        "win_prob":win_prob,"ev":ev,"rr":rr,"tp_profit":tp_profit,"sl_loss":sl_loss,"r":r,
+        "ema9":ema9,"ema21":ema21,"ema50":ema50
+    }
+
+def main_loop():
+    global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history
+    log("V4 FULL DYNAMIC BRAIN STARTED - NOTHING FIXED, EVERYTHING CALCULATED LIVE")
     while True:
         try:
-            now = datetime.datetime.now(); btc = get_btc()
-            if not btc: time.sleep(30); continue
-            closes, highs, lows = get_klines()
-            if closes:
-                price_history = closes
-            atr = calc_atr(highs, lows, closes) if closes else 120
-            ema9 = calc_ema(closes, 9) if closes else btc
-            ema21 = calc_ema(closes, 21) if closes else btc
-            ema50 = calc_ema(closes, 50) if closes else btc
-            rsi = calc_rsi(closes) if closes else 50
-            lev, qty, pos_usd = dynamic_params(virtual_bal, btc, atr)
-            trading_fee, funding_fee, leverage_fee, total_fees, be_dist = calc_all_fees(pos_usd, lev, qty)
+            closes, highs, lows, vols = get_btc()
+            if closes is None:
+                log("Error retry 30s"); time.sleep(30); continue
+            btc=closes[-1]
+            atr=atr_calc(highs,lows,closes)
+            if atr<20: atr=20
+            macro=get_macro()
+            B=dynamic_brain(btc, closes, highs, lows, vols, macro, atr)
 
-            print(f"\n[{now.strftime('%H:%M WAT')}] PAPER Bal ${virtual_bal:.2f} | PnL ${pnl_today:.4f} | W {wins} L {losses} BE {be_hits} | BTC ${btc} | DYN {lev}x Qty {qty} Pos ${pos_usd:.2f}", flush=True)
-            print(f"DYNAMIC: EMA9 ${ema9:.0f} EMA21 ${ema21:.0f} EMA50 ${ema50:.0f} RSI {rsi:.1f} ATR ${atr:.0f} | FEES Trade ${trading_fee:.4f} Fund ${funding_fee:.4f} Lev ${leverage_fee:.4f} TOTAL ${total_fees:.4f} BE Dist ${be_dist:.0f}", flush=True)
+            log(f"DYNAMIC BRAIN: Regime {B['regime']} ATR ${atr:.0f} ({atr/btc*100:.3f}%) EMA9 ${B['ema9']:.0f} EMA21 ${B['ema21']:.0f} RSI {B['r']:.1f} Vol x{B['vol_ratio']:.2f} TrendStr {B['trend_strength']:.1f} | WinRate {B['win_rate']*100:.0f}% AI Strict x{B['ai_strictness']} | Risk {B['risk_pct']*100:.2f}%=${B['risk_usd']:.2f} Lev {B['lev']}x Qty {B['qty']} Pos ${B['pos_usd']:.1f}")
+            log(f"FEES Dyn Total ${B['total_fees']:.4f} | BE Dist ${B['be_dist']:.0f} = Fees + BE Profit ${B['be_profit']:.2f} (BE hit = balance +${B['be_profit']:.2f}) | TP Dist ${B['tp_dist']:.0f} (x{B['tp_mult']:.1f} ATR) SL ${B['sl_dist']:.0f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
+            log(f"LIVE: DXY {macro['DXY']:+.2f}% NQ {macro['NQ']:+.2f}% SPX {macro['SPX']:+.2f}% DAX {macro['DAX']:+.2f}% FTSE {macro['FTSE']:+.2f}% Nikkei {macro['NIKKEI']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}%")
 
-            # === OPEN TRADE: DYNAMIC BE + DYNAMIC TRAILING EXIT ===
-            if open_trade:
-                side = open_trade['side']; entry = open_trade['entry']; tp = open_trade['tp']; sl = open_trade['sl']
-                be_dist_trade = open_trade['be_dist']
-                move = (btc - entry) if side == "Buy" else (entry - btc)
-                # DYNAMIC BE: When move >= BE distance, move SL to Entry + BE distance (covers ALL fees)
-                if not open_trade.get('be_done') and move >= be_dist_trade:
-                    open_trade['be_done'] = True; be_hits += 1
-                    if side == "Buy": open_trade['sl'] = entry + be_dist_trade
-                    else: open_trade['sl'] = entry - be_dist_trade
-                    print(f"🛡️ DYNAMIC BE ACTIVATED! Move +{move:.0f} >= BE ${be_dist_trade:.0f}, SL -> Entry + BE (${open_trade['sl']:.0f}) - ALL FEES COVERED (Trade+Funding+Leverage).", flush=True)
-                # DYNAMIC TRAILING: If move > ATR, trail SL by ATR*0.5 to lock more profit
-                if open_trade.get('be_done') and move > atr:
-                    trail_sl = (btc - atr*0.5) if side == "Buy" else (btc + atr*0.5)
-                    if (side == "Buy" and trail_sl > open_trade['sl']) or (side == "Sell" and trail_sl < open_trade['sl']):
-                        open_trade['sl'] = trail_sl
-                        print(f"📈 TRAILING SL -> ${trail_sl:.0f} - Locking profit dynamically.", flush=True)
-                sl = open_trade['sl']
-                hit_tp = (side == "Buy" and btc >= tp) or (side == "Sell" and btc <= tp)
-                hit_sl = (side == "Buy" and btc <= sl) or (side == "Sell" and btc >= sl)
-                # DYNAMIC TIME EXIT: If trade don stay > 120 mins and no move, close to free capital
-                age_mins = (now - open_trade['opened_at']).total_seconds() / 60
-                if age_mins > 120 and abs(move) < be_dist_trade:
-                    print(f"⏰ TIME EXIT: 120 mins no progress, closing to free capital.", flush=True)
-                    hit_sl = True  # force close, pnl calc below will handle
-                if hit_tp or hit_sl:
-                    if hit_sl and open_trade.get('be_done'):
-                        # BE SL hit = profit = BE distance * qty - total fees (should be >= buffer)
-                        pnl = abs(be_dist_trade) * qty - (trading_fee + funding_fee + leverage_fee)
-                        print(f"🛡️ BE SAVED! SL hit at BE, PnL +${pnl:.4f} (ALL fees covered).", flush=True)
-                    elif hit_tp: pnl = abs(tp-entry)*qty - (trading_fee + funding_fee + leverage_fee)
-                    else: pnl = -abs(sl-entry)*qty - (trading_fee + funding_fee + leverage_fee)
-                    virtual_bal += pnl; pnl_today += pnl
-                    if pnl > 0: wins += 1; print(f"✅ WIN! {side} Entry ${entry} Exit ${btc:.0f} PnL +${pnl:.4f} | Bal ${virtual_bal:.2f}", flush=True)
-                    else: losses += 1; print(f"❌ LOSS! {side} Entry ${entry} Exit ${btc:.0f} PnL ${pnl:.4f} | Bal ${virtual_bal:.2f}", flush=True)
-                    open_trade = None
-                else: print(f">>> OPEN {side} Entry ${entry} TP {tp:.0f} SL {sl:.0f} Cur ${btc} Move {move:+.0f} BE {'DONE' if open_trade.get('be_done') else f'WAIT {be_dist_trade:.0f}'}", flush=True)
-                time.sleep(60); continue
-
-            # === HIDDEN / WAITING - DYNAMIC TRAILING TRIGGER, NO FIXED PRICE ===
-            if hidden:
-                # TRAIL TRIGGER WITH PRICE - this is the fix for "wait forever"
-                # If price moves favourably, move trigger with it
-                old_trig = hidden['trigger']
-                if hidden['side'] == "Buy":
-                    # For Buy, we want dip. If BTC goes up, raise trigger to follow (no wait forever)
-                    new_trig = btc - atr * 0.5
-                    if new_trig > old_trig:
-                        hidden['trigger'] = new_trig
-                        hidden['entry'] = new_trig
-                        # Recalc TP/SL dynamically too
-                        hidden['tp'] = new_trig + atr * 1.8
-                        hidden['sl'] = new_trig - atr * 1.0
-                        print(f"🔄 DYNAMIC TRAIL UP: Trig ${old_trig:.0f} -> ${new_trig:.0f} (BTC moved up, trigger follows, no wait forever)", flush=True)
-                else:
-                    new_trig = btc + atr * 0.5
-                    if new_trig < old_trig:
-                        hidden['trigger'] = new_trig
-                        hidden['entry'] = new_trig
-                        hidden['tp'] = new_trig - atr * 1.8
-                        hidden['sl'] = new_trig + atr * 1.0
-                        print(f"🔄 DYNAMIC TRAIL DOWN: Trig ${old_trig:.0f} -> ${new_trig:.0f} (BTC moved down, trigger follows)", flush=True)
-                trig = hidden['trigger']
-                # Check hit + BREAKOUT: If price pumps hard, enter immediately, no wait for trigger
-                momentum_5m = 0
-                if len(closes) >= 5:
-                    momentum_5m = (closes[-1] - closes[-5]) / closes[-5] * 100
-                breakout_buy = hidden['side'] == "Buy" and momentum_5m > 0.4
-                breakout_sell = hidden['side'] == "Sell" and momentum_5m < -0.4
-                hit = (hidden['side']=="Buy" and btc <= trig) or (hidden['side']=="Sell" and btc >= trig)
-                if hit or breakout_buy or breakout_sell:
-                    reason = "TRIGGER HIT" if hit else f"BREAKOUT {momentum_5m:+.2f}% - ENTER NOW, NO WAIT"
-                    print(f"🔥 {reason} - DYNAMIC {hidden['side']} ENTER @ ${btc:.0f}", flush=True)
-                    open_trade = {**hidden, "entry": btc, "opened_at": now, "be_done": False}
-                    # Recalc TP/SL from actual entry
-                    if hidden['side'] == "Buy":
-                        open_trade['tp'] = btc + atr * 1.8; open_trade['sl'] = btc - atr * 1.0
+            # ===== MANAGE OPEN =====
+            if open_pos:
+                side=open_pos['side']; entry=open_pos['entry']; tp=open_pos['tp']; sl=open_pos['sl']; be_price=open_pos['be_price']
+                if not open_pos.get('be_done'):
+                    if (side=='LONG' and btc>=be_price) or (side=='SHORT' and btc<=be_price):
+                        open_pos['sl']=be_price; open_pos['be_done']=True; be_hits+=1
+                        log(f"🟢 BE HIT + PROFIT LOCKED! SL -> BE ${be_price:.0f} = Fees + ${open_pos['be_profit']:.2f} profit secured, balance go increase even if e reverse")
+                if open_pos.get('be_done'):
+                    # Dynamic trailing: trail by 0.5 ATR, adapts to volatility
+                    if side=='LONG':
+                        nsl=btc-atr*0.5
+                        if nsl>open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL UP SL ${nsl:.0f}")
                     else:
-                        open_trade['tp'] = btc - atr * 1.8; open_trade['sl'] = btc + atr * 1.0
-                    hidden = None
-                else: print(f">>> DYNAMIC HIDDEN {hidden['side']} wait Trig ${trig:.0f} Cur ${btc} ATR ${atr:.0f} Momentum5m {momentum_5m:+.2f}%", flush=True)
+                        nsl=btc+atr*0.5
+                        if nsl<open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL DOWN SL ${nsl:.0f}")
+                pnl=0; closed=False; reason=""
+                total_fees=open_pos['total_fees']; qty=open_pos['qty']; be_profit=open_pos['be_profit']
+                if side=='LONG':
+                    if btc>=tp: pnl=(tp-entry)*qty-total_fees; closed=True; reason="TP HIT 🎯"
+                    elif btc<=open_pos['sl']:
+                        if open_pos.get('be_done'): pnl=be_profit; closed=True; reason=f"BE SL HIT 🟢 +${be_profit:.2f}"
+                        else: pnl=(open_pos['sl']-entry)*qty-total_fees; closed=True; reason="SL HIT"
+                else:
+                    if btc<=tp: pnl=(entry-tp)*qty-total_fees; closed=True; reason="TP HIT 🎯"
+                    elif btc>=open_pos['sl']:
+                        if open_pos.get('be_done'): pnl=be_profit; closed=True; reason=f"BE SL HIT 🟢 +${be_profit:.2f}"
+                        else: pnl=(entry-open_pos['sl'])*qty-total_fees; closed=True; reason="SL HIT"
+                # Dynamic time exit: calm market = 90min, wild = 180min
+                time_limit = 90*60 if B['regime']=="CALM" else 180*60 if B['regime'] in ["WILD","EXTREME"] else 120*60
+                if not closed and (time.time()-open_pos['start'])>time_limit:
+                    pnl=(btc-entry)*qty-total_fees if side=='LONG' else (entry-btc)*qty-total_fees
+                    closed=True; reason=f"TIME EXIT {int(time_limit/60)}min"
+                if closed:
+                    paper_balance+=pnl; paper_pnl+=pnl; history.append(pnl)
+                    if pnl>0: wins+=1
+                    else: losses+=1
+                    log(f"✅ CLOSED {reason} | PnL ${pnl:.4f} | Bal ${paper_balance:.2f} | W {wins} L {losses} BE {be_hits} | AI go learn from this trade")
+                    open_pos=None; time.sleep(10); continue
+                else:
+                    log(f"⏳ OPEN {side} Entry ${entry:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${open_pos['sl']:.0f} BE ${be_price:.0f} (BE=+${be_profit:.2f})")
+                    time.sleep(60); continue
+
+            # ===== MANAGE WAITING =====
+            if waiting:
+                trig=waiting['trig']; tp=waiting['tp']; sl=waiting['sl']; side=waiting['side']
+                hit=(btc>=trig) if side=='LONG' else (btc<=trig)
+                # Dynamic waiting expiry: calm = 45min, wild = 20min
+                expire_mins = 45 if B['regime']=="CALM" else 20 if B['regime'] in ["WILD","EXTREME"] else 30
+                expired=(time.time()-waiting['start'])>expire_mins*60
+                opposite=(btc<=trig-atr*1.5) if side=='LONG' else (btc>=trig+atr*1.5)
+                if hit:
+                    # Recalc BE live at entry, not fixed from before
+                    be_price=trig+B['be_dist'] if side=='LONG' else trig-B['be_dist']
+                    open_pos={'side':side,'entry':trig,'tp':tp,'sl':sl,'be_price':be_price,'be_done':False,'start':time.time(),'total_fees':B['total_fees'],'qty':B['qty'],'be_profit':B['be_profit']}
+                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} (BE = Fees + ${B['be_profit']:.2f})")
+                    waiting=None
+                elif expired or opposite:
+                    log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - market change, AI re-scan")
+                    waiting=None
+                else:
+                    log(f"👀 WAITING {side} Trig ${trig:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${trig+B['be_dist'] if side=='LONG' else trig-B['be_dist']:.0f}")
                 time.sleep(60); continue
 
-            if pnl_today <= -2.0: print("!!! Daily -$2 hit - SLEEP !!!", flush=True); time.sleep(3600*6); pnl_today = 0; continue
+            # ===== NEW SETUP - STRICT AI FILTERS, ALL DYNAMIC =====
+            # Filter 1: Score must beat dynamic threshold
+            if abs(B['score']) < B['threshold']:
+                log(f"=> NO CLEAR: Score {B['score']:.2f} < Thr {B['threshold']:.2f} (AI Strict x{B['ai_strictness']})... WAIT")
+                time.sleep(60); continue
+            # Filter 2: Win Prob must be >65% strictly
+            if B['win_prob'] < 0.65:
+                log(f"⛔ SKIP WinProb {B['win_prob']*100:.0f}% < 65% - AI no confident, WAIT for better setup")
+                time.sleep(60); continue
+            # Filter 3: EV must be positive strictly
+            if B['ev'] <= 0:
+                log(f"⛔ SKIP EV ${B['ev']:.4f} <= 0 - Trade go lose on average, WAIT")
+                time.sleep(60); continue
+            # Filter 4: TP must cover BE x 1.5 strictly
+            if B['tp_dist'] < B['be_dist']*1.5:
+                log(f"⛔ SKIP TP ${B['tp_dist']:.0f} no cover BE x1.5 (${B['be_dist']*1.5:.0f}) - WAIT")
+                time.sleep(60); continue
+            # Filter 5: R:R must be >=1.5
+            if B['rr'] < 1.5:
+                log(f"⛔ SKIP R:R {B['rr']:.1f} < 1.5 - Risk too big vs reward, WAIT")
+                time.sleep(60); continue
+            # Filter 6: Oil trap
+            if macro['OIL'] > 5:
+                log(f"⛔ SKIP Oil spike {macro['OIL']:.2f}% - Bank Trap")
+                time.sleep(60); continue
 
-            dxy_p, dxy_pct = yahoo("DX-Y.NYB"); nq_p, nq_pct = yahoo("NQ=F"); spx_p, spx_pct = yahoo("ES=F")
-            dax_p, dax_pct = yahoo("^GDAXI"); ftse_p, ftse_pct = yahoo("^FTSE"); nikkei_p, nikkei_pct = yahoo("^N225")
-            oil_p, oil_pct = yahoo("CL=F"); gold_p, gold_pct = yahoo("GC=F")
-            print(f"LIVE: DXY {dxy_pct:+.2f}% | NQ {nq_pct:+.2f}% | SPX {spx_pct:+.2f}% | DAX {dax_pct:+.2f}% | FTSE {ftse_pct:+.2f}% | Nikkei {nikkei_pct:+.2f}% | Oil {oil_pct:+.2f}% | Gold {gold_pct:+.2f}%", flush=True)
-            if now.hour == 1 and now.minute < 45: print(">> ASIA 1:00-1:45 WAIT SWEEP", flush=True); time.sleep(60); continue
-            if oil_p and oil_p > 100: print(">> Oil >100 SHIELD - WAIT", flush=True); time.sleep(180); continue
-
-            # === DYNAMIC DIRECTION - EMA + RSI + DXY + STOCKS, NO FIXED BIAS ===
-            is_weekend = now.weekday() >= 5
-            direction = None; reason = ""
-            # BTC trend score
-            btc_trend = 0
-            if ema9 > ema21: btc_trend += 1
-            if ema21 > ema50: btc_trend += 1
-            if rsi > 50: btc_trend += 1
-            if rsi < 50: btc_trend -= 1
-            if ema9 < ema21: btc_trend -= 1
-            if ema21 < ema50: btc_trend -= 1
-
-            if is_weekend:
-                if dxy_pct < 0 or btc_trend > 0: direction = "Buy"; reason = f"Weekend DXY {dxy_pct:+.2f}% BTC Trend {btc_trend} = LONG"
-                elif dxy_pct > 0 or btc_trend < 0: direction = "Sell"; reason = f"Weekend DXY {dxy_pct:+.2f}% BTC Trend {btc_trend} = SHORT"
+            side='LONG' if B['score']>=0 else 'SHORT'
+            # Dynamic hidden trigger: 0.3 to 0.7 ATR in front, depends on trend strength
+            trig_offset = atr * (0.3 + (B['trend_strength']*0.1))
+            if side=='LONG':
+                trig=btc+trig_offset; tp=trig+B['tp_dist']; sl=trig-B['sl_dist']; be_price=trig+B['be_dist']
             else:
-                greens = sum(1 for x in [nq_pct, spx_pct, dax_pct, ftse_pct, nikkei_pct] if x > 0)
-                # Combined score: BTC trend + Stocks + DXY
-                score = btc_trend + (1 if greens >= 3 else -1 if greens <= 2 else 0) + (1 if dxy_pct < 0.1 else -1 if dxy_pct > 0.1 else 0)
-                if score >= 2: direction = "Buy"; reason = f"Score {score} BTC {btc_trend} Greens {greens}/5 DXY {dxy_pct:+.2f}% = LONG"
-                elif score <= -2: direction = "Sell"; reason = f"Score {score} BTC {btc_trend} Greens {greens}/5 DXY {dxy_pct:+.2f}% = SHORT"
-                else: print(f"=> NO CLEAR: Score {score} BTC Trend {btc_trend} Greens {greens}/5 DXY {dxy_pct:+.2f}% RSI {rsi:.1f} - WAIT", flush=True); time.sleep(120); continue
+                trig=btc-trig_offset; tp=trig-B['tp_dist']; sl=trig+B['sl_dist']; be_price=trig-B['be_dist']
+            waiting={'side':side,'trig':trig,'tp':tp,'sl':sl,'be_price':be_price,'start':time.time()}
+            log(f"✅ DYNAMIC HIDDEN {side} PLACED Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | BE hit = +${B['be_profit']:.2f} balance increase")
+            time.sleep(60)
+        except Exception as e:
+            log(f"Error {e} retry 30s"); time.sleep(30)
 
-            bank_trap = (direction=="Buy" and dxy_pct > 0.2 and nq_pct < -0.3) or (direction=="Sell" and dxy_pct < -0.2 and nq_pct > 0.3)
-            if bank_trap and not is_weekend: print(">> BANK TRAP: NO FOLLOW", flush=True); time.sleep(120); continue
-
-            # === DYNAMIC TP/SL + BE CHECK - IF NO COVER FEES, NO TRADE ===
-            if direction == "Buy":
-                trigger = btc - atr * 0.5; entry = trigger; tp = entry + atr * 1.8; sl = entry - atr * 1.0
-            else:
-                trigger = btc + atr * 0.5; entry = trigger; tp = entry - atr * 1.8; sl = entry + atr * 1.0
-            # Re-calc fees for this specific setup
-            _, _, _, total_fees_setup, be_dist_setup = calc_all_fees(pos_usd, lev, qty)
-            est_profit = abs(tp - entry) * qty - total_fees_setup
-            est_be_cover = abs(tp - entry) - be_dist_setup
-            print(f"DYNAMIC GOLD: {direction} Trig ${trigger:.0f} TP ${tp:.0f} SL ${sl:.0f} ATR ${atr:.0f} Est Profit ${est_profit:.4f} BE Dist ${be_dist_setup:.0f} Total Fees ${total_fees_setup:.4f} | {reason}", flush=True)
-            # CRITICAL: If trade won't cover BE over ALL fees, SKIP - no blind trade
-            if est_profit <= 0.05 or est_be_cover < 20:
-                print(f"⛔ SKIP - Trade NO cover BE over ALL fees! Est ${est_profit:.4f} BE need ${be_dist_setup:.0f} move, TP only {abs(tp-entry):.0f} move. Fees: Trade+Funding+Leverage = ${total_fees_setup:.4f}. WAITING for better setup.", flush=True)
-                time.sleep(120); continue
-            hidden = {"side": direction, "trigger": trigger, "entry": entry, "tp": tp, "sl": sl, "qty": qty, "be_done": False, "be_dist": be_dist_setup, "lev": lev}
-            print(f"✅ DYNAMIC HIDDEN {direction} PLACED Trig ${trigger:.0f} TP ${tp:.0f} SL ${sl:.0f} BE Dist ${be_dist_setup:.0f} (covers Trade+Funding+Leverage). NO FIXED PRICE.", flush=True)
-            time.sleep(120)
-        except Exception as e: print(f"Error {e} retry 30s", flush=True); time.sleep(30)
-
-if __name__ == "__main__":
-    keep_alive(); bot_loop()
+if __name__=="__main__":
+    main_loop()
