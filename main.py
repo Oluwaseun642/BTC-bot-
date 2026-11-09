@@ -1,12 +1,12 @@
 import os, time, math, requests, datetime, re, xml.etree.ElementTree as ET
 import threading
 
-# --- RENDER KEEP-ALIVE + SELF-PING - V5.6 FINAL ---
+# --- RENDER KEEP-ALIVE + SELF-PING - V5.9 ---
 try:
     from flask import Flask
     app = Flask(__name__)
     @app.route('/')
-    def home(): return "V5.6 Final - Nasdaq Futures + Cash + Live News + Self-Ping is alive!"
+    def home(): return "V5.9 Real Liquidation Map + Liquidity Hunter is alive!"
     def run_web():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
@@ -51,7 +51,7 @@ last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0}
 
 def log(msg):
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"{now} [V5.6-FINAL] {msg}", flush=True)
+    print(f"{now} [V5.9-LIQ-MAP] {msg}", flush=True)
 
 def yahoo_direct(symbol, host):
     try:
@@ -159,7 +159,6 @@ def get_fear_greed():
 def get_session():
     h = datetime.datetime.utcnow().hour
     wd = datetime.datetime.utcnow().weekday()
-    # Monday boost: market fresh, London open na best time
     monday_boost = 1.1 if wd == 0 else 1.0
     if 7 <= h < 11: return "LONDON", 1.2 * monday_boost
     elif 12 <= h < 20: return "NEW_YORK", 1.3 * monday_boost
@@ -229,6 +228,38 @@ def get_news_risk(live_news):
         return True, f"LIVE CALENDAR NEWS IN HEADLINES - WAIT: {live_news.get('headline','')[:80]}"
     return False, ""
 
+# ============ REAL LIVE LIQUIDATION MAP - NEW V5.9 ============
+def get_liquidation_map():
+    long_liq = 0.0; short_liq = 0.0; details = []
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=50", timeout=5).json()
+        for o in r:
+            try:
+                price = float(o.get("price", 0))
+                qty = float(o.get("origQty", 0))
+                usd = price * qty
+                if o.get("side") == "SELL":
+                    long_liq += usd
+                else:
+                    short_liq += usd
+                if usd > 100000:
+                    details.append(f"{o.get('side')} Liq ${usd/1000:.0f}k @ ${price:.0f}")
+            except: pass
+    except Exception as e:
+        print(f"Binance Liq fail: {e}", flush=True)
+    total = long_liq + short_liq
+    bias = "NEUTRAL"; score = 0.0
+    if total > 500000:
+        if long_liq > short_liq * 1.5:
+            bias = "LONG_HUNT_CONFIRMED"; score = 2.0
+        elif short_liq > long_liq * 1.5:
+            bias = "SHORT_HUNT_CONFIRMED"; score = -2.0
+        elif long_liq > 2000000:
+            bias = "HEAVY_LONG_LIQ"; score = 1.5
+        elif short_liq > 2000000:
+            bias = "HEAVY_SHORT_LIQ"; score = -1.5
+    return {"long_liq": long_liq, "short_liq": short_liq, "total": total, "bias": bias, "score": score, "details": details[:3]}
+
 def ema(data, n):
     if len(data) < n: return data[-1]
     k = 2/(n+1); e = data[0]
@@ -253,22 +284,56 @@ def atr_calc(highs, lows, closes, n=14):
     if len(trs)<n: return sum(trs)/max(len(trs),1)
     return sum(trs[-n:])/n
 
-def smc_analysis(closes, highs, lows):
-    score = 0.0; signal = "NONE"
-    if len(highs) < 20: return score, signal
-    recent_high = max(highs[-20:-5])
-    recent_low = min(lows[-20:-5])
-    last_high = highs[-1]; last_low = lows[-1]; last_close = closes[-1]
-    if last_high > recent_high and last_close < recent_high:
-        score -= 2.0; signal = "BEARISH SWEEP - Trap LONGs"
-    if last_low < recent_low and last_close > recent_low:
-        score += 2.0; signal = "BULLISH SWEEP - Trap SHORTs"
-    if len(closes) >= 3:
-        if lows[-1] > highs[-3]: score += 1.0; signal += " + BULLISH FVG"
-        if highs[-1] < lows[-3]: score -= 1.0; signal += " + BEARISH FVG"
-    return score, signal
+def liquidity_hunt_analysis(closes, highs, lows, vols, atr):
+    score = 0.0; signal = "No Hunt"; is_hunt = False; hunt_side = None
+    if len(closes) < 50: return score, signal, is_hunt, hunt_side
+    btc = closes[-1]
+    lows_50 = lows[-50:-2]
+    highs_50 = highs[-50:-2]
+    min_low = min(lows_50)
+    low_touches = sum(1 for l in lows_50 if abs(l - min_low)/min_low < 0.002)
+    max_high = max(highs_50)
+    high_touches = sum(1 for h in highs_50 if abs(h - max_high)/max_high < 0.002)
+    last_low = lows[-1]; last_high = highs[-1]; last_close = closes[-1]
+    wick_down = last_high - last_low
+    wick_pct = wick_down / btc * 100
+    if low_touches >= 2:
+        if last_low < min_low and last_close > min_low:
+            sweep_depth = (min_low - last_low)
+            if sweep_depth > atr * 0.3:
+                score += 3.0
+                is_hunt = True; hunt_side = "LONG"
+                signal = f"🎯 LIQ HUNT LONG: Swept Equal Lows ${min_low:.0f} x{low_touches} -> Wicked to ${last_low:.0f} -> Reclaimed ${last_close:.0f} | PICK GOLD AFTER DEEP"
+                if wick_pct > 1.0:
+                    score += 1.0
+                    signal += f" + DEEP WICK {wick_pct:.2f}%"
+    if high_touches >= 2:
+        if last_high > max_high and last_close < max_high:
+            sweep_depth = (last_high - max_high)
+            if sweep_depth > atr * 0.3:
+                score -= 3.0
+                is_hunt = True; hunt_side = "SHORT"
+                signal = f"🎯 LIQ HUNT SHORT: Swept Equal Highs ${max_high:.0f} x{high_touches} -> Wicked to ${last_high:.0f} -> Rejected ${last_close:.0f} | PICK GOLD AFTER TOP"
+                if wick_pct > 1.0:
+                    score -= 1.0
+                    signal += f" + DEEP WICK {wick_pct:.2f}%"
+    if is_hunt and len(closes) >= 3:
+        if hunt_side == "LONG" and lows[-1] > highs[-3]:
+            score += 0.8; signal += " + VOID FVG LONG"
+        if hunt_side == "SHORT" and highs[-1] < lows[-3]:
+            score -= 0.8; signal += " + VOID FVG SHORT"
+    if not is_hunt:
+        recent_high = max(highs[-20:-5])
+        recent_low = min(lows[-20:-5])
+        if last_low < recent_low and last_close > recent_low:
+            score += 2.0; is_hunt = True; hunt_side = "LONG"
+            signal = f"SWEEP LONG: Broke ${recent_low:.0f} -> Reclaimed ${last_close:.0f}"
+        if last_high > recent_high and last_close < recent_high:
+            score -= 2.0; is_hunt = True; hunt_side = "SHORT"
+            signal = f"SWEEP SHORT: Broke ${recent_high:.0f} -> Rejected ${last_close:.0f}"
+    return score, signal, is_hunt, hunt_side
 
-def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news):
+def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map):
     atr_pct = (atr / btc) * 100
     if atr_pct < 0.08: regime="CALM"; vol_mult=0.7
     elif atr_pct < 0.20: regime="NORMAL"; vol_mult=1.0
@@ -320,7 +385,6 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     sl_mult = 0.8 + (0.2 * vol_mult)
     tp_dist_raw = atr * tp_mult
     sl_dist = atr * sl_mult
-    # GOLDEN RULE: DYNAMIC TP ALWAYS > DYNAMIC BE
     min_tp_for_be = be_dist * 2.5
     min_tp_for_sl = sl_dist * 1.5
     tp_dist = max(tp_dist_raw, min_tp_for_be, min_tp_for_sl)
@@ -354,18 +418,30 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     elif macro['DXY']>0: score -= 0.8
     if macro['GOLD']>0.5: score += 0.3
     if macro['OIL']>6: score = 0
-    smc_score, smc_signal = smc_analysis(closes, highs, lows)
-    score += smc_score
+    liq_score, liq_signal, is_hunt, hunt_side = liquidity_hunt_analysis(closes, highs, lows, vols, atr)
+    score += liq_score
+    # REAL LIQ MAP - confirms hunt
+    score += liq_map.get("score", 0.0)
+    if liq_map.get("bias") == "LONG_HUNT_CONFIRMED" and is_hunt and hunt_side == "LONG":
+        score += 1.0
+        liq_signal += " + ✅ REAL LIQ MAP CONFIRMED"
+    if liq_map.get("bias") == "SHORT_HUNT_CONFIRMED" and is_hunt and hunt_side == "SHORT":
+        score -= 1.0
+        liq_signal += " + ✅ REAL LIQ MAP CONFIRMED"
     if smart['funding'] > 0.05: score -= 1.0
     elif smart['funding'] < -0.05: score += 1.0
     if smart['oi_change'] > 2 and smart['long_short'] > 1.5: score -= 0.8
     if fear < 20: score += 1.0
     elif fear > 80: score -= 1.0
     score += live_news.get("score", 0.0)
-    score = score * session_mult
-    # LOOSENED FOR MONDAY: 1.8 -> 1.5, so e go trade, no wait forever
+    effective_session_mult = 1.0 if is_hunt else session_mult
+    score = score * effective_session_mult
     threshold = 1.5 * ai_strictness
+    if is_hunt:
+        threshold = 1.0 * ai_strictness
     win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)
+    if is_hunt:
+        win_prob = min(win_prob + 0.10, 0.85)
     win_prob = min(win_prob, 0.85)
     tp_profit = tp_dist*qty - total_fees
     sl_loss = sl_dist*qty + total_fees
@@ -378,13 +454,14 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
         "total_fees":total_fees,"be_profit":be_profit,"be_dist":be_dist,"tp_dist":tp_dist,"sl_dist":sl_dist,
         "tp_mult":tp_mult,"sl_mult":sl_mult,"score":score,"threshold":threshold,
         "win_prob":win_prob,"ev":ev,"rr":rr,"tp_profit":tp_profit,"sl_loss":sl_loss,"r":r,
-        "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":smc_signal,"smc_score":smc_score,
-        "tp_covers_be":tp_covers_be,"tp_covers_sl":tp_covers_sl,"tp_dist_raw":tp_dist_raw
+        "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":liq_signal,"smc_score":liq_score,
+        "tp_covers_be":tp_covers_be,"tp_covers_sl":tp_covers_sl,"tp_dist_raw":tp_dist_raw,
+        "is_hunt":is_hunt,"hunt_side":hunt_side,"liq_signal":liq_signal
     }
 
 def main_loop():
     global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history, consecutive_losses, consecutive_wins, last_trade_time
-    log(f"V5.6 FINAL STARTED - MONDAY READY, TP>BE x2.5 DYNAMIC, NASDAQ FUT+CASH, LIVE NEWS, SELF-PING, LOOSENED FOR TRADING")
+    log(f"V5.9 STARTED - REAL LIQ MAP + LIQ HUNTER, BOTH SIDES LONG+SHORT, TP>BE x2.5, NASDAQ FUT+CASH, LIVE NEWS, SELF-PING")
     while True:
         try:
             closes, highs, lows, vols = get_bybit_klines()
@@ -398,17 +475,22 @@ def main_loop():
             fear, fear_label = get_fear_greed()
             session, session_mult = get_session()
             live_news = get_live_news()
+            liq_map = get_liquidation_map()
             news_block, news_msg = get_news_risk(live_news)
-            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news)
+            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map)
             log(f"BRAIN: {B['regime']} ATR ${atr:.0f} EMA9 ${B['ema9']:.0f} RSI {B['r']:.1f} Vol x{B['vol_ratio']:.2f} | {B['mindset']}")
-            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} | SMC: {B['smc_signal']} ({B['smc_score']:+.1f})")
+            log(f"LIQ HUNT: {B['liq_signal']} | Hunt={B['is_hunt']} Side={B['hunt_side']}")
+            log(f"LIQ MAP: Long Liq ${liq_map['long_liq']/1000:.0f}k | Short Liq ${liq_map['short_liq']/1000:.0f}k | Total ${liq_map['total']/1000:.0f}k | Bias {liq_map['bias']} Score {liq_map['score']:+.1f} | {liq_map['details']}")
+            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} | Both Sides Ready: LONG if Score>0, SHORT if Score<0")
             log(f"NEWS: Danger={live_news.get('danger')} Score {live_news.get('score',0):+.1f} | Headline: {live_news.get('headline','No big news')[:100]} | Block: {news_msg if news_block else 'Clear'}")
-            log(f"DYNAMIC: FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} (Fees+Profit ${B['be_profit']:.2f}) | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} | TP>BE? {B['tp_covers_be']} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} | Qty {B['qty']:.3f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
-            log(f"NASDAQ: FUT NQ {macro['NQ_FUT']:+.2f}% | CASH NQ {macro['NQ_CASH']:+.2f}% | NDX100 {macro['NDX100']:+.2f}% | SPX Cash {macro['SPX']:+.2f}% SPX Fut {macro['SPX_FUT']:+.2f}% | DXY {macro['DXY']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}% DAX {macro['DAX']:+.2f}%")
+            log(f"DYNAMIC: FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} | TP>BE? {B['tp_covers_be']} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} | Qty {B['qty']:.3f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
+            log(f"NASDAQ: FUT NQ {macro['NQ_FUT']:+.2f}% | CASH NQ {macro['NQ_CASH']:+.2f}% | NDX100 {macro['NDX100']:+.2f}% | SPX Cash {macro['SPX']:+.2f}% SPX Fut {macro['SPX_FUT']:+.2f}% | DXY {macro['DXY']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}%")
             if time.time() - last_trade_time > 4*3600 and not open_pos and not waiting:
-                log(f"⏰ 4H NO TRADE CHECK: I dey awake, I dey watch. Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% - Market never give me A+ yet, I dey wait, no be sleep.")
+                log(f"⏰ 4H NO TRADE: I dey awake. Score {B['score']:.2f} / Thr {B['threshold']:.2f} - Market never give A+ yet.")
+            if liq_map.get("bias") in ["LONG_HUNT_CONFIRMED", "SHORT_HUNT_CONFIRMED"] and not B['is_hunt']:
+                log(f"⚠️ LIQ MAP WARNING: {liq_map['bias']} but no price sweep yet - I dey watch, hunt fit come")
             if news_block:
-                log(f"🛑 HUMAN WAIT: {news_msg} - I no go trade inside bomb, I protect $10")
+                log(f"🛑 HUMAN WAIT: {news_msg} - I no go trade inside bomb")
                 time.sleep(60); continue
             if open_pos:
                 side=open_pos['side']; entry=open_pos['entry']; tp=open_pos['tp']; sl=open_pos['sl']; be_price=open_pos['be_price']
@@ -446,7 +528,7 @@ def main_loop():
                         wins+=1; consecutive_wins+=1; consecutive_losses=0
                     else:
                         losses+=1; consecutive_losses+=1; consecutive_wins=0
-                    log(f"✅ CLOSED {reason} | PnL ${pnl:.4f} | Bal ${paper_balance:.2f} | W {wins} L {losses} BE {be_hits} | Streak W{consecutive_wins} L{consecutive_losses} - I learn, I no give up")
+                    log(f"✅ CLOSED {side} {reason} | PnL ${pnl:.4f} | Bal ${paper_balance:.2f} | W {wins} L {losses} BE {be_hits}")
                     open_pos=None; time.sleep(10); continue
                 else:
                     log(f"⏳ OPEN {side} Entry ${entry:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${open_pos['sl']:.0f} BE ${be_price:.0f}")
@@ -460,10 +542,10 @@ def main_loop():
                 if hit:
                     be_price=trig+B['be_dist'] if side=='LONG' else trig-B['be_dist']
                     open_pos={'side':side,'entry':trig,'tp':tp,'sl':sl,'be_price':be_price,'be_done':False,'start':time.time(),'total_fees':B['total_fees'],'qty':B['qty'],'be_profit':B['be_profit']}
-                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f}")
+                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f}")
                     waiting=None
                 elif expired or opposite:
-                    log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - market change, I re-scan")
+                    log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - market change")
                     waiting=None
                 else:
                     log(f"👀 WAITING {side} Trig ${trig:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${sl:.0f}")
@@ -475,35 +557,40 @@ def main_loop():
                 log(f"⛔ SKIP TP ${B['tp_dist']:.0f} no > SL ${B['sl_dist']:.0f} x1.5 - I WAIT")
                 time.sleep(60); continue
             if abs(B['score']) < B['threshold']:
-                log(f"=> NO CLEAR: Score {B['score']:.2f} < Thr {B['threshold']:.2f}... I WAIT, I no rush my $10")
+                log(f"=> NO CLEAR: Score {B['score']:.2f} < Thr {B['threshold']:.2f}... I WAIT")
                 time.sleep(60); continue
             if B['win_prob'] < 0.60:
-                log(f"⛔ SKIP WinProb {B['win_prob']*100:.0f}% < 60% - I no confident, I WAIT")
+                log(f"⛔ SKIP WinProb {B['win_prob']*100:.0f}% < 60% - I WAIT")
                 time.sleep(60); continue
             if B['ev'] <= 0:
-                log(f"⛔ SKIP EV ${B['ev']:.4f} <= 0 - This trade go lose on average, I WAIT")
+                log(f"⛔ SKIP EV ${B['ev']:.4f} <= 0 - I WAIT")
                 time.sleep(60); continue
             if B['rr'] < 1.4:
-                log(f"⛔ SKIP R:R {B['rr']:.1f} < 1.4 - Risk too big, I WAIT")
+                log(f"⛔ SKIP R:R {B['rr']:.1f} < 1.4 - I WAIT")
                 time.sleep(60); continue
             if macro['OIL'] > 6:
                 log(f"⛔ SKIP Oil spike {macro['OIL']:.2f}% - Bank Trap")
                 time.sleep(60); continue
-            if session == "ASIA" and abs(B['score']) < 3.0:
-                log(f"⛔ SKIP Asia session, score no strong enough - I go sleep, wait London")
+            if session == "ASIA" and abs(B['score']) < 3.0 and not B['is_hunt']:
+                log(f"⛔ SKIP Asia session, score no strong enough - wait London")
                 time.sleep(60); continue
             if B['qty'] < BYBIT_MIN_QTY:
-                log(f"⛔ SKIP Qty {B['qty']:.3f} < Bybit min {BYBIT_MIN_QTY} - I no go send invalid order")
+                log(f"⛔ SKIP Qty {B['qty']:.3f} < Bybit min {BYBIT_MIN_QTY}")
                 time.sleep(60); continue
-            side='LONG' if B['score']>=0 else 'SHORT'
+            if B['is_hunt'] and B['hunt_side']:
+                side = B['hunt_side']
+            else:
+                side='LONG' if B['score']>=0 else 'SHORT'
             trig_offset = atr * (0.3 + (B['trend_strength']*0.1))
+            if B['is_hunt']:
+                trig_offset = atr * 0.2
             if side=='LONG':
                 trig=btc+trig_offset; tp=trig+B['tp_dist']; sl=trig-B['sl_dist']; be_price=trig+B['be_dist']
             else:
                 trig=btc-trig_offset; tp=trig-B['tp_dist']; sl=trig+B['sl_dist']; be_price=trig-B['be_dist']
             waiting={'side':side,'trig':trig,'tp':tp,'sl':sl,'be_price':be_price,'start':time.time()}
             last_trade_time = time.time()
-            log(f"✅ HUMAN HIDDEN {side} PLACED Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} | TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | NQ Fut {macro['NQ_FUT']:+.2f}% Cash {macro['NQ_CASH']:+.2f}% | News {live_news.get('headline','')[:60]}")
+            log(f"✅ HUMAN HIDDEN {side} PLACED {'[LIQ HUNT] ' if B['is_hunt'] else ''}Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} | TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | {B['liq_signal']}")
             time.sleep(60)
         except Exception as e:
             log(f"Error {e} retry 30s"); time.sleep(30)
