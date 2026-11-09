@@ -1,12 +1,12 @@
 import os, time, math, requests, datetime, re, xml.etree.ElementTree as ET
 import threading
 
-# --- RENDER KEEP-ALIVE + SELF-PING - V5.9 ---
+# --- RENDER KEEP-ALIVE + SELF-PING - V5.10 WIN MORE ---
 try:
     from flask import Flask
     app = Flask(__name__)
     @app.route('/')
-    def home(): return "V5.9 Real Liquidation Map + Liquidity Hunter is alive!"
+    def home(): return "V5.10 DXY Fixed + Win More is alive!"
     def run_web():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
@@ -51,11 +51,11 @@ last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0}
 
 def log(msg):
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"{now} [V5.9-LIQ-MAP] {msg}", flush=True)
+    print(f"{now} [V5.10-WIN-MORE] {msg}", flush=True)
 
 def yahoo_direct(symbol, host):
     try:
-        url = f"https://{host}/v8/finance/chart/{symbol}?range=2d&interval=1d"
+        url = f"https://{host}/v8/finance/chart/{symbol}?range=5d&interval=1d"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=5).json()
         closes = r["chart"]["result"][0]["indicators"]["quote"][0]["close"]
@@ -70,12 +70,20 @@ def stooq_backup(symbol):
     try:
         url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
         r = requests.get(url, timeout=5).text.strip().split("\n")
-        if len(r) >= 3:
-            last = r[-1].split(","); prev = r[-2].split(",")
+        rows = [x for x in r if x.strip() and ",,," not in x]
+        if len(rows) >= 3:
+            last = rows[-1].split(","); prev = rows[-2].split(",")
             c1 = float(last[4]); c0 = float(prev[4])
             if c0 != 0:
                 return (c1-c0)/c0*100
         return None
+    except:
+        return None
+
+def binance_24h_change(symbol):
+    try:
+        r = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}", timeout=5).json()
+        return float(r.get("priceChangePercent", 0))
     except:
         return None
 
@@ -93,21 +101,33 @@ def fast_yahoo_multi(yahoo_symbols, stooq_symbol):
 def get_macro_all():
     global last_macro
     mapping = {
-        "DXY": (["DX-Y.NYB", "DX=F", "DXY", "%5EDXY"], "dx.f"),
+        "DXY": (["DX=F", "^DXY", "DX-Y.NYB", "UUP"], "dx.f"),
         "SPX": (["%5EGSPC", "SPY"], "^spx"),
-        "SPX_FUT": (["ES%3DF", "ES=F", "SPX"], "es.f"),
-        "NQ_FUT": (["NQ%3DF", "NQ=F"], "nq.f"),
+        "SPX_FUT": (["ES=F", "ES%3DF", "SPY"], "es.f"),
+        "NQ_FUT": (["NQ=F", "NQ%3DF", "QQQ"], "nq.f"),
         "NQ_CASH": (["%5EIXIC", "QQQ"], "^ixic"),
         "NDX100": (["%5ENDX", "NDX", "QQQ"], "^ndx"),
         "DAX": (["%5EGDAXI", "DAX"], "^gdaxi"),
         "FTSE": (["%5EFTSE", "FTSE"], "^ftse"),
         "NIKKEI": (["%5EN225", "NIKKEI"], "^n225"),
-        "OIL": (["CL%3DF", "CL=F", "USO"], "cl.f"),
-        "GOLD": (["GC%3DF", "GC=F", "GLD"], "gc.f"),
+        "OIL": (["CL=F", "CL%3DF", "USO"], "cl.f"),
+        "GOLD": (["GC=F", "GC%3DF", "GLD"], "gc.f"),
     }
     out = {}
     for k, (ys_list, ss) in mapping.items():
         v = fast_yahoo_multi(ys_list, ss)
+        # --- V5.10 FIX: DXY via Binance EURUSDT inverse proxy ---
+        if v is None and k == "DXY":
+            eur = binance_24h_change("EURUSDT")
+            if eur is not None:
+                v = -eur * 0.57
+                log(f"DXY proxy via EURUSDT {eur:+.2f}% -> DXY {v:+.2f}%")
+        # --- V5.10 FIX: SPX_FUT via SPX Cash proxy, no more 0.00 ---
+        if v is None and k == "SPX_FUT":
+            spx_cash = out.get("SPX", last_macro.get("SPX", 0.0))
+            if spx_cash != 0.0:
+                v = spx_cash
+                log(f"SPX_FUT proxy via SPX Cash {v:+.2f}%")
         if v is not None:
             out[k] = v; last_macro[k] = v
         else:
@@ -228,7 +248,6 @@ def get_news_risk(live_news):
         return True, f"LIVE CALENDAR NEWS IN HEADLINES - WAIT: {live_news.get('headline','')[:80]}"
     return False, ""
 
-# ============ REAL LIVE LIQUIDATION MAP - NEW V5.9 ============
 def get_liquidation_map():
     long_liq = 0.0; short_liq = 0.0; details = []
     try:
@@ -420,7 +439,6 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     if macro['OIL']>6: score = 0
     liq_score, liq_signal, is_hunt, hunt_side = liquidity_hunt_analysis(closes, highs, lows, vols, atr)
     score += liq_score
-    # REAL LIQ MAP - confirms hunt
     score += liq_map.get("score", 0.0)
     if liq_map.get("bias") == "LONG_HUNT_CONFIRMED" and is_hunt and hunt_side == "LONG":
         score += 1.0
@@ -436,7 +454,8 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     score += live_news.get("score", 0.0)
     effective_session_mult = 1.0 if is_hunt else session_mult
     score = score * effective_session_mult
-    threshold = 1.5 * ai_strictness
+    # V5.10 WIN MORE: normal trades need stronger score, hunt stays easy
+    threshold = 1.8 * ai_strictness
     if is_hunt:
         threshold = 1.0 * ai_strictness
     win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)
@@ -461,7 +480,7 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
 
 def main_loop():
     global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history, consecutive_losses, consecutive_wins, last_trade_time
-    log(f"V5.9 STARTED - REAL LIQ MAP + LIQ HUNTER, BOTH SIDES LONG+SHORT, TP>BE x2.5, NASDAQ FUT+CASH, LIVE NEWS, SELF-PING")
+    log(f"V5.10 STARTED - DXY FIXED + WIN MORE, REAL LIQ MAP + LIQ HUNTER, BOTH SIDES, TP>BE x2.5, NASDAQ FUT+CASH, LIVE NEWS, SELF-PING")
     while True:
         try:
             closes, highs, lows, vols = get_bybit_klines()
@@ -499,11 +518,12 @@ def main_loop():
                         open_pos['sl']=be_price; open_pos['be_done']=True; be_hits+=1
                         log(f"🟢 BE HIT + PROFIT LOCKED! SL -> BE ${be_price:.0f} = Fees + ${open_pos['be_profit']:.2f} profit secured")
                 if open_pos.get('be_done'):
+                    # V5.10 WIN MORE: tighter trail ATR x0.35 to lock profit faster
                     if side=='LONG':
-                        nsl=btc-atr*0.5
+                        nsl=btc-atr*0.35
                         if nsl>open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL UP SL ${nsl:.0f}")
                     else:
-                        nsl=btc+atr*0.5
+                        nsl=btc+atr*0.35
                         if nsl<open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL DOWN SL ${nsl:.0f}")
                 pnl=0; closed=False; reason=""
                 total_fees=open_pos['total_fees']; qty=open_pos['qty']; be_profit=open_pos['be_profit']
