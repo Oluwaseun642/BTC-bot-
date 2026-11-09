@@ -1,12 +1,12 @@
 import os, time, math, requests, datetime, re, xml.etree.ElementTree as ET
 import threading
 
-# --- RENDER KEEP-ALIVE + SELF-PING - V5.10 WIN MORE ---
+# --- RENDER KEEP-ALIVE + SELF-PING - V5.11 NEWS HUNTER ---
 try:
     from flask import Flask
     app = Flask(__name__)
     @app.route('/')
-    def home(): return "V5.10 DXY Fixed + Win More is alive!"
+    def home(): return "V5.11 News Hunter Worldwide is alive!"
     def run_web():
         port = int(os.environ.get("PORT", 10000))
         app.run(host="0.0.0.0", port=port)
@@ -51,7 +51,7 @@ last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0}
 
 def log(msg):
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"{now} [V5.10-WIN-MORE] {msg}", flush=True)
+    print(f"{now} [V5.11-NEWS-HUNTER] {msg}", flush=True)
 
 def yahoo_direct(symbol, host):
     try:
@@ -116,13 +116,11 @@ def get_macro_all():
     out = {}
     for k, (ys_list, ss) in mapping.items():
         v = fast_yahoo_multi(ys_list, ss)
-        # --- V5.10 FIX: DXY via Binance EURUSDT inverse proxy ---
         if v is None and k == "DXY":
             eur = binance_24h_change("EURUSDT")
             if eur is not None:
                 v = -eur * 0.57
                 log(f"DXY proxy via EURUSDT {eur:+.2f}% -> DXY {v:+.2f}%")
-        # --- V5.10 FIX: SPX_FUT via SPX Cash proxy, no more 0.00 ---
         if v is None and k == "SPX_FUT":
             spx_cash = out.get("SPX", last_macro.get("SPX", 0.0))
             if spx_cash != 0.0:
@@ -185,8 +183,11 @@ def get_session():
     elif 20 <= h < 23: return "NY_LATE", 0.8
     else: return "ASIA", 0.6
 
-DANGER_WORDS = ["hack", "exploit", "breach", "stolen", "lawsuit", "sue", "sec", "ban", "crash", "collapse", "bankrupt", "war", "attack", "sanction", "regulation crackdown", "etf reject", "fraud", "liquidation cascade", "emergency", "martial"]
-BULLISH_WORDS = ["etf approve", "etf approved", "adoption", "bullish", "record high", "institutional", "partnership", "upgrade"]
+# --- WORLDWIDE NEWS V5.11 ---
+DANGER_WORDS = ["hack", "exploit", "breach", "stolen", "lawsuit", "sue", "sec", "ban", "crash", "collapse", "bankrupt", "war", "attack", "sanction", "regulation crackdown", "etf reject", "fraud", "liquidation cascade", "emergency", "martial", "missile", "invasion", "airstrike", "coup", "earthquake", "tsunami", "assassination", "nuclear", "tariff war", "trade war", "recession", "interest rate hike"]
+EXTREME_BLOCK_WORDS = ["nuclear", "missile strike", "invasion", "world war", "martial law"]
+BULLISH_WORDS = ["etf approve", "etf approved", "adoption", "bullish", "record high", "institutional", "partnership", "upgrade", "rate cut", "peace deal", "ceasefire", "trump signs", "biden signs", "stimulus", "etf inflow record"]
+BEARISH_WORDS = ["etf outflow", "etf reject", "rate hike", "recession", "bankrupt", "liquidation", "hack", "fraud", "sec lawsuit"]
 CALENDAR_WORDS = ["cpi", "fomc", "nfp", "nonfarm", "rate decision", "interest rate", "fed chair", "powell"]
 
 def parse_rss_titles(url):
@@ -212,41 +213,57 @@ def get_live_news():
     titles = []
     titles += parse_rss_titles("https://www.coindesk.com/arc/outboundfeed/rss/")
     titles += parse_rss_titles("https://cointelegraph.com/rss")
-    danger = False; headline_hit = ""; score = 0.0; calendar_hit = False
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=world&hl=en-US&gl=US&ceid=US:en")
+    titles += parse_rss_titles("https://feeds.bbci.co.uk/news/world/rss.xml")
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=Bitcoin%20OR%20crypto%20OR%20Federal%20Reserve%20OR%20war&hl=en-US&gl=US&ceid=US:en")
+    danger = False; headline_hit = ""; score = 0.0; calendar_hit = False; extreme = False; direction = "NEUTRAL"
     for t in titles:
         low = t.lower()
+        for w in EXTREME_BLOCK_WORDS:
+            if w in low:
+                extreme = True; danger = True; headline_hit = t; score -= 3.0; direction = "EXTREME"
         for w in DANGER_WORDS:
             if w in low:
-                danger = True; headline_hit = t; score -= 2.0; break
+                danger = True; headline_hit = t; score -= 2.0; direction = "BEARISH"
+                break
         for w in BULLISH_WORDS:
             if w in low:
-                score += 0.8
+                score += 2.0; direction = "BULLISH"
                 if not headline_hit: headline_hit = t
+        for w in BEARISH_WORDS:
+            if w in low:
+                score -= 1.0
+                if direction == "NEUTRAL": direction = "BEARISH"
         for w in CALENDAR_WORDS:
             if w in low:
                 calendar_hit = True
                 if not headline_hit: headline_hit = t
-        if danger:
+        if extreme:
             break
-    out = {"danger": danger, "headline": headline_hit, "score": score, "calendar": calendar_hit, "titles": titles[:3], "time": time.time()}
+    out = {"danger": danger, "headline": headline_hit, "score": score, "calendar": calendar_hit, "extreme": extreme, "direction": direction, "titles": titles[:3], "time": time.time()}
     last_news = out
-    if danger:
-        log(f"📰 LIVE NEWS DANGER: {headline_hit}")
+    if extreme:
+        log(f"📰 EXTREME WORLD NEWS: {headline_hit}")
     elif headline_hit:
-        log(f"📰 LIVE NEWS: {headline_hit} | Score {score:+.1f}")
+        log(f"📰 WORLD NEWS: {headline_hit} | Score {score:+.1f} Dir {direction}")
     return out
 
 def get_news_risk(live_news):
     now = datetime.datetime.utcnow()
     h, wd = now.hour, now.weekday()
-    if wd == 4 and 12 <= h < 14: return True, "NFP NEWS - WAIT (Calendar)"
-    if wd == 2 and 12 <= h < 14: return True, "CPI NEWS - WAIT (Calendar)"
-    if wd == 2 and 18 <= h < 20: return True, "FOMC NEWS - WAIT (Calendar)"
-    if live_news.get("danger"):
-        return True, f"LIVE BREAKING NEWS - WAIT: {live_news.get('headline','')[:80]}"
+    if wd == 4 and 12 <= h < 14: return True, "NFP NEWS - WAIT (Calendar)", "BLOCK"
+    if wd == 2 and 12 <= h < 14: return True, "CPI NEWS - WAIT (Calendar)", "BLOCK"
+    if wd == 2 and 18 <= h < 20: return True, "FOMC NEWS - WAIT (Calendar)", "BLOCK"
+    if live_news.get("extreme"):
+        return True, f"EXTREME WORLD NEWS - WAIT: {live_news.get('headline','')[:80]}", "BLOCK"
     if live_news.get("calendar"):
-        return True, f"LIVE CALENDAR NEWS IN HEADLINES - WAIT: {live_news.get('headline','')[:80]}"
-    return False, ""
+        return True, f"LIVE CALENDAR NEWS IN HEADLINES - WAIT: {live_news.get('headline','')[:80]}", "BLOCK"
+    # V5.11 NEWS HUNTER: normal danger/bullish news = OPPORTUNITY, no block
+    if live_news.get("direction") == "BULLISH":
+        return False, f"NEWS OPPORTUNITY LONG: {live_news.get('headline','')[:80]}", "LONG"
+    if live_news.get("direction") == "BEARISH":
+        return False, f"NEWS OPPORTUNITY SHORT / HUNT: {live_news.get('headline','')[:80]}", "SHORT"
+    return False, "", "NEUTRAL"
 
 def get_liquidation_map():
     long_liq = 0.0; short_liq = 0.0; details = []
@@ -352,7 +369,7 @@ def liquidity_hunt_analysis(closes, highs, lows, vols, atr):
             signal = f"SWEEP SHORT: Broke ${recent_high:.0f} -> Rejected ${last_close:.0f}"
     return score, signal, is_hunt, hunt_side
 
-def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map):
+def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map, news_mode):
     atr_pct = (atr / btc) * 100
     if atr_pct < 0.08: regime="CALM"; vol_mult=0.7
     elif atr_pct < 0.20: regime="NORMAL"; vol_mult=1.0
@@ -451,15 +468,25 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     if smart['oi_change'] > 2 and smart['long_short'] > 1.5: score -= 0.8
     if fear < 20: score += 1.0
     elif fear > 80: score -= 1.0
+    # NEWS HUNTER: news score already in live_news, but boost if news + hunt + liq agree
     score += live_news.get("score", 0.0)
-    effective_session_mult = 1.0 if is_hunt else session_mult
+    news_boost = False
+    if news_mode == "LONG" and liq_map.get("bias") in ["LONG_HUNT_CONFIRMED", "HEAVY_LONG_LIQ"]:
+        score += 1.0; news_boost = True; liq_signal += " + 📰 NEWS+HUNT LONG CONFIRMED"
+    if news_mode == "SHORT" and liq_map.get("bias") in ["SHORT_HUNT_CONFIRMED", "HEAVY_SHORT_LIQ"]:
+        score -= 1.0; news_boost = True; liq_signal += " + 📰 NEWS+HUNT SHORT CONFIRMED"
+    # If news bearish but price swept low and reclaimed -> trap, flip to LONG
+    if news_mode == "SHORT" and is_hunt and hunt_side == "LONG":
+        score += 1.5; liq_signal += " + 📰 NEWS TRAP - Bear news but sweep reclaim = LONG"
+    if news_mode == "LONG" and is_hunt and hunt_side == "SHORT":
+        score -= 1.5; liq_signal += " + 📰 NEWS TRAP - Bull news but sweep reject = SHORT"
+    effective_session_mult = 1.0 if (is_hunt or news_boost) else session_mult
     score = score * effective_session_mult
-    # V5.10 WIN MORE: normal trades need stronger score, hunt stays easy
     threshold = 1.8 * ai_strictness
-    if is_hunt:
+    if is_hunt or news_boost:
         threshold = 1.0 * ai_strictness
     win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)
-    if is_hunt:
+    if is_hunt or news_boost:
         win_prob = min(win_prob + 0.10, 0.85)
     win_prob = min(win_prob, 0.85)
     tp_profit = tp_dist*qty - total_fees
@@ -475,12 +502,12 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
         "win_prob":win_prob,"ev":ev,"rr":rr,"tp_profit":tp_profit,"sl_loss":sl_loss,"r":r,
         "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":liq_signal,"smc_score":liq_score,
         "tp_covers_be":tp_covers_be,"tp_covers_sl":tp_covers_sl,"tp_dist_raw":tp_dist_raw,
-        "is_hunt":is_hunt,"hunt_side":hunt_side,"liq_signal":liq_signal
+        "is_hunt":is_hunt,"hunt_side":hunt_side,"liq_signal":liq_signal,"news_boost":news_boost
     }
 
 def main_loop():
     global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history, consecutive_losses, consecutive_wins, last_trade_time
-    log(f"V5.10 STARTED - DXY FIXED + WIN MORE, REAL LIQ MAP + LIQ HUNTER, BOTH SIDES, TP>BE x2.5, NASDAQ FUT+CASH, LIVE NEWS, SELF-PING")
+    log(f"V5.11 STARTED - NEWS HUNTER WORLDWIDE, REAL LIQ MAP + LIQ HUNTER, BOTH SIDES, TP>BE x2.5, DXY FIXED, SELF-PING")
     while True:
         try:
             closes, highs, lows, vols = get_bybit_klines()
@@ -495,13 +522,13 @@ def main_loop():
             session, session_mult = get_session()
             live_news = get_live_news()
             liq_map = get_liquidation_map()
-            news_block, news_msg = get_news_risk(live_news)
-            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map)
+            news_block, news_msg, news_mode = get_news_risk(live_news)
+            B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map, news_mode)
             log(f"BRAIN: {B['regime']} ATR ${atr:.0f} EMA9 ${B['ema9']:.0f} RSI {B['r']:.1f} Vol x{B['vol_ratio']:.2f} | {B['mindset']}")
-            log(f"LIQ HUNT: {B['liq_signal']} | Hunt={B['is_hunt']} Side={B['hunt_side']}")
+            log(f"LIQ HUNT: {B['liq_signal']} | Hunt={B['is_hunt']} Side={B['hunt_side']} NewsBoost={B['news_boost']}")
             log(f"LIQ MAP: Long Liq ${liq_map['long_liq']/1000:.0f}k | Short Liq ${liq_map['short_liq']/1000:.0f}k | Total ${liq_map['total']/1000:.0f}k | Bias {liq_map['bias']} Score {liq_map['score']:+.1f} | {liq_map['details']}")
-            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} | Both Sides Ready: LONG if Score>0, SHORT if Score<0")
-            log(f"NEWS: Danger={live_news.get('danger')} Score {live_news.get('score',0):+.1f} | Headline: {live_news.get('headline','No big news')[:100]} | Block: {news_msg if news_block else 'Clear'}")
+            log(f"WORLD: Fear {fear} ({fear_label}) Funding {smart['funding']:.3f}% OI {smart['oi_change']:+.2f}% L/S {smart['long_short']:.2f} Session {session} x{session_mult} | Both Sides: LONG if Score>0, SHORT if Score<0")
+            log(f"NEWS: Danger={live_news.get('danger')} Extreme={live_news.get('extreme')} Dir={live_news.get('direction')} Score {live_news.get('score',0):+.1f} | Headline: {live_news.get('headline','No big news')[:100]} | Mode: {news_mode} | Block: {news_msg if news_block else 'Clear - Opportunity'}")
             log(f"DYNAMIC: FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} | TP>BE? {B['tp_covers_be']} TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} | Qty {B['qty']:.3f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
             log(f"NASDAQ: FUT NQ {macro['NQ_FUT']:+.2f}% | CASH NQ {macro['NQ_CASH']:+.2f}% | NDX100 {macro['NDX100']:+.2f}% | SPX Cash {macro['SPX']:+.2f}% SPX Fut {macro['SPX_FUT']:+.2f}% | DXY {macro['DXY']:+.2f}% Oil {macro['OIL']:+.2f}% Gold {macro['GOLD']:+.2f}%")
             if time.time() - last_trade_time > 4*3600 and not open_pos and not waiting:
@@ -509,8 +536,10 @@ def main_loop():
             if liq_map.get("bias") in ["LONG_HUNT_CONFIRMED", "SHORT_HUNT_CONFIRMED"] and not B['is_hunt']:
                 log(f"⚠️ LIQ MAP WARNING: {liq_map['bias']} but no price sweep yet - I dey watch, hunt fit come")
             if news_block:
-                log(f"🛑 HUMAN WAIT: {news_msg} - I no go trade inside bomb")
+                log(f"🛑 HUMAN WAIT: {news_msg} - I no go trade inside real bomb")
                 time.sleep(60); continue
+            if news_mode in ["LONG", "SHORT"]:
+                log(f"🔥 NEWS OPPORTUNITY MODE: {news_msg} - I go take advantage, LONG or SHORT")
             if open_pos:
                 side=open_pos['side']; entry=open_pos['entry']; tp=open_pos['tp']; sl=open_pos['sl']; be_price=open_pos['be_price']
                 if not open_pos.get('be_done'):
@@ -518,7 +547,6 @@ def main_loop():
                         open_pos['sl']=be_price; open_pos['be_done']=True; be_hits+=1
                         log(f"🟢 BE HIT + PROFIT LOCKED! SL -> BE ${be_price:.0f} = Fees + ${open_pos['be_profit']:.2f} profit secured")
                 if open_pos.get('be_done'):
-                    # V5.10 WIN MORE: tighter trail ATR x0.35 to lock profit faster
                     if side=='LONG':
                         nsl=btc-atr*0.35
                         if nsl>open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL UP SL ${nsl:.0f}")
@@ -591,18 +619,21 @@ def main_loop():
             if macro['OIL'] > 6:
                 log(f"⛔ SKIP Oil spike {macro['OIL']:.2f}% - Bank Trap")
                 time.sleep(60); continue
-            if session == "ASIA" and abs(B['score']) < 3.0 and not B['is_hunt']:
+            if session == "ASIA" and abs(B['score']) < 3.0 and not B['is_hunt'] and not B['news_boost']:
                 log(f"⛔ SKIP Asia session, score no strong enough - wait London")
                 time.sleep(60); continue
             if B['qty'] < BYBIT_MIN_QTY:
                 log(f"⛔ SKIP Qty {B['qty']:.3f} < Bybit min {BYBIT_MIN_QTY}")
                 time.sleep(60); continue
+            # NEWS HUNTER + LIQ HUNT decide side first
             if B['is_hunt'] and B['hunt_side']:
                 side = B['hunt_side']
+            elif B['news_boost'] and news_mode in ["LONG", "SHORT"]:
+                side = news_mode
             else:
                 side='LONG' if B['score']>=0 else 'SHORT'
             trig_offset = atr * (0.3 + (B['trend_strength']*0.1))
-            if B['is_hunt']:
+            if B['is_hunt'] or B['news_boost']:
                 trig_offset = atr * 0.2
             if side=='LONG':
                 trig=btc+trig_offset; tp=trig+B['tp_dist']; sl=trig-B['sl_dist']; be_price=trig+B['be_dist']
@@ -610,7 +641,7 @@ def main_loop():
                 trig=btc-trig_offset; tp=trig-B['tp_dist']; sl=trig+B['sl_dist']; be_price=trig-B['be_dist']
             waiting={'side':side,'trig':trig,'tp':tp,'sl':sl,'be_price':be_price,'start':time.time()}
             last_trade_time = time.time()
-            log(f"✅ HUMAN HIDDEN {side} PLACED {'[LIQ HUNT] ' if B['is_hunt'] else ''}Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} | TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | {B['liq_signal']}")
+            log(f"✅ HUMAN HIDDEN {side} PLACED {'[LIQ HUNT] ' if B['is_hunt'] else ''}{' [NEWS] ' if B['news_boost'] else ''}Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} | TP/BE x{B['tp_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | {B['liq_signal']}")
             time.sleep(60)
         except Exception as e:
             log(f"Error {e} retry 30s"); time.sleep(30)
