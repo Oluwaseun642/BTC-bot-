@@ -1,7 +1,7 @@
 import os, time, math, requests, datetime, re, xml.etree.ElementTree as ET
 import threading, traceback
 
-# --- V5.12.4 BACK TO 3 WINS: BE 0.05 WINNING FORMULA + COOLDOWN 5MIN ---
+# --- V5.12.11 CONFLUENCE CERTAINTY: SWEEP NA ALARM, WORLDWIDE VOTES DECIDE DESTINATION ---
 START_BAL = 10.0
 paper_balance = START_BAL
 paper_pnl = 0.0
@@ -17,18 +17,18 @@ BYBIT_QTY_STEP = 0.001
 BYBIT_MIN_ORDER_USD = 5.0
 BYBIT_TAKER_FEE = 0.0006
 last_macro = {"DXY":0.0,"SPX":0.0,"SPX_FUT":0.0,"NQ_FUT":0.0,"NQ_CASH":0.0,"NDX100":0.0,"DAX":0.0,"FTSE":0.0,"NIKKEI":0.0,"OIL":0.0,"GOLD":0.0}
-last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0}
+last_news = {"danger": False, "headline": "", "score": 0.0, "time": 0, "direction": "NEUTRAL", "fed": "NEUTRAL"}
 
 def log(msg):
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"{now} [V5.12.4-3WINS] {msg}", flush=True)
+    print(f"{now} [V5.12.11-CONFLUENCE] {msg}", flush=True)
 
 try:
     from flask import Flask
     app = Flask(__name__)
     @app.route('/')
     def home():
-        return f"V5.12.4 Back To 3 Wins Alive! Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}"
+        return f"V5.12.11 Confluence Alive! Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}"
     @app.route('/health')
     def health(): return "OK", 200
     @app.route('/ping')
@@ -55,7 +55,7 @@ def self_ping_loop():
 def heartbeat_loop():
     while True:
         time.sleep(60)
-        log(f"💓 HEARTBEAT - I dey alive! Bal ${paper_balance:.2f} W {wins} L {losses} BE {be_hits} Open {open_pos is not None} Waiting {waiting is not None}")
+        log(f"💓 HEARTBEAT - I dey alive, checking worldwide votes! Bal ${paper_balance:.2f} W {wins} L {losses} BE {be_hits} Open {open_pos is not None} Waiting {waiting is not None}")
 
 def yahoo_direct(symbol, host):
     try:
@@ -173,8 +173,10 @@ def get_session():
     elif 20 <= h < 23: return "NY_LATE", 0.8
     else: return "ASIA", 0.6
 
-STRONG_BEARISH = ["hack", "exploit", "breach", "stolen", "sec lawsuit", "sec sues", "etf reject", "etf outflow", "bankrupt", "collapse", "crash", "fraud", "liquidation cascade", "missile", "invasion", "airstrike", "nuclear", "martial law", "coup", "assassination", "rate hike", "recession"]
-STRONG_BULLISH = ["etf approve", "etf approved", "etf inflow record", "rate cut", "peace deal", "ceasefire", "stimulus", "institutional buys", "adoption"]
+FED_HAWKISH = ["rate hike", "hike rates", "higher for longer", "inflation sticky", "inflation persistent", "tighten", "tightening", "hawkish", "restrictive", "no rate cut", "delay rate cut", "powell hawkish", "fed warns", "debt ceiling", "treasury selloff"]
+FED_DOVISH = ["rate cut", "cut rates", "easing", "dovish", "pause", "soft landing", "disinflation", "powell dovish", "fed signals cut", "stimulus", "quantitative easing"]
+STRONG_BEARISH = ["hack", "exploit", "breach", "stolen", "sec lawsuit", "sec sues", "sec charges", "etf reject", "etf outflow", "bankrupt", "collapse", "crash", "fraud", "liquidation cascade", "missile", "invasion", "airstrike", "nuclear", "martial law", "coup", "assassination", "recession", "war", "sanction", "bank failure", "bank collapse"]
+STRONG_BULLISH = ["etf approve", "etf approved", "etf inflow", "etf inflow record", "peace deal", "ceasefire", "institutional buys", "adoption", "bitcoin reserve", "strategic reserve", "bullish", "all-time high"]
 
 def parse_rss_titles(url):
     try:
@@ -185,33 +187,45 @@ def parse_rss_titles(url):
         for item in root.iter("item"):
             t = item.find("title")
             if t is not None and t.text: titles.append(t.text)
-            if len(titles) >= 5: break
+            if len(titles) >= 6: break
         return titles
     except: return []
 
 def get_live_news():
     global last_news
-    if time.time() - last_news["time"] < 180 and last_news["time"] != 0:
+    if time.time() - last_news["time"] < 60 and last_news["time"] != 0:
         return last_news
     titles = []
     titles += parse_rss_titles("https://www.coindesk.com/arc/outboundfeed/rss/")
     titles += parse_rss_titles("https://cointelegraph.com/rss")
-    titles += parse_rss_titles("https://news.google.com/rss/search?q=world&hl=en-US&gl=US&ceid=US:en")
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=Federal+Reserve+OR+FOMC+OR+Powell+OR+interest+rate&hl=en-US&gl=US&ceid=US:en")
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=Bitcoin+OR+crypto+OR+ETF&hl=en-US&gl=US&ceid=US:en")
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=war+OR+missile+OR+sanction+OR+bank+collapse&hl=en-US&gl=US&ceid=US:en")
     titles += parse_rss_titles("https://feeds.bbci.co.uk/news/world/rss.xml")
-    titles += parse_rss_titles("https://news.google.com/rss/search?q=Bitcoin%20OR%20crypto%20OR%20Federal%20Reserve%20OR%20war&hl=en-US&gl=US&ceid=US:en")
-    danger = False; headline_hit = ""; score = 0.0; direction = "NEUTRAL"
+    titles += parse_rss_titles("https://news.google.com/rss/search?q=ECB+OR+BOJ+OR+central+bank+OR+CPI+OR+inflation&hl=en-US&gl=US&ceid=US:en")
+    danger = False; headline_hit = ""; score = 0.0; direction = "NEUTRAL"; fed = "NEUTRAL"; fed_hit = ""
     for t in titles:
         low = t.lower()
+        for w in FED_HAWKISH:
+            if w in low:
+                score -= 2.5; direction = "BEARISH"; fed = "HAWKISH"; fed_hit = t; headline_hit = t; danger = True; break
+        for w in FED_DOVISH:
+            if w in low:
+                score += 2.5; direction = "BULLISH"; fed = "DOVISH"; fed_hit = t; headline_hit = t; break
         for w in STRONG_BEARISH:
             if w in low:
-                danger = True; headline_hit = t; score -= 2.0; direction = "BEARISH"; break
+                score -= 2.0; direction = "BEARISH"; danger = True
+                if not headline_hit: headline_hit = t
+                break
         for w in STRONG_BULLISH:
             if w in low:
                 score += 2.0; direction = "BULLISH"
                 if not headline_hit: headline_hit = t
-    out = {"danger": danger, "headline": headline_hit, "score": score, "direction": direction, "titles": titles[:3], "time": time.time()}
+                break
+    out = {"danger": danger, "headline": headline_hit, "score": score, "direction": direction, "fed": fed, "fed_hit": fed_hit, "titles": titles[:4], "time": time.time()}
     last_news = out
-    if headline_hit: log(f"📰 NEWS (STRONG ONLY): {headline_hit} | Score {score:+.1f} Dir {direction}")
+    if headline_hit: log(f"🌍 WORLD NEWS: Fed={fed} Dir={direction} Score {score:+.1f} | {headline_hit[:110]}")
+    else: log(f"🌍 WORLD NEWS: No big news - Neutral, roaming...")
     return out
 
 def get_news_risk(live_news):
@@ -222,7 +236,7 @@ def get_news_risk(live_news):
 def get_liquidation_map():
     long_liq = 0.0; short_liq = 0.0; details = []
     try:
-        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=50", timeout=5).json()
+        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100", timeout=5).json()
         for o in r:
             try:
                 price = float(o.get("price", 0)); qty = float(o.get("origQty", 0)); usd = price * qty
@@ -238,7 +252,7 @@ def get_liquidation_map():
         elif short_liq > long_liq * 1.5: bias = "SHORT_HUNT_CONFIRMED"; score = -2.0
         elif long_liq > 2000000: bias = "HEAVY_LONG_LIQ"; score = 1.5
         elif short_liq > 2000000: bias = "HEAVY_SHORT_LIQ"; score = -1.5
-    return {"long_liq": long_liq, "short_liq": short_liq, "total": total, "bias": bias, "score": score, "details": details[:3]}
+    return {"long_liq": long_liq, "short_liq": short_liq, "total": total, "bias": bias, "score": score, "details": details[:4]}
 
 def ema(data, n):
     if len(data) < n: return data[-1]
@@ -265,36 +279,107 @@ def atr_calc(highs, lows, closes, n=14):
     return sum(trs[-n:])/n
 
 def liquidity_hunt_analysis(closes, highs, lows, vols, atr):
-    score = 0.0; signal = "No Hunt"; is_hunt = False; hunt_side = None
-    if len(closes) < 50: return score, signal, is_hunt, hunt_side
+    score = 0.0; signal = "No Hunt"; is_hunt = False; hunt_side = None; void = None; sweep_type = "NONE"
+    if len(closes) < 50: return score, signal, is_hunt, hunt_side, void, sweep_type
     btc = closes[-1]
     lows_50 = lows[-50:-2]; highs_50 = highs[-50:-2]
     min_low = min(lows_50); low_touches = sum(1 for l in lows_50 if abs(l - min_low)/min_low < 0.002)
     max_high = max(highs_50); high_touches = sum(1 for h in highs_50 if abs(h - max_high)/max_high < 0.002)
     last_low = lows[-1]; last_high = highs[-1]; last_close = closes[-1]
     wick_pct = (last_high - last_low) / btc * 100
-    if low_touches >= 2:
-        if last_low < min_low and last_close > min_low:
-            if (min_low - last_low) > atr * 0.3:
-                score += 3.0; is_hunt = True; hunt_side = "LONG"
-                signal = f"🎯 LIQ HUNT LONG: Swept ${min_low:.0f} x{low_touches} -> Reclaimed ${last_close:.0f}"
-                if wick_pct > 1.0: score += 1.0; signal += f" + DEEP WICK {wick_pct:.2f}%"
-    if high_touches >= 2:
-        if last_high > max_high and last_close < max_high:
-            if (last_high - max_high) > atr * 0.3:
-                score -= 3.0; is_hunt = True; hunt_side = "SHORT"
-                signal = f"🎯 LIQ HUNT SHORT: Swept ${max_high:.0f} x{high_touches} -> Rejected ${last_close:.0f}"
-                if wick_pct > 1.0: score -= 1.0; signal += f" + DEEP WICK {wick_pct:.2f}%"
+    if len(closes) >= 3:
+        if lows[-1] > highs[-3]: void = f"VOID LONG ${highs[-3]:.0f}-${lows[-1]:.0f} - Gold sit here"
+        elif highs[-1] < lows[-3]: void = f"VOID SHORT ${highs[-1]:.0f}-${lows[-3]:.0f} - Gold sit here"
+    if low_touches >= 2 and last_low < min_low:
+        if last_close > min_low:
+            score += 3.0; is_hunt = True; hunt_side = "LONG"; sweep_type = "REVERSAL_LONG"
+            signal = f"🎯 CASE 1: Banks SWEPT LOWS ${min_low:.0f} x{low_touches}, price came BACK UP to ${last_close:.0f} - FAKE DOWN, REAL WAY UP"
+            if wick_pct > 1.0: score += 1.0; signal += f" + DEEP WICK {wick_pct:.2f}%"
+            if void: signal += f" | {void}"
+        else:
+            score -= 3.0; is_hunt = True; hunt_side = "SHORT"; sweep_type = "CONTINUATION_SHORT"
+            signal = f"🎯 CASE 2: Banks SWEPT LOWS ${min_low:.0f}, price STILL BELOW ${last_close:.0f} - NO RECLAIM, REAL WAY DOWN"
+            if void: signal += f" | {void}"
+    if high_touches >= 2 and last_high > max_high:
+        if last_close < max_high:
+            score -= 3.0; is_hunt = True; hunt_side = "SHORT"; sweep_type = "REVERSAL_SHORT"
+            signal = f"🎯 CASE 3: Banks SWEPT HIGHS ${max_high:.0f} x{high_touches}, price came BACK DOWN to ${last_close:.0f} - FAKE UP, REAL WAY DOWN"
+            if wick_pct > 1.0: score -= 1.0; signal += f" + DEEP WICK {wick_pct:.2f}%"
+            if void: signal += f" | {void}"
+        else:
+            score += 3.0; is_hunt = True; hunt_side = "LONG"; sweep_type = "CONTINUATION_LONG"
+            signal = f"🎯 CASE 4: Banks SWEPT HIGHS ${max_high:.0f}, price STILL ABOVE ${last_close:.0f} - NO REJECT, REAL WAY UP"
+            if void: signal += f" | {void}"
     if is_hunt and len(closes) >= 3:
         if hunt_side == "LONG" and lows[-1] > highs[-3]: score += 0.8; signal += " + VOID FVG LONG"
         if hunt_side == "SHORT" and highs[-1] < lows[-3]: score -= 0.8; signal += " + VOID FVG SHORT"
     if not is_hunt:
         recent_high = max(highs[-20:-5]); recent_low = min(lows[-20:-5])
         if last_low < recent_low and last_close > recent_low:
-            score += 2.0; is_hunt = True; hunt_side = "LONG"; signal = f"SWEEP LONG: Broke ${recent_low:.0f} -> Reclaimed ${last_close:.0f}"
+            score += 2.0; is_hunt = True; hunt_side = "LONG"; sweep_type = "REVERSAL_LONG"; signal = f"SWEEP LONG: Banks swept ${recent_low:.0f} -> Reclaimed ${last_close:.0f} - FOLLOW UP"
+        elif last_low < recent_low and last_close < recent_low:
+            score -= 2.0; is_hunt = True; hunt_side = "SHORT"; sweep_type = "CONTINUATION_SHORT"; signal = f"SWEEP DOWN CONTINUE: Banks swept ${recent_low:.0f} -> Still below ${last_close:.0f} - FOLLOW DOWN"
         if last_high > recent_high and last_close < recent_high:
-            score -= 2.0; is_hunt = True; hunt_side = "SHORT"; signal = f"SWEEP SHORT: Broke ${recent_high:.0f} -> Rejected ${last_close:.0f}"
-    return score, signal, is_hunt, hunt_side
+            score -= 2.0; is_hunt = True; hunt_side = "SHORT"; sweep_type = "REVERSAL_SHORT"; signal = f"SWEEP SHORT: Banks swept ${recent_high:.0f} -> Rejected ${last_close:.0f} - FOLLOW DOWN"
+        elif last_high > recent_high and last_close > recent_high:
+            score += 2.0; is_hunt = True; hunt_side = "LONG"; sweep_type = "CONTINUATION_LONG"; signal = f"SWEEP UP CONTINUE: Banks swept ${recent_high:.0f} -> Still above ${last_close:.0f} - FOLLOW UP"
+    return score, signal, is_hunt, hunt_side, void, sweep_type
+
+def confluence_engine(macro, smart, fear, live_news, liq_map, hunt_side, sweep_type, trend_dir, r, closes):
+    # --- V5.12.11: WORLDWIDE VOTES DECIDE DESTINATION AFTER SWEEP ---
+    # Sweep na ALARM, no be decision. Every other check na vote.
+    # Need 5/7 votes same way + certainty 70%+ else NO TRADE.
+    votes = {}
+    # 1. SWEEP / BANKS
+    if hunt_side == "LONG": votes["SWEEP"] = "LONG"
+    elif hunt_side == "SHORT": votes["SWEEP"] = "SHORT"
+    else: votes["SWEEP"] = "NEUTRAL"
+    # 2. DXY - MOST IMPORTANT CERTAINTY: DXY up = BTC down, DXY down = BTC up (inverse)
+    if macro['DXY'] < -0.05: votes["DXY"] = "LONG"  # Dollar weak -> BTC up
+    elif macro['DXY'] > 0.05: votes["DXY"] = "SHORT"  # Dollar strong -> BTC down
+    else: votes["DXY"] = "NEUTRAL"
+    # 3. NQ + SPX - US stock destination
+    nq_spx = (macro['NQ_FUT'] + macro['SPX_FUT'] + macro['NQ_CASH'] + macro['SPX']) / 4
+    if nq_spx > 0.1: votes["NQ_SPX"] = "LONG"
+    elif nq_spx < -0.1: votes["NQ_SPX"] = "SHORT"
+    else: votes["NQ_SPX"] = "NEUTRAL"
+    # 4. FED - biggest bank
+    if live_news.get("fed") == "DOVISH": votes["FED"] = "LONG"
+    elif live_news.get("fed") == "HAWKISH": votes["FED"] = "SHORT"
+    else: votes["FED"] = "NEUTRAL"
+    # 5. WORLD NEWS - war, hack, ETF, peace
+    if live_news.get("direction") == "BULLISH": votes["NEWS"] = "LONG"
+    elif live_news.get("direction") == "BEARISH": votes["NEWS"] = "SHORT"
+    else: votes["NEWS"] = "NEUTRAL"
+    # 6. FUNDING + OI + LIQ MAP - smart money
+    fund_vote = "NEUTRAL"
+    if smart['funding'] < -0.02: fund_vote = "LONG"
+    elif smart['funding'] > 0.02: fund_vote = "SHORT"
+    if liq_map.get("bias") == "LONG_HUNT_CONFIRMED": fund_vote = "LONG"
+    if liq_map.get("bias") == "SHORT_HUNT_CONFIRMED": fund_vote = "SHORT"
+    votes["SMART_MONEY"] = fund_vote
+    # 7. TREND + MOMENTUM + FEAR - BTC itself
+    trend_vote = "NEUTRAL"
+    if trend_dir == 1 and r > 50: trend_vote = "LONG"
+    elif trend_dir == -1 and r < 50: trend_vote = "SHORT"
+    if fear < 25: trend_vote = "LONG" if trend_vote != "SHORT" else trend_vote
+    if fear > 75: trend_vote = "SHORT" if trend_vote != "LONG" else trend_vote
+    votes["TREND_MOMENTUM"] = trend_vote
+    long_votes = sum(1 for v in votes.values() if v == "LONG")
+    short_votes = sum(1 for v in votes.values() if v == "SHORT")
+    total_votes = sum(1 for v in votes.values() if v != "NEUTRAL")
+    if long_votes > short_votes:
+        destination = "LONG"; certainty = long_votes / 7 * 100; agree = long_votes
+    elif short_votes > long_votes:
+        destination = "SHORT"; certainty = short_votes / 7 * 100; agree = short_votes
+    else:
+        destination = "NEUTRAL"; certainty = 0; agree = 0
+    # Sweep must agree with destination, else sweep na trap - no follow blindly
+    sweep_agrees = (hunt_side == destination) if hunt_side else False
+    # CONFLUENCE PASS: at least 5 votes same way + certainty 70%+ + sweep agrees (if sweep exist)
+    # If no sweep, need 5 votes too - no trade on sweep alone
+    confluence_pass = (agree >= 5 and certainty >= 70 and (sweep_agrees or not hunt_side))
+    return {"votes": votes, "long_votes": long_votes, "short_votes": short_votes, "destination": destination, "certainty": certainty, "agree": agree, "sweep_agrees": sweep_agrees, "confluence_pass": confluence_pass, "nq_spx": nq_spx}
 
 def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map, news_mode):
     atr_pct = (atr / btc) * 100
@@ -313,10 +398,10 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     vol_conf = 1.0 if vol_ratio>1.2 else 0.5 if vol_ratio>0.8 else 0.0
     total=wins+losses
     win_rate = (wins/total) if total>=3 else 0.55
-    if consecutive_losses >= 3: ai_strictness=1.2; ai_risk_mult=0.7; mindset="HUMAN: 3 losses, careful but still trade A"
-    elif consecutive_losses == 2: ai_strictness=1.1; ai_risk_mult=0.85; mindset="HUMAN: 2 losses, careful, no revenge"
-    elif consecutive_wins >= 3: ai_strictness=0.9; ai_risk_mult=1.2; mindset="HUMAN: Hot streak, ride momentum"
-    else: ai_strictness=1.0; ai_risk_mult=1.0; mindset="HUMAN: Balanced, patient"
+    if consecutive_losses >= 3: ai_strictness=1.2; ai_risk_mult=0.7; mindset="HUMANOID: 3 losses, careful but still trade A+ - winning mindset"
+    elif consecutive_losses == 2: ai_strictness=1.1; ai_risk_mult=0.85; mindset="HUMANOID: 2 losses, careful, no revenge, wait confluence"
+    elif consecutive_wins >= 3: ai_strictness=0.9; ai_risk_mult=1.2; mindset="HUMANOID: Hot streak, ride momentum, follow confluence"
+    else: ai_strictness=1.0; ai_risk_mult=1.0; mindset="HUMANOID: Balanced, patient, roaming worldwide, confluence first"
     base_risk_pct = 0.01 + (win_rate*0.02)
     risk_pct = base_risk_pct * ai_risk_mult * session_mult
     risk_pct = max(0.005, min(risk_pct, 0.025))
@@ -324,23 +409,37 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     lev = max(5, min(20, int(1.5 / max(atr_pct,0.05) * 0.5)))
     if paper_balance < 20: lev = min(lev, 15)
     qty_raw = risk_usd / max(atr, 20)
-    qty = max(qty_raw, 0.005); qty = max(qty, BYBIT_MIN_QTY); qty = min(qty, 0.01)
-    qty = round(qty / BYBIT_QTY_STEP) * BYBIT_QTY_STEP; qty = round(qty, 3)
+    qty = max(qty_raw, BYBIT_MIN_QTY)
+    qty = round(qty / BYBIT_QTY_STEP) * BYBIT_QTY_STEP
+    qty = round(qty, 3)
+    max_qty_real = (paper_balance * 0.80 * lev) / btc
+    max_qty_real = max(max_qty_real, BYBIT_MIN_QTY)
+    if qty > max_qty_real:
+        qty = round(max_qty_real / BYBIT_QTY_STEP) * BYBIT_QTY_STEP
+        qty = round(qty, 3)
+        if qty < BYBIT_MIN_QTY: qty = BYBIT_MIN_QTY
     pos_usd = qty * btc
+    margin_needed = pos_usd / max(lev, 1)
     bybit_ok = pos_usd >= BYBIT_MIN_ORDER_USD or paper_balance < 20
-    trade_fee = pos_usd * BYBIT_TAKER_FEE; fund_fee = pos_usd * 0.0001; lev_fee = pos_usd * 0.0001; buffer = 0.005 * vol_mult
-    total_fees = trade_fee + fund_fee + lev_fee + buffer
-    # V5.12.4 BACK TO WINNING BE - ORIGINAL FORMULA THAT GAVE 3 WINS
-    # $10 bal -> BE profit ~$0.05, BE dist ~$35 (easy to hit, not $90)
-    # NO 0.15, NO 1.5% - that was the killer
-    be_profit = max(paper_balance*0.005 * vol_mult, total_fees*0.3, 0.03)
-    be_profit = min(be_profit, 0.06)  # CAP: never bigger than $0.06, so BE stays easy
-    be_dist = (total_fees + be_profit) / qty
-    early_lock_dist = be_dist * 0.5
+    entry_fee = pos_usd * BYBIT_TAKER_FEE
+    exit_fee = pos_usd * BYBIT_TAKER_FEE
+    real_funding = abs(smart.get('funding', 0.01)) / 100.0
+    real_funding = max(real_funding, 0.0001)
+    fund_fee = pos_usd * real_funding * 3
+    lev_fee = pos_usd * 0.0001
+    slippage = pos_usd * 0.0002
+    buffer = 0.01 * vol_mult
+    total_fees = entry_fee + exit_fee + fund_fee + lev_fee + slippage + buffer
     tp_mult = 1.8 + (trend_strength*0.5); tp_mult = tp_mult * vol_mult
     sl_mult = 0.8 + (0.2 * vol_mult)
-    tp_dist_raw = atr * tp_mult; sl_dist = atr * sl_mult
-    sl_dist = max(sl_dist, be_dist * 1.5)  # KEEP FIX: SL > BE
+    tp_dist_raw = atr * tp_mult
+    sl_dist_raw = atr * sl_mult
+    tp_profit_est = tp_dist_raw * qty - total_fees
+    be_profit = max(tp_profit_est * 0.30, 0.15, total_fees * 0.5)
+    be_profit = min(be_profit, max(0.30, paper_balance * 0.03))
+    be_dist = (total_fees + be_profit) / qty
+    early_lock_dist = be_dist * 0.5
+    sl_dist = max(sl_dist_raw, be_dist * 1.5)
     min_tp_for_be = be_dist * 2.5; min_tp_for_sl = sl_dist * 1.5
     tp_dist = max(tp_dist_raw, min_tp_for_be, min_tp_for_sl)
     if sl_dist >= tp_dist * 0.6:
@@ -371,10 +470,10 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     elif macro['DXY']>0: score -= 0.8
     if macro['GOLD']>0.5: score += 0.3
     if macro['OIL']>6: score = 0
-    liq_score, liq_signal, is_hunt, hunt_side = liquidity_hunt_analysis(closes, highs, lows, vols, atr)
+    liq_score, liq_signal, is_hunt, hunt_side, void, sweep_type = liquidity_hunt_analysis(closes, highs, lows, vols, atr)
     score += liq_score; score += liq_map.get("score", 0.0)
-    if liq_map.get("bias") == "LONG_HUNT_CONFIRMED" and is_hunt and hunt_side == "LONG": score += 1.0; liq_signal += " + ✅ REAL LIQ MAP CONFIRMED"
-    if liq_map.get("bias") == "SHORT_HUNT_CONFIRMED" and is_hunt and hunt_side == "SHORT": score -= 1.0; liq_signal += " + ✅ REAL LIQ MAP CONFIRMED"
+    if liq_map.get("bias") == "LONG_HUNT_CONFIRMED" and is_hunt and hunt_side == "LONG": score += 1.0; liq_signal += " + ✅ LIQ MAP CONFIRMED"
+    if liq_map.get("bias") == "SHORT_HUNT_CONFIRMED" and is_hunt and hunt_side == "SHORT": score -= 1.0; liq_signal += " + ✅ LIQ MAP CONFIRMED"
     if smart['funding'] > 0.05: score -= 1.0
     elif smart['funding'] < -0.05: score += 1.0
     if smart['oi_change'] > 2 and smart['long_short'] > 1.5: score -= 0.8
@@ -382,35 +481,71 @@ def human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_la
     elif fear > 80: score -= 1.0
     score += live_news.get("score", 0.0)
     news_boost = False
+    if live_news.get("fed") == "HAWKISH" and is_hunt and hunt_side == "SHORT": score -= 1.5; news_boost = True; liq_signal += " + 🏦 FED HAWKISH + SWEEP SHORT = DESTINATION DOWN"
+    if live_news.get("fed") == "DOVISH" and is_hunt and hunt_side == "LONG": score += 1.5; news_boost = True; liq_signal += " + 🏦 FED DOVISH + SWEEP LONG = DESTINATION UP"
+    if news_mode == "SHORT" and is_hunt and hunt_side == "LONG": score += 1.5; liq_signal += " + 📰 NEWS TRAP - Bear news but banks go UP = FOLLOW BANKS LONG"
+    if news_mode == "LONG" and is_hunt and hunt_side == "SHORT": score -= 1.5; liq_signal += " + 📰 NEWS TRAP - Bull news but banks go DOWN = FOLLOW BANKS SHORT"
     if news_mode == "LONG" and liq_map.get("bias") in ["LONG_HUNT_CONFIRMED", "HEAVY_LONG_LIQ"]: score += 1.0; news_boost = True; liq_signal += " + 📰 NEWS+HUNT LONG"
     if news_mode == "SHORT" and liq_map.get("bias") in ["SHORT_HUNT_CONFIRMED", "HEAVY_SHORT_LIQ"]: score -= 1.0; news_boost = True; liq_signal += " + 📰 NEWS+HUNT SHORT"
-    if news_mode == "SHORT" and is_hunt and hunt_side == "LONG": score += 1.5; liq_signal += " + 📰 NEWS TRAP - Bear news but reclaim = LONG"
-    if news_mode == "LONG" and is_hunt and hunt_side == "SHORT": score -= 1.5; liq_signal += " + 📰 NEWS TRAP - Bull news but reject = SHORT"
+    if sweep_type in ["CONTINUATION_LONG", "CONTINUATION_SHORT"]:
+        score = score * 1.1 if score != 0 else score
+        liq_signal += " + 🚀 CONTINUATION - Banks still pushing, no fade"
+    # --- CONFLUENCE DECIDES DESTINATION AFTER SWEEP ---
+    conf = confluence_engine(macro, smart, fear, live_news, liq_map, hunt_side, sweep_type, trend_dir, r, closes)
+    # If confluence says different from sweep, follow confluence, not sweep
+    # Example: Sweep LONG but DXY up + FED hawkish + NQ down + News bearish + Smart short = Destination SHORT, no LONG
+    if conf['destination'] != "NEUTRAL" and hunt_side and conf['destination'] != hunt_side and conf['agree'] >= 5:
+        liq_signal += f" + ⚠️ SWEEP {hunt_side} BUT WORLDWIDE VOTES SAY {conf['destination']} ({conf['agree']}/7) - FOLLOW WORLDWIDE, NOT SWEEP ALONE"
+        # Override: destination wins
+        hunt_side_effective = conf['destination']
+    else:
+        hunt_side_effective = hunt_side
     effective_session_mult = 1.0 if (is_hunt or news_boost) else session_mult
     score = score * effective_session_mult
+    # Boost score if confluence strong
+    if conf['confluence_pass']:
+        score = score + (2.0 if conf['destination'] == "LONG" else -2.0) if score != 0 else (2.0 if conf['destination'] == "LONG" else -2.0)
     threshold = 1.5 * ai_strictness
     if is_hunt or news_boost: threshold = 1.0 * ai_strictness
     threshold = min(threshold, 1.8)
+    destination_block = False; destination_reason = ""
+    # BLOCK if confluence no pass - sweep alone no go enter
+    if not conf['confluence_pass'] and conf['destination'] != "NEUTRAL":
+        destination_block = True; destination_reason = f"CONFLUENCE NO PASS: Only {conf['agree']}/7 votes for {conf['destination']} Certainty {conf['certainty']:.0f}% - Need 5/7 + 70% - Sweep alone no enter"
+    if conf['destination'] == "NEUTRAL":
+        destination_block = True; destination_reason = f"CONFLUENCE NEUTRAL: Votes Long {conf['long_votes']} Short {conf['short_votes']} - No certainty, wait"
+    if live_news.get("fed") == "HAWKISH" and score > 0 and not (is_hunt and hunt_side == "LONG"):
+        if abs(score) < 3.0: destination_block = True; destination_reason = "FED HAWKISH DESTINATION DOWN - No LONG without confluence"
+    if live_news.get("fed") == "DOVISH" and score < 0 and not (is_hunt and hunt_side == "SHORT"):
+        if abs(score) < 3.0: destination_block = True; destination_reason = "FED DOVISH DESTINATION UP - No SHORT without confluence"
+    if trend_dir == -1 and not (is_hunt and hunt_side == "LONG") and score > 0 and abs(score) < 2.0:
+        destination_block = True; destination_reason = "TREND DOWN - No buy dip vs banks, wait sweep + confluence"
+    if trend_dir == 1 and not (is_hunt and hunt_side == "SHORT") and score < 0 and abs(score) < 2.0:
+        destination_block = True; destination_reason = "TREND UP - No sell dip vs banks, wait sweep + confluence"
     win_prob = 0.50 + (abs(score)/5)*0.30 + (vol_conf*0.05)
     if is_hunt or news_boost: win_prob = min(win_prob + 0.10, 0.85)
+    # Certainty boosts win prob
+    if conf['confluence_pass']: win_prob = min(win_prob + 0.05, 0.85)
     win_prob = min(win_prob, 0.85)
     tp_profit = tp_dist*qty - total_fees; sl_loss = sl_dist*qty + total_fees
     ev = (win_prob * tp_profit) - ((1-win_prob) * sl_loss); rr = tp_dist / max(sl_dist,1)
     return {
         "regime":regime,"vol_mult":vol_mult,"trend_dir":trend_dir,"trend_strength":trend_strength,
         "vol_ratio":vol_ratio,"win_rate":win_rate,"ai_strictness":ai_strictness,"mindset":mindset,
-        "risk_pct":risk_pct,"risk_usd":risk_usd,"lev":lev,"qty":qty,"pos_usd":pos_usd,"bybit_ok":bybit_ok,
-        "total_fees":total_fees,"be_profit":be_profit,"be_dist":be_dist,"early_lock_dist":early_lock_dist,"tp_dist":tp_dist,"sl_dist":sl_dist,
+        "risk_pct":risk_pct,"risk_usd":risk_usd,"lev":lev,"qty":qty,"qty_raw":qty_raw,"pos_usd":pos_usd,"margin_needed":margin_needed,"max_qty_real":max_qty_real,"bybit_ok":bybit_ok,
+        "total_fees":total_fees,"entry_fee":entry_fee,"exit_fee":exit_fee,"fund_fee":fund_fee,"real_funding":real_funding,"be_profit":be_profit,"be_dist":be_dist,"early_lock_dist":early_lock_dist,"tp_dist":tp_dist,"sl_dist":sl_dist,
         "tp_mult":tp_mult,"sl_mult":sl_mult,"score":score,"threshold":threshold,
         "win_prob":win_prob,"ev":ev,"rr":rr,"tp_profit":tp_profit,"sl_loss":sl_loss,"r":r,
         "ema9":ema9,"ema21":ema21,"ema50":ema50,"smc_signal":liq_signal,"smc_score":liq_score,
         "tp_covers_be":tp_covers_be,"tp_covers_sl":tp_covers_sl,"tp_dist_raw":tp_dist_raw,
-        "is_hunt":is_hunt,"hunt_side":hunt_side,"liq_signal":liq_signal,"news_boost":news_boost
+        "is_hunt":is_hunt,"hunt_side":hunt_side,"hunt_side_effective":hunt_side_effective,"liq_signal":liq_signal,"news_boost":news_boost,
+        "void":void,"sweep_type":sweep_type,"destination_block":destination_block,"destination_reason":destination_reason,
+        "confluence":conf
     }
 
 def main_loop():
     global paper_balance, paper_pnl, wins, losses, be_hits, open_pos, waiting, history, consecutive_losses, consecutive_wins, last_trade_time, last_loss_time
-    log(f"V5.12.4 STARTED - BACK TO 3 WINS, BE 0.05, COOLDOWN 5MIN ONLY AFTER 2L")
+    log(f"V5.12.11 STARTED - CONFLUENCE CERTAINTY, SWEEP NA ALARM, WORLDWIDE VOTES DECIDE, REAL BYBIT FEES")
     while True:
         try:
             closes, highs, lows, vols = get_bybit_klines()
@@ -421,13 +556,18 @@ def main_loop():
             session, session_mult = get_session(); live_news = get_live_news(); liq_map = get_liquidation_map()
             news_block, news_msg, news_mode = get_news_risk(live_news)
             B=human_brain(btc, closes, highs, lows, vols, macro, atr, smart, fear, fear_label, session, session_mult, live_news, liq_map, news_mode)
+            conf = B['confluence']
             log(f"BRAIN: {B['regime']} ATR ${atr:.0f} RSI {B['r']:.1f} | {B['mindset']}")
-            log(f"LIQ HUNT: {B['liq_signal']} | Hunt={B['is_hunt']} Side={B['hunt_side']}")
-            log(f"DYNAMIC: FEES ${B['total_fees']:.4f} BE ${B['be_dist']:.0f} Profit ${B['be_profit']:.2f} (WINNING, NOT 0.15) | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} SL/BE x{B['sl_dist']/max(B['be_dist'],1):.1f} | Lev {B['lev']}x Qty {B['qty']:.3f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
-            # V5.12.4 COOLDOWN: 5 MIN ONLY, ONLY AFTER 2 LOSSES IN A ROW - not after 1 loss
+            log(f"🌍 FED: {live_news.get('fed')} | News {live_news.get('direction')} | {live_news.get('headline','No big news')[:110]}")
+            log(f"🎯 SWEEP: {B['liq_signal']} | Type={B['sweep_type']} SweepSide={B['hunt_side']} Effective={B['hunt_side_effective']} Void={B['void']}")
+            log(f"🗳️ CONFLUENCE VOTES: {conf['votes']} | Long {conf['long_votes']} Short {conf['short_votes']} | DESTINATION {conf['destination']} Certainty {conf['certainty']:.0f}% Agree {conf['agree']}/7 SweepAgrees {conf['sweep_agrees']} Pass {conf['confluence_pass']}")
+            log(f"DYNAMIC QTY: Bal ${paper_balance:.2f} Qty {B['qty']:.3f} (Floor 0.001, Cap {B['max_qty_real']:.3f}) Pos ${B['pos_usd']:.0f} Margin ${B['margin_needed']:.2f} = {B['margin_needed']/max(paper_balance,1)*100:.0f}% | DXY {macro['DXY']:+.2f}% NQ {macro['NQ_FUT']:+.2f}% SPX {macro['SPX_FUT']:+.2f}% GOLD {macro['GOLD']:+.2f}%")
+            log(f"REAL BYBIT FEES: Entry ${B['entry_fee']:.4f} + Exit ${B['exit_fee']:.4f} + Fund x3 ${B['fund_fee']:.4f} = Total ${B['total_fees']:.4f} | BE ${B['be_dist']:.0f} Profit ${B['be_profit']:.2f} (30% TP) | TP ${B['tp_dist']:.0f} SL ${B['sl_dist']:.0f} SL/BE x{B['sl_dist']/max(B['be_dist'],1):.1f} | Score {B['score']:.2f} / Thr {B['threshold']:.2f} WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | Bal ${paper_balance:.2f} PnL ${paper_pnl:.2f} W {wins} L {losses} BE {be_hits}")
+            if B['destination_block']:
+                log(f"⛔ CONFLUENCE BLOCK: {B['destination_reason']} - Wait 30s")
+                time.sleep(30); continue
             if consecutive_losses >= 2 and last_loss_time and (time.time() - last_loss_time) < 300 and not open_pos and not waiting:
-                log(f"🧊 COOLDOWN 5MIN: {consecutive_losses} losses in a row, {(time.time()-last_loss_time)/60:.0f}min ago - calm small, then back")
-                time.sleep(60); continue
+                log(f"🧊 COOLDOWN 5MIN: {consecutive_losses} losses"); time.sleep(60); continue
             if open_pos:
                 side=open_pos['side']; entry=open_pos['entry']; tp=open_pos['tp']; sl=open_pos['sl']; be_price=open_pos['be_price']
                 early_price = entry + open_pos['early_lock_dist'] if side=='LONG' else entry - open_pos['early_lock_dist']
@@ -436,14 +576,14 @@ def main_loop():
                         open_pos['sl']=entry; open_pos['early_done']=True; log(f"🛡️ EARLY LOCK HIT! SL -> Entry ${entry:.0f}")
                 if not open_pos.get('be_done'):
                     if (side=='LONG' and btc>=be_price) or (side=='SHORT' and btc<=be_price):
-                        open_pos['sl']=be_price; open_pos['be_done']=True; be_hits+=1; log(f"🟢 BE HIT + PROFIT LOCKED! SL -> BE ${be_price:.0f} = Fees + ${open_pos['be_profit']:.2f}")
+                        open_pos['sl']=be_price; open_pos['be_done']=True; be_hits+=1; log(f"🟢 BE HIT + PROFIT LOCKED! SL -> BE ${be_price:.0f} = Real Fees + ${open_pos['be_profit']:.2f} profit secured")
                 if open_pos.get('be_done'):
                     if side=='LONG':
-                        nsl=btc-atr*0.35
-                        if nsl>open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL UP SL ${nsl:.0f}")
+                        nsl=btc-atr*0.80
+                        if nsl>open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL UP SL ${nsl:.0f} (loose, let am run)")
                     else:
-                        nsl=btc+atr*0.35
-                        if nsl<open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL DOWN SL ${nsl:.0f}")
+                        nsl=btc+atr*0.80
+                        if nsl<open_pos['sl']: open_pos['sl']=nsl; log(f"🔄 TRAIL DOWN SL ${nsl:.0f} (loose, let am run)")
                 pnl=0; closed=False; reason=""; total_fees=open_pos['total_fees']; qty=open_pos['qty']; be_profit=open_pos['be_profit']
                 if side=='LONG':
                     if btc>=tp: pnl=(tp-entry)*qty-total_fees; closed=True; reason="TP HIT 🎯"
@@ -476,23 +616,30 @@ def main_loop():
                 if hit:
                     be_price=trig+B['be_dist'] if side=='LONG' else trig-B['be_dist']
                     open_pos={'side':side,'entry':trig,'tp':tp,'sl':sl,'be_price':be_price,'be_done':False,'early_done':False,'early_lock_dist':B['early_lock_dist'],'start':time.time(),'total_fees':B['total_fees'],'qty':B['qty'],'be_profit':B['be_profit']}
-                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f}"); waiting=None
-                elif expired or opposite: log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - 10min"); waiting=None
-                else: log(f"👀 WAITING {side} Trig ${trig:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${sl:.0f}")
+                    log(f"🔥 TRIGGER HIT {side} Entry ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} - CONFLUENCE {conf['agree']}/7 Certainty {conf['certainty']:.0f}%"); waiting=None
+                elif expired or opposite: log(f"❌ WAITING CANCELLED {side} Trig ${trig:.0f} Now ${btc:.0f} - 10min, banks change mind"); waiting=None
+                else: log(f"👀 CONDITIONAL HIDDEN WAITING {side} Trig ${trig:.0f} Now ${btc:.0f} TP ${tp:.0f} SL ${sl:.0f} - waiting confluence")
                 time.sleep(30); continue
             if not B['tp_covers_be'] or not B['tp_covers_sl']: log(f"⛔ SKIP TP/BE/SL - 30s"); time.sleep(30); continue
             if abs(B['score']) < B['threshold']: log(f"=> NO CLEAR: Score {B['score']:.2f} < Thr {B['threshold']:.2f}... SCAN 30s"); time.sleep(30); continue
             if B['win_prob'] < 0.60 or B['ev'] <= 0 or B['rr'] < 1.4: log(f"⛔ SKIP WinProb/EV/RR - 30s"); time.sleep(30); continue
-            if macro['OIL'] > 6: log(f"⛔ SKIP Oil - 30s"); time.sleep(30); continue
+            if macro['OIL'] > 6: log(f"⛔ SKIP Oil spike - 30s"); time.sleep(30); continue
             if B['qty'] < BYBIT_MIN_QTY: log(f"⛔ SKIP Qty - 30s"); time.sleep(30); continue
-            if B['is_hunt'] and B['hunt_side']: side = B['hunt_side']
+            if B['margin_needed'] > paper_balance * 0.80: log(f"⛔ SKIP Margin ${B['margin_needed']:.2f} > 80% Bal - 30s"); time.sleep(30); continue
+            # DESTINATION = CONFLUENCE, NOT SWEEP ALONE
+            if conf['destination'] != "NEUTRAL" and conf['confluence_pass']:
+                side = conf['destination']
+            elif B['is_hunt'] and B['hunt_side_effective']:
+                side = B['hunt_side_effective']
             elif B['news_boost'] and news_mode in ["LONG", "SHORT"]: side = news_mode
+            elif live_news.get("fed") == "HAWKISH" and B['score'] < 0: side = "SHORT"
+            elif live_news.get("fed") == "DOVISH" and B['score'] > 0: side = "LONG"
             else: side='LONG' if B['score']>=0 else 'SHORT'
             trig_offset = atr * 0.2
             if side=='LONG': trig=btc+trig_offset; tp=trig+B['tp_dist']; sl=trig-B['sl_dist']; be_price=trig+B['be_dist']
             else: trig=btc-trig_offset; tp=trig-B['tp_dist']; sl=trig+B['sl_dist']; be_price=trig-B['be_dist']
             waiting={'side':side,'trig':trig,'tp':tp,'sl':sl,'be_price':be_price,'start':time.time()}
-            log(f"✅ HIDDEN {side} PLACED [10MIN] Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} | SL/BE x{B['sl_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | {B['liq_signal']}")
+            log(f"✅ CONDITIONAL HIDDEN {side} PLACED [10MIN] Trig ${trig:.0f} TP ${tp:.0f} SL ${sl:.0f} BE ${be_price:.0f} Qty {B['qty']:.3f} Margin ${B['margin_needed']:.2f} | SL/BE x{B['sl_dist']/max(B['be_dist'],1):.1f} ✅ | WinProb {B['win_prob']*100:.0f}% EV ${B['ev']:.4f} R:R {B['rr']:.1f} | CONFLUENCE {conf['agree']}/7 Certainty {conf['certainty']:.0f}% Fed {live_news.get('fed')} Sweep {B['sweep_type']} | {B['liq_signal']}")
             time.sleep(30)
         except Exception as e:
             log(f"❌ Error - I NO GO DIE: {e}"); traceback.print_exc(); time.sleep(10)
