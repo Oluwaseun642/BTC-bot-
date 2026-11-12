@@ -1,8 +1,9 @@
 # ============================================================
-# BTC BOT V8.1 - FULL - NO HARDCODED - FALLBACK CHAIN
-# 75% Certainty - Poll 5s - Live Yahoo -> Stooq -> Bybit Proxy
-# + RSI + 200MA + ETF Proxy + Liquidation Cluster + Nvidia Proxy
-# Balance $3.45
+# BTC BOT V9.0 - WORLDWIDE - NO HARDCODED - SEAMLESS FALLBACK
+# 75% Certainty - Poll 5s - Yahoo query1/query2 -> Stooq -> Cache
+# + RSI + 200MA + ETF + Liquidation + Nvidia + DXY + US10Y + OIL
+# + EURUSD + USDJPY + Asia (Nikkei/Hang Seng) + BTC Dominance + Fear
+# Balance $3.45 - No Neutral Kill, Last-Known Cache
 # ============================================================
 import os, time, requests, threading
 from datetime import datetime, timezone
@@ -13,14 +14,20 @@ STATE = {"balance": 3.45, "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0,
          "open_position": None, "last_price": 72800.0, "last_loss_time": None,
          "day": datetime.now(timezone.utc).date()}
 
+# Last-known cache - if live fails, use this, never NEUTRAL kill
+LAST_MACRO = {"DXY": 0.0, "NQ": 0.0, "SPX": 0.0, "GOLD": 0.0, "NVDA": 0.0,
+              "US10Y": 0.0, "OIL": 0.0, "EURUSD": 0.0, "USDJPY": 0.0,
+              "NIKKEI": 0.0, "HANGSENG": 0.0, "BTCDOM": 59.0}
+LAST_FETCH_OK = {}
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-type","text/plain"); self.end_headers()
         try:
             pos = STATE.get("open_position")
             s = f"{pos['side']} @ {pos['entry']} Mode {pos.get('mode')}" if pos else "FLAT"
-            self.wfile.write(f"OK V8.1 Alive Bal ${STATE['balance']:.2f} PnL ${STATE['pnl']:.2f} Pos {s}".encode())
-        except: self.wfile.write(b"OK V8.1 Alive")
+            self.wfile.write(f"OK V9.0 Alive Bal ${STATE['balance']:.2f} PnL ${STATE['pnl']:.2f} Pos {s} DXY {LAST_MACRO.get('DXY')}".encode())
+        except: self.wfile.write(b"OK V9.0 Alive")
     def log_message(self, *a, **k): return
 
 def start_health():
@@ -40,10 +47,10 @@ CONFIG = {
 def log(m): print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {m}", flush=True)
 def now(): return datetime.now(timezone.utc)
 
-# ============ LIVE FETCH WITH FALLBACK ============
+# ============ LIVE FETCH WITH SEAMLESS FALLBACK ============
 def get_price():
     try:
-        r = requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=5)
+        r = requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=15)
         p = float(r.json()["result"]["list"][0]["lastPrice"])
         STATE["last_price"] = p; return p
     except Exception as e:
@@ -51,27 +58,27 @@ def get_price():
 
 def get_klines(limit=50, interval="1"):
     try:
-        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5)
+        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=15)
         kl = list(reversed(r.json()["result"]["list"]))
         return [{"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4])} for x in kl]
     except: return []
 
 def get_klines_daily(limit=210):
     try:
-        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=D&limit={limit}", timeout=5)
+        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=D&limit={limit}", timeout=15)
         kl = list(reversed(r.json()["result"]["list"]))
         return [{"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4])} for x in kl]
     except: return []
 
 def get_funding():
     try:
-        r = requests.get("https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1", timeout=5)
+        r = requests.get("https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1", timeout=15)
         return float(r.json()["result"]["list"][0]["fundingRate"])*100
     except: return None
 
 def get_oi_change():
     try:
-        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5)
+        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=15)
         lst = r.json()["result"]["list"]
         if len(lst)>=2:
             a=float(lst[-1]["openInterest"]); b=float(lst[0]["openInterest"])
@@ -81,62 +88,85 @@ def get_oi_change():
 
 def get_fear():
     try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=15)
         return int(r.json()["data"][0]["value"])
     except: return None
 
-# --- Yahoo + Stooq Fallback Chain ---
+# --- WORLDWIDE: Yahoo query1/query2 -> Stooq -> Last Cache ---
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
+
 def get_yahoo(symbol):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=5m"
-        r = requests.get(url, timeout=5, headers={"User-Agent":"Mozilla/5.0"})
-        meta = r.json()["chart"]["result"][0]["meta"]
-        prev = meta.get("previousClose"); cur = meta.get("regularMarketPrice")
-        if prev and cur: return (cur-prev)/prev*100
-    except: pass
-    return None
+    # Try query1 then query2, 2 retries each, timeout 15
+    for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
+        for attempt in range(2):
+            try:
+                url = f"https://{host}/v8/finance/chart/{symbol}?range=1d&interval=5m"
+                r = requests.get(url, timeout=15, headers=HEADERS)
+                j = r.json()
+                res = j.get("chart", {}).get("result")
+                if not res: continue
+                meta = res[0].get("meta", {})
+                prev = meta.get("previousClose"); cur = meta.get("regularMarketPrice")
+                if prev and cur and prev != 0:
+                    return (cur-prev)/prev*100, cur
+            except Exception as e:
+                if attempt == 1: log(f"YAHOO {symbol} {host} FAIL {e}")
+                time.sleep(1)
+    return None, None
 
 def get_stooq(symbol):
-    # Stooq free, no key, format: date,time,open,high,low,close,volume
     try:
         url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
-        r = requests.get(url, timeout=5, headers={"User-Agent":"Mozilla/5.0"})
+        r = requests.get(url, timeout=15, headers=HEADERS)
         lines = r.text.strip().split("\n")
-        if len(lines)>=3:
-            # last 2 days
+        if len(lines) >= 3:
             def parse(l):
-                p=l.split(",")
-                return float(p[4]) # close
+                p = l.split(",")
+                return float(p[4])
             prev = parse(lines[-2]); cur = parse(lines[-1])
-            if prev: return (cur-prev)/prev*100
+            if prev: return (cur-prev)/prev*100, cur
     except Exception as e:
         log(f"STOOQ {symbol} ERR {e}")
-    return None
+    return None, None
 
-def get_macro_with_fallback(symbol_yahoo, symbol_stooq, name):
-    v = get_yahoo(symbol_yahoo)
-    if v is not None:
-        log(f"LIVE {name} Yahoo {v:.2f}%"); return v
-    v2 = get_stooq(symbol_stooq)
-    if v2 is not None:
-        log(f"LIVE {name} Stooq Fallback {v2:.2f}%"); return v2
-    log(f"LIVE {name} BOTH FAILED -> NEUTRAL, certainty go reduce")
-    return None
+def get_macro_with_fallback(symbol_yahoo, symbol_stooq, name, cache_key):
+    pct, price = get_yahoo(symbol_yahoo)
+    if pct is not None:
+        LAST_MACRO[cache_key] = pct
+        LAST_FETCH_OK[cache_key] = True
+        log(f"LIVE {name} Yahoo OK {pct:.2f}% price {price}")
+        return pct
+    pct2, price2 = get_stooq(symbol_stooq)
+    if pct2 is not None:
+        LAST_MACRO[cache_key] = pct2
+        log(f"LIVE {name} Stooq Fallback {pct2:.2f}%")
+        return pct2
+    # SEAMLESS: use last known, never NEUTRAL kill
+    cached = LAST_MACRO.get(cache_key, 0.0)
+    log(f"LIVE {name} BOTH FAILED -> USE LAST {cached:.2f}% (cached, no neutral kill)")
+    return cached
 
 def get_macro_live():
-    dxy = get_macro_with_fallback("%5EDXY", "dx-y.nq", "DXY")
-    nq = get_macro_with_fallback("%5EIXIC", "ndx", "NQ")
-    spx = get_macro_with_fallback("%5EGSPC", "spx", "SPX")
-    gold = get_macro_with_fallback("GC%3DF", "gc.f", "GOLD")
-    # Nvidia Proxy: NVDA live via Yahoo -> Stooq, if fail use NQ as proxy
-    nvda = get_macro_with_fallback("NVDA", "nvda.us", "NVDA")
-    if nvda is None and nq is not None:
+    dxy = get_macro_with_fallback("DX-Y.NYB", "dx-y.nq", "DXY", "DXY")
+    nq = get_macro_with_fallback("%5EIXIC", "ndx", "NQ", "NQ")
+    spx = get_macro_with_fallback("%5EGSPC", "spx", "SPX", "SPX")
+    gold = get_macro_with_fallback("GC%3DF", "gc.f", "GOLD", "GOLD")
+    nvda = get_macro_with_fallback("NVDA", "nvda.us", "NVDA", "NVDA")
+    us10y = get_macro_with_fallback("%5ETNX", "us10y", "US10Y", "US10Y")
+    oil = get_macro_with_fallback("CL%3DF", "cl.f", "OIL", "OIL")
+    eurusd = get_macro_with_fallback("EURUSD%3DX", "eurusd", "EURUSD", "EURUSD")
+    usdjpy = get_macro_with_fallback("USDJPY%3DX", "usdjpy", "USDJPY", "USDJPY")
+    nikkei = get_macro_with_fallback("%5EN225", "nikkei", "NIKKEI", "NIKKEI")
+    hangseng = get_macro_with_fallback("%5EHSI", "hangseng", "HANGSENG", "HANGSENG")
+    if nvda is None or nvda == 0:
+        # NVDA fallback = NQ proxy, but keep cached
         nvda = nq; log(f"NVDA fallback = NQ {nvda:.2f}%")
     fund = get_funding(); oi = get_oi_change(); fear = get_fear()
-    log(f"LIVE MACRO DXY {dxy} NQ {nq} SPX {spx} GOLD {gold} NVDA {nvda} FUND {fund} OI {oi} FEAR {fear}")
-    return {"DXY": dxy, "NQ": nq, "SPX": spx, "GOLD": gold, "NVDA": nvda, "OI": oi, "FUND": fund, "FEAR": fear}
+    dom = get_etf_proxy()
+    log(f"LIVE MACRO DXY {dxy:.2f} NQ {nq:.2f} SPX {spx:.2f} GOLD {gold:.2f} NVDA {nvda:.2f} US10Y {us10y:.2f} OIL {oil:.2f} EURUSD {eurusd:.2f} USDJPY {usdjpy:.2f} NIKKEI {nikkei:.2f} HSI {hangseng:.2f} FUND {fund} OI {oi} FEAR {fear} DOM {dom}")
+    return {"DXY": dxy, "NQ": nq, "SPX": spx, "GOLD": gold, "NVDA": nvda, "US10Y": us10y, "OIL": oil, "EURUSD": eurusd, "USDJPY": usdjpy, "NIKKEI": nikkei, "HANGSENG": hangseng, "OI": oi, "FUND": fund, "FEAR": fear, "DOM": dom}
 
-# --- RSI + 200MA + ETF Proxy + Liquidation Cluster (All Live from Klines) ---
+# --- RSI + 200MA + ETF Proxy + Liquidation Cluster ---
 def calc_rsi(kl, period=14):
     if len(kl) < period+1: return 50
     gains=0; losses=0
@@ -153,17 +183,17 @@ def calc_200ma(daily):
     return sum(c["c"] for c in daily[-200:])/200
 
 def get_etf_proxy():
-    # No free ETF API without key, so use Coingecko Global + BTC dominance + volume as proxy
-    # If BTC dominance up + volume down = ETF selling pressure
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=5)
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=15)
         d = r.json()["data"]
         dom = d["market_cap_percentage"]["btc"]
         vol = d["total_volume"]["usd"]
+        LAST_MACRO["BTCDOM"] = dom
         log(f"ETF PROXY BTC Dominance {dom:.2f}% Vol ${vol/1e9:.1f}B")
-        # Dominance falling + price falling = ETF outflows pressure
         return dom
-    except: return None
+    except Exception as e:
+        log(f"ETF PROXY FAIL {e} -> USE LAST {LAST_MACRO.get('BTCDOM')}")
+        return LAST_MACRO.get("BTCDOM")
 
 def get_news(kl):
     if len(kl)>=15 and kl[0]["c"]!=0:
@@ -184,49 +214,66 @@ def detect_wick(kl):
 
 def get_signals_live(macro, rsi, price, ma200, dom):
     s=[]
-    # 1 DXY
-    if macro["DXY"] is None: s.append(("DXY","NEUTRAL"))
-    elif macro["DXY"]>0.10: s.append(("DXY","SHORT"))
+    # 1 DXY - up = SHORT BTC, down = LONG BTC
+    if macro["DXY"]>0.10: s.append(("DXY","SHORT"))
     elif macro["DXY"]<-0.10: s.append(("DXY","LONG"))
     else: s.append(("DXY","NEUTRAL"))
-    # 2 NQ + 3 NVDA combined as Tech
-    if macro["NQ"] is None and macro["NVDA"] is None: s.append(("TECH","NEUTRAL"))
-    elif (macro["NQ"] or 0) < -0.20 or (macro["NVDA"] or 0) < -1.0: s.append(("TECH","SHORT"))
+    # 2 TECH NQ+NVDA
+    if (macro["NQ"] or 0) < -0.20 or (macro["NVDA"] or 0) < -1.0: s.append(("TECH","SHORT"))
     elif (macro["NQ"] or 0) > 0.20 and (macro["NVDA"] or 0) > 0.5: s.append(("TECH","LONG"))
     else: s.append(("TECH","NEUTRAL"))
-    # 4 SPX
-    if macro["SPX"] is None: s.append(("SPX","NEUTRAL"))
-    elif macro["SPX"]>0.20: s.append(("SPX","LONG"))
+    # 3 SPX
+    if macro["SPX"]>0.20: s.append(("SPX","LONG"))
     elif macro["SPX"]<-0.20: s.append(("SPX","SHORT"))
     else: s.append(("SPX","NEUTRAL"))
-    # 5 GOLD
-    if macro["GOLD"] is None: s.append(("GOLD","NEUTRAL"))
-    elif macro["GOLD"]>0.50: s.append(("GOLD","SHORT"))
+    # 4 GOLD - up = risk-off = SHORT BTC
+    if macro["GOLD"]>0.50: s.append(("GOLD","SHORT"))
     elif macro["GOLD"]<-0.30: s.append(("GOLD","LONG"))
     else: s.append(("GOLD","NEUTRAL"))
-    # 6 LIQ MAP
+    # 5 LIQ MAP - OI up + Funding positive = longs crowded = SHORT
     if macro["OI"] is None or macro["FUND"] is None: s.append(("LIQ_MAP","NEUTRAL"))
     elif macro["OI"]>0.5 and macro["FUND"]>0.01: s.append(("LIQ_MAP","SHORT"))
     elif macro["OI"]<-0.5 and macro["FUND"]<-0.01: s.append(("LIQ_MAP","LONG"))
     else: s.append(("LIQ_MAP","NEUTRAL"))
-    # 7 FEAR
+    # 6 FEAR
     if macro["FEAR"] is None: s.append(("FEAR","NEUTRAL"))
     elif macro["FEAR"]<25: s.append(("FEAR","LONG"))
     elif macro["FEAR"]>75: s.append(("FEAR","SHORT"))
     else: s.append(("FEAR","NEUTRAL"))
-    # 8 RSI - Live from klines
-    if rsi < 30: s.append(("RSI","LONG")) # Oversold bounce
+    # 7 RSI
+    if rsi < 30: s.append(("RSI","LONG"))
     elif rsi > 70: s.append(("RSI","SHORT"))
-    elif rsi < 40 and price < (ma200 or 999999): s.append(("RSI","SHORT")) # Weak + below MA
+    elif rsi < 40 and price < (ma200 or 999999): s.append(("RSI","SHORT"))
     else: s.append(("RSI","NEUTRAL"))
-    # 9 200MA - Live
+    # 8 200MA
     if ma200 is None: s.append(("MA200","NEUTRAL"))
     elif price < ma200: s.append(("MA200","SHORT"))
     else: s.append(("MA200","LONG"))
-    # 10 ETF Proxy - Dominance falling while price falling = outflows
+    # 9 ETF Proxy
     if dom is None: s.append(("ETF","NEUTRAL"))
     elif dom < 52: s.append(("ETF","SHORT"))
     else: s.append(("ETF","NEUTRAL"))
+    # 10 US10Y - yield up = SHORT BTC
+    if macro["US10Y"]>0.50: s.append(("US10Y","SHORT"))
+    elif macro["US10Y"]<-0.50: s.append(("US10Y","LONG"))
+    else: s.append(("US10Y","NEUTRAL"))
+    # 11 OIL - oil spike = inflation = SHORT risk
+    if macro["OIL"]>1.0: s.append(("OIL","SHORT"))
+    elif macro["OIL"]<-1.0: s.append(("OIL","LONG"))
+    else: s.append(("OIL","NEUTRAL"))
+    # 12 USDJPY - up = dollar strong = SHORT BTC
+    if macro["USDJPY"]>0.30: s.append(("USDJPY","SHORT"))
+    elif macro["USDJPY"]<-0.30: s.append(("USDJPY","LONG"))
+    else: s.append(("USDJPY","NEUTRAL"))
+    # 13 ASIA - Nikkei + Hang Seng both down = Asia risk-off = SHORT
+    asia_avg = ((macro["NIKKEI"] or 0) + (macro["HANGSENG"] or 0))/2
+    if asia_avg < -0.50: s.append(("ASIA","SHORT"))
+    elif asia_avg > 0.50: s.append(("ASIA","LONG"))
+    else: s.append(("ASIA","NEUTRAL"))
+    # 14 EURUSD - EUR up = DXY down = LONG BTC
+    if macro["EURUSD"]>0.20: s.append(("EURUSD","LONG"))
+    elif macro["EURUSD"]<-0.20: s.append(("EURUSD","SHORT"))
+    else: s.append(("EURUSD","NEUTRAL"))
     return s
 
 def decide(signals):
@@ -281,11 +328,11 @@ def manage(price, kl):
 
 def main():
     threading.Thread(target=start_health, daemon=True).start()
-    log("BOT V8.1 FULL STARTED - Fallback Yahoo->Stooq - 75% - RSI+MA200+ETF+NVDA")
+    log("BOT V9.0 WORLDWIDE STARTED - Yahoo query1/query2 -> Stooq -> Cache - 75% - 14 Signals")
     while True:
         try:
             price=get_price(); kl=get_klines(50); daily=get_klines_daily(210)
-            macro=get_macro_live(); rsi=calc_rsi(kl); ma200=calc_200ma(daily); dom=get_etf_proxy()
+            macro=get_macro_live(); rsi=calc_rsi(kl); ma200=calc_200ma(daily); dom=macro.get("DOM")
             is_news, news_score, news_reason=get_news(kl)
             signals=get_signals_live(macro, rsi, price, ma200, dom)
             dest, agree, decided, longs, shorts, cert=decide(signals)
