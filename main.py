@@ -30,6 +30,24 @@ try:
 except Exception as e:
     print(f"Flask keep-alive OFF {e}", flush=True)
 
+# ================= SELF-PING - BACK - KEEP RENDER AWAKE =================
+# Our old friend is back. Flask opens port, Self-Ping knocks it every 4 min from inside,
+# UptimeRobot knocks it every 5 min from outside. Both together = no sleep on free tier.
+# Set RENDER_URL in Render Env to your real URL, e.g. https://your-bot-name.onrender.com/
+# If RENDER_URL no dey, it will use the fallback below - CHANGE IT to your real URL.
+def _self_ping_loop():
+    SELF_URL = os.getenv("RENDER_URL", "https://YOUR-BOT-NAME.onrender.com/")
+    while True:
+        try:
+            time.sleep(240)  # 4 min
+            requests.get(SELF_URL, timeout=10)
+            print("SELF-PING OK", flush=True)
+        except Exception as e:
+            print(f"SELF-PING FAIL {e}", flush=True)
+
+threading.Thread(target=_self_ping_loop, daemon=True).start()
+print("Self-Ping ON - every 4 min", flush=True)
+
 # ================= CONFIG - DYNAMIC, NO FIXED PRICE / BALANCE =================
 CONFIG = {
     "SYMBOL": "BTCUSDT",
