@@ -1,19 +1,43 @@
 # ============================================================
-# BTC SWEEP BOT - V12.3 REAL AUTO-SWITCH
-# Paper till Sun 8:30pm WAT (19:30 UTC) -> Auto REAL, Dynamic Balance, Fees+Slippage, BE+Trailing Real SL
+# BTC SWEEP BOT - V12.4 FULL - Option 2 Web Service + Flask Keep-Alive
+# Paper till Sun 8:30pm WAT (19:30 UTC 15 Nov) -> Auto REAL
+# Fees+Slippage + BE+Trailing Real SL + Dynamic Balance/Qty + NEVER STOP
 # ============================================================
 
-import time, requests, hmac, hashlib, os, json
+import time, requests, hmac, hashlib, os, json, threading
 from datetime import datetime, timezone
+
+# ================= FLASK KEEP-ALIVE - FOR RENDER WEB SERVICE ONLY =================
+# This no touch trading. E just open port so Render no go say "No open ports" and restart bot.
+# Bot still dey run for main thread, Flask dey run for background thread.
+try:
+    from flask import Flask
+    _flask_app = Flask(__name__)
+    @_flask_app.route("/")
+    def _health():
+        return "BOT ALIVE - PAPER till Sun 8:30pm WAT, then REAL", 200
+    @_flask_app.route("/health")
+    def _health2():
+        return "OK", 200
+    def _run_flask():
+        try:
+            port = int(os.getenv("PORT", 10000))
+            _flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
+        except Exception as e:
+            print(f"Flask error {e}", flush=True)
+    threading.Thread(target=_run_flask, daemon=True).start()
+    print("Flask keep-alive ON - port open for Render Web Service", flush=True)
+except Exception as e:
+    print(f"Flask keep-alive OFF {e}", flush=True)
 
 # ================= CONFIG - DYNAMIC, NO FIXED PRICE / BALANCE =================
 CONFIG = {
     "SYMBOL": "BTCUSDT",
     "LEVERAGE": 50,
-    "PAPER_QTY": 0.002,  # paper only
-    "REAL_RISK_MARGIN_PCT": 0.10,  # 10% of real balance per trade as margin
+    "PAPER_QTY": 0.002,
+    "REAL_RISK_MARGIN_PCT": 0.10,
     "REAL_MIN_QTY": 0.001,
-    "REAL_MAX_QTY": 0.010,  # cap, no over-leverage even if balance big
+    "REAL_MAX_QTY": 0.010,
 
     "MIN_CERTAINTY_NORMAL": 80.0,
     "MIN_AGREE_NORMAL": 5,
@@ -47,22 +71,19 @@ CONFIG = {
     "TRAIL_STEP_2": 0.012, "TRAIL_DIST_2": 0.006,
     "TRAIL_STEP_3": 0.020, "TRAIL_DIST_3": 0.008,
 
-    # --- BE OVER FEES + SLIPPAGE - DYNAMIC ---
     "BE_OVER_FEES": True,
-    "BE_TRIGGER_PCT": 0.0035,  # 0.35% must cover 0.24% cost + profit
-    "FEE_RATE": 0.0006,        # 0.06% Bybit taker per side
-    "SLIPPAGE_PCT": 0.0005,    # 0.05% slippage per side - market never fills exact
-    # BE_BUFFER = (FEE*2 + SLIPPAGE*2 + 0.0002 profit) = 0.0024 = 0.24% of entry, dynamic
-    "BE_BUFFER_PCT": 0.0024,
+    "BE_TRIGGER_PCT": 0.0035,
+    "FEE_RATE": 0.0006,
+    "SLIPPAGE_PCT": 0.0005,
+    "BE_BUFFER_PCT": 0.0024,  # 0.24% = fees 0.12% + slippage 0.10% + 0.02% profit
 
-    "MIN_TP_OVER_FEES": 3.0,   # TP must be >=3x (fees+slippage)
+    "MIN_TP_OVER_FEES": 3.0,
     "MIN_RR": 1.8,
     "MIN_WINPROB": 52.0,
     "POLL_SEC": 5,
     "HEARTBEAT_MIN": 10,
 
-    # --- AUTO SWITCH: Sun 8:30pm WAT = 19:30 UTC 15 Nov 2026 ---
-    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc),
+    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc),  # Sun 8:30pm WAT
     "BYBIT_BASE": "https://api.bybit.com",
 }
 
@@ -70,21 +91,18 @@ API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 STATE = {
-    "mode": "PAPER",  # auto switches to REAL at switch time
+    "mode": "PAPER",
     "balance": 4.75, "real_balance": 0.0,
     "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0,
     "trades_today": 0, "losses_today": 0,
     "last_loss_time": None, "last_trade_time": None,
     "day": datetime.now(timezone.utc).date(),
     "open_position": None, "last_price": 0.0,
-    "switched_logged": False,
 }
 
 def now_utc(): return datetime.now(timezone.utc)
 def log(msg): print(f"[{now_utc().strftime('%H:%M:%S %d %b')}] {msg}", flush=True)
-
 def get_mode():
-    # Dynamic mode - no manual redeploy needed for Sunday 8:30pm WAT
     if now_utc() >= CONFIG["AUTO_SWITCH_UTC"]:
         return "REAL"
     return "PAPER"
@@ -123,7 +141,6 @@ def get_real_balance():
 def get_dynamic_qty(price, mode):
     if mode == "PAPER":
         return CONFIG["PAPER_QTY"]
-    # REAL: 10% of whatever balance bot meets, x leverage / live price - dynamic, no fixed qty
     bal = get_real_balance()
     if bal <= 0:
         return CONFIG["REAL_MIN_QTY"]
@@ -139,9 +156,7 @@ def place_real_order(side, price, sl, tp, qty):
         log("REAL ORDER BLOCKED: No API keys in env - add BYBIT_API_KEY / SECRET for Render")
         return False
     try:
-        # Set leverage first
         bybit_post("/v5/position/set-leverage", {"category": "linear", "symbol": CONFIG["SYMBOL"], "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
-        # Market order + real TP/SL attached - so Bybit protects even if bot sleeps
         res = bybit_post("/v5/order/create", {
             "category": "linear", "symbol": CONFIG["SYMBOL"],
             "side": "Buy" if side == "LONG" else "Sell",
@@ -159,7 +174,7 @@ def place_real_order(side, price, sl, tp, qty):
 # ================= 2. UPDATE REAL SL - BE / TRAILING =================
 def update_real_sl(new_sl, side):
     if STATE["mode"] != "REAL":
-        return True  # paper: just memory, no API call
+        return True
     if not API_KEY:
         return False
     try:
@@ -267,8 +282,8 @@ def calc_sl_tp(price, side, klines, is_sure):
 
 def calc_fees_ev(price, sl_dist, tp_dist, winprob, qty):
     pos = qty * price; margin = pos / CONFIG["LEVERAGE"]
-    fees = pos * CONFIG["FEE_RATE"] * 2  # entry + exit
-    slippage_cost = pos * CONFIG["SLIPPAGE_PCT"] * 2  # entry + exit slippage
+    fees = pos * CONFIG["FEE_RATE"] * 2
+    slippage_cost = pos * CONFIG["SLIPPAGE_PCT"] * 2
     total_cost = fees + slippage_cost
     tp_profit = (qty * tp_dist) - total_cost
     sl_loss = (qty * sl_dist) + total_cost
@@ -292,23 +307,23 @@ def get_dynamic_thresholds(is_news, just_lost):
     if is_news: return CONFIG["MIN_CERTAINTY_NEWS"], CONFIG["MIN_AGREE_NEWS"], CONFIG["MIN_SCORE_NEWS"]
     return CONFIG["MIN_CERTAINTY_NORMAL"], CONFIG["MIN_AGREE_NORMAL"], CONFIG["MIN_SCORE_NORMAL"]
 
-# ================= MANAGE - BE + TRAILING FIRST, REAL + PAPER =================
+# ================= MANAGE - BE + TRAILING FIRST =================
 def manage_position(price, klines, qty):
     if not STATE["open_position"]: return
     p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]
     profit_pct = (price - entry) / entry if side == "LONG" else (entry - price) / entry
 
-    # 1. BE OVER FEES + SLIPPAGE - FIRST, DYNAMIC
+    # 1. BE OVER FEES+SLIPPAGE - FIRST
     if CONFIG["BE_OVER_FEES"] and not p.get("be_done"):
         if profit_pct >= CONFIG["BE_TRIGGER_PCT"]:
-            be_buffer = entry * CONFIG["BE_BUFFER_PCT"]  # 0.24% = fees 0.12% + slippage 0.10% + 0.02% profit
+            be_buffer = entry * CONFIG["BE_BUFFER_PCT"]
             be_sl = entry + be_buffer if side == "LONG" else entry - be_buffer
             if (side == "LONG" and be_sl > p["sl"]) or (side == "SHORT" and be_sl < p["sl"]):
                 p["sl"] = be_sl; p["be_done"] = True
-                log(f"REAL BE OVER FEES+SLIPPAGE: SL -> ${be_sl:.0f} (Entry ${entry:.0f} +/- 0.24% = ${be_buffer:.2f} covers fees+slippage) - CANNOT lose again")
+                log(f"REAL BE OVER FEES+SLIPPAGE: SL -> ${be_sl:.0f} (Entry ${entry:.0f} +/- 0.24% = ${be_buffer:.2f} covers fees+slippage)")
                 update_real_sl(be_sl, side)
 
-    # 2. TRAILING - DYNAMIC % OF LIVE PRICE, BOTH SIDES
+    # 2. TRAILING - DYNAMIC
     if CONFIG["TRAILING_ENABLED"] and profit_pct >= CONFIG["TRAIL_START_PCT"]:
         if profit_pct >= CONFIG["TRAIL_STEP_3"]: td = CONFIG["TRAIL_DIST_3"]; label = "Trail 0.80% behind"
         elif profit_pct >= CONFIG["TRAIL_STEP_2"]: td = CONFIG["TRAIL_DIST_2"]; label = "Trail 0.60% behind"
@@ -321,7 +336,7 @@ def manage_position(price, klines, qty):
                 log(f"REAL TRAILING {side}: SL -> ${new_sl:.0f} | Price ${price:.0f} Profit {profit_pct*100:.2f}% - {label}")
                 update_real_sl(new_sl, side)
 
-    # 3. TP / SL CLOSE
+    # 3. TP / SL
     hit_tp = (price >= p["tp"] if side == "LONG" else price <= p["tp"])
     last_closed = klines[-2] if len(klines) >= 2 else None
     hit_sl = False
@@ -346,23 +361,19 @@ def manage_position(price, klines, qty):
 
 # ================= MAIN =================
 def main():
-    log("BOT V12.3 STARTED - Paper till Sun 8:30pm WAT -> Auto REAL - Fees+Slippage + Real SL + Dynamic Balance/Qty")
+    log("BOT V12.4 STARTED - Web Service + Flask Keep-Alive + Paper till Sun 8:30pm WAT -> Auto REAL")
     last_heartbeat = now_utc()
     while True:
         try:
-            # Auto-switch check every cycle
             new_mode = get_mode()
             if new_mode != STATE["mode"]:
                 STATE["mode"] = new_mode
                 if new_mode == "REAL":
                     bal = get_real_balance()
                     log(f"*** AUTO SWITCH TO REAL *** Sun 8:30pm WAT reached - Real Balance met: ${bal:.2f} USDT - Bot go trade real now, Asia opening, good boy mode ON ***")
-                    # Close any paper position before switching to avoid confusion
                     if STATE["open_position"]:
-                        log("Closing paper position before REAL switch - paper trade ends here")
+                        log("Closing paper position before REAL switch")
                         STATE["open_position"] = None
-                else:
-                    log(f"MODE PAPER - Switch to REAL at Sun 8:30pm WAT (19:30 UTC 15 Nov)")
             mode = STATE["mode"]
             price = get_price(); klines = get_klines(20); macro = get_macro()
             is_news, _, news_reason = get_news_score()
