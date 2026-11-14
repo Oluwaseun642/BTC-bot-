@@ -1,13 +1,14 @@
 # ============================================================
-# BTC SWEEP BOT - V13.7 FINAL - CURATED + CORRECTED + COMBINED
+# BTC SWEEP BOT - V13.8 FINAL - MAIN + SIDE HUSTLE + LIVE WORLDWIDE
 # MAIN: Certainties / News = Lifestyle | 80%+ Agree 5+ | MaxTrade 20 -> SURE 85-90-95% | MaxLoss 5 -> SURE 90-95% | Cooldown 5min
 # Balance -2% -> Calm 20min -> Back to Normal 80%
 # LONG + SHORT BOTH - Certainty Decide Side, No One-Side Bias
-# FLIP Boss + MentalSL FRONT + RealBackup BEHIND $75 GAP + BE Ladder + Trailing Early + Live All
-# ADD-ON TRADE: Hunt No Be Flip, Bal >= $10 REAL, Once Per Position, Same Side Same Qty, Chop Double On Return - ONLY WHEN MAIN TRADE DEY RUN
-# SIDE HUSTLE: Liq Map Hunt Trading - ONLY WHEN NO OPEN POSITION + MAIN FAIL + Cert 60-79% + Price Move + Hunt Confirm - Chop Quick 1.5x TP
-# CROSS MARGIN ON (Hidden Trading Switch) - Whole Balance Back Position + Add-on + Side Hustle
-# QTY: First REAL Trade 0.002 50x | After: +0.005 per +$8 Balance from $10 Upwards | $9-10 Raise = Still +0.005 Once
+# FLIP Boss + MentalSL FRONT + RealBackup BEHIND $75 GAP + BE Ladder + Trailing Early
+# ADD-ON: Hunt No Be Flip, Bal >= $10 REAL, Once Per Position, Same Side Same Qty - ONLY WHEN MAIN DEY RUN
+# SIDE HUSTLE: Liq Map Hunt - ONLY WHEN NO POSITION + MAIN FAIL + Cert 60-79% + Price Move + Hunt Confirm - TP 1.5x Quick
+# LIVE WORLDWIDE: NO HARDCODE, NO FAKE NEUTRAL - UNKNOWN != NEUTRAL - If 1 source fail, check elsewhere same cycle
+# CROSS MARGIN ON - Whole Balance Back Position + Add-on + Side Hustle
+# QTY: First REAL 0.002 50x | After: +0.005 per +$8 from $10 Upwards | $9-10 Raise = Still +0.005 Once
 # Balance Checked After EVERY Trade + Every Cycle | Qty Fit Go Up Or Down
 # Paper $4.75 till Sun 8:30pm WAT (19:30 UTC 15 Nov) -> Auto REAL, Ready for Asian
 # ============================================================
@@ -20,7 +21,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE - PAPER till Sun 8:30pm WAT, then REAL", 200
+    def _health(): return "BOT ALIVE V13.8 - PAPER till Sun 8:30pm WAT, then REAL", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -69,7 +70,6 @@ CONFIG = {
     "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc), "BYBIT_BASE": "https://api.bybit.com",
     "ASIAN_ENABLED": True, "ASIAN_START_HOUR_UTC": 0, "ASIAN_END_HOUR_UTC": 8, "ASIAN_SWEEP_BUFFER_PCT": 0.0015,
     "SESSION_HUNT_ENABLED": True, "SESSIONS": [("ASIA", 0, 0), ("LONDON", 7, 0), ("NEWYORK", 13, 30)], "SESSION_HUNT_WINDOW_MIN": 30,
-    # --- SIDE HUSTLE: Liq Map Hunt - NOT Lifestyle, Only When MAIN Fail + No Position ---
     "SIDE_HUSTLE_ENABLED": True, "SIDE_MIN_CERT": 60.0, "SIDE_MAX_CERT": 79.9, "SIDE_MIN_AGREE": 3,
     "SIDE_TP_MULT": 1.5, "SIDE_MIN_MOVE_PCT": 0.008, "SIDE_COOLDOWN_MIN": 10, "SIDE_MIN_RR": 1.2,
 }
@@ -156,52 +156,65 @@ def close_real_position(side, qty):
     try:
         res = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Sell" if side == "LONG" else "Buy", "orderType": "Market", "qty": str(qty), "timeInForce": "GTC"}); log(f"REAL POSITION CLOSED VIA FLIP {side} Qty {qty} Bybit: {res}"); return True
     except Exception as e: log(f"REAL CLOSE ERROR {e}"); return False
-def get_price():
-    try:
-        r = requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=5); price = float(r.json()["result"]["list"][0]["lastPrice"]); STATE["last_price"] = price; return price
-    except: return STATE["last_price"] or 68000.0
-def get_klines(limit=200):
-    try:
-        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=15&limit={limit}", timeout=5); kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl]
-    except: return []
-def get_klines_1m(limit=20):
-    try:
-        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit={limit}", timeout=5); kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4])} for x in kl]
-    except: return []
-def fetch_yahoo_chg(symbol):
-    for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
+
+# ========== V13.8 LIVE WORLDWIDE - NO HARDCODE, NO FAKE NEUTRAL ==========
+def fetch_live_multi(symbols_yahoo, symbols_stooq):
+    for sym in symbols_yahoo:
+        for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}; r = requests.get(f"{base}/v8/finance/chart/{sym}?range=1d&interval=1m", headers=headers, timeout=5); meta = r.json()["chart"]["result"][0]["meta"]; price = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0); prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+                if price and prev and price != prev: return round((price - prev) / prev * 100, 3), f"Yahoo:{sym}"
+            except: continue
+    for s in symbols_stooq:
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}; r = requests.get(f"{base}/v8/finance/chart/{symbol}?range=1d&interval=1m", headers=headers, timeout=6); meta = r.json()["chart"]["result"][0]["meta"]; price = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0); prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
-            if price and prev: return round((price - prev) / prev * 100, 3)
-        except Exception as e: print(f"Yahoo {base} {symbol} fail {e}", flush=True); continue
-    return None
-def fetch_stooq_chg(s):
+            r = requests.get(f"https://stooq.com/q/d/l/?s={s}&i=d", timeout=5); lines = [l.strip().split(",") for l in r.text.strip().splitlines() if "," in l]; closes = []
+            for row in lines[1:]:
+                try: closes.append(float(row[4]))
+                except: pass
+            if len(closes) >= 2 and closes[-2]: return round((closes[-1]-closes[-2])/closes[-2]*100, 3), f"Stooq:{s}"
+        except: continue
+    return None, "FAIL"
+def get_price_live():
     try:
-        r = requests.get(f"https://stooq.com/q/d/l/?s={s}&i=d", timeout=6); lines = [l.strip().split(",") for l in r.text.strip().splitlines() if "," in l]; closes = []
-        for row in lines[1:]:
-            try: closes.append(float(row[4]))
-            except: pass
-        if len(closes) >= 2:
-            last, prev = closes[-1], closes[-2]
-            if prev: return round((last - prev) / prev * 100, 3)
-    except Exception as e: print(f"Stooq {s} fail {e}", flush=True)
-    return None
-def fetch_live_chg(y, s):
-    v = fetch_yahoo_chg(y)
-    if v is not None: return v, "Yahoo"
-    v = fetch_stooq_chg(s)
-    if v is not None: return v, "Stooq"
-    return None, "None"
-def get_macro():
+        r = requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=5); p = float(r.json()["result"]["list"][0]["lastPrice"]); STATE["last_price"] = p; return p, "Bybit"
+    except: pass
     try:
-        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5); oi_list = r.json()["result"]["list"]; oi_chg = (float(oi_list[-1]["openInterest"]) - float(oi_list[0]["openInterest"])) / float(oi_list[0]["openInterest"]) * 100
-    except: oi_chg = STATE["last_macro"].get("OI_CHG", 0)
-    dxy, src_dxy = fetch_live_chg("DX-Y.NYB", "dx.f"); nq, src_nq = fetch_live_chg("NQ=F", "nq.f"); spx, src_spx = fetch_live_chg("ES=F", "es.f"); gold, src_gold = fetch_live_chg("GC=F", "gc.f")
-    if dxy is None: dxy = STATE["last_macro"]["DXY_CHG"]; src_dxy = "LastLive"
-    if nq is None: nq = STATE["last_macro"]["NQ_CHG"]; src_nq = "LastLive"
-    if spx is None: spx = STATE["last_macro"]["SPX_CHG"]; src_spx = "LastLive"
-    if gold is None: gold = STATE["last_macro"]["GOLD_CHG"]; src_gold = "LastLive"
-    macro = {"DXY_CHG": dxy, "NQ_CHG": nq, "SPX_CHG": spx, "GOLD_CHG": gold, "OI_CHG": oi_chg}; STATE["last_macro"] = macro; print(f"LIVE SRC DXY:{src_dxy} NQ:{src_nq} SPX:{src_spx} GOLD:{src_gold}", flush=True); return macro
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5); p = float(r.json()["price"]); STATE["last_price"] = p; return p, "Binance"
+    except: pass
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=5); p = float(r.json()["bitcoin"]["usd"]); STATE["last_price"] = p; return p, "CoinGecko"
+    except: pass
+    if STATE["last_price"]: return STATE["last_price"], "LastPrice-Cached"
+    return 0.0, "NO-PRICE"
+def get_klines_live(interval, limit):
+    # Bybit -> Binance fallback, same format
+    try:
+        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5); kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl], "Bybit"
+    except: pass
+    try:
+        b_interval = "1m" if interval == "1" else "15m"; r = requests.get(f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={b_interval}&limit={limit}", timeout=5); kl = r.json(); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl], "Binance"
+    except: pass
+    return [], "FAIL"
+def get_klines(limit=200):
+    kl, _ = get_klines_live("15", limit); return kl
+def get_klines_1m(limit=20):
+    kl, _ = get_klines_live("1", limit); return kl
+def get_macro_live():
+    dxy, src_dxy = fetch_live_multi(["DX-Y.NYB", "DX=F", "UUP"], ["dx.f"])
+    nq, src_nq = fetch_live_multi(["NQ=F", "^NDX", "QQQ"], ["nq.f"])
+    spx, src_spx = fetch_live_multi(["ES=F", "^SPX", "SPY"], ["es.f"])
+    gold, src_gold = fetch_live_multi(["GC=F", "GLD"], ["gc.f"])
+    oi_chg = None; oi_src = "FAIL"
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5); lst = r.json()["result"]["list"]; oi_chg = (float(lst[-1]["openInterest"]) - float(lst[0]["openInterest"])) / float(lst[0]["openInterest"]) * 100; oi_src = "Bybit"
+    except: oi_chg = None
+    macro = {}
+    for k, v, src in [("DXY_CHG", dxy, src_dxy), ("NQ_CHG", nq, src_nq), ("SPX_CHG", spx, src_spx), ("GOLD_CHG", gold, src_gold), ("OI_CHG", oi_chg, oi_src)]:
+        if v is None:
+            macro[k] = STATE["last_macro"].get(k, 0.0); macro[k+"_STATUS"] = "UNKNOWN"; macro[k+"_SRC"] = "UNKNOWN-Using-Last"
+        else:
+            macro[k] = v; macro[k+"_STATUS"] = "LIVE"; macro[k+"_SRC"] = src; STATE["last_macro"][k] = v
+    print(f"LIVE SRC DXY:{macro['DXY_CHG_SRC']} {macro['DXY_CHG_STATUS']} NQ:{macro['NQ_CHG_SRC']} {macro['NQ_CHG_STATUS']} SPX:{macro['SPX_CHG_SRC']} {macro['SPX_CHG_STATUS']} GOLD:{macro['GOLD_CHG_SRC']} {macro['GOLD_CHG_STATUS']} OI:{macro['OI_CHG_SRC']} {macro['OI_CHG_STATUS']}", flush=True); return macro
 def get_liquidation_map(price):
     long_liq = 0.0; short_liq = 0.0
     try:
@@ -234,6 +247,8 @@ def get_asian_hunt(price, klines_15m, klines_1m):
         elif last["high"] > asia_high and last["close"] < asia_high and short_liq > long_liq: hunt = "SHORT"
         elif last["low"] < asia_low - buf and last["close"] > asia_low: hunt = "LONG"
         elif last["high"] > asia_high + buf and last["close"] < asia_high: hunt = "SHORT"
+    else:
+        if not klines_1m: hunt = "UNKNOWN"
     STATE["last_liq_map"] = {"long_liq": long_liq, "short_liq": short_liq, "asia_low": asia_low, "asia_high": asia_high, "hunt": hunt}; return hunt, asia_low, asia_high, long_liq, short_liq
 def get_session_reopen_hunt(price, klines_1m, klines_15m):
     if not CONFIG["SESSION_HUNT_ENABLED"]: return "NEUTRAL", "NONE"
@@ -246,6 +261,7 @@ def get_session_reopen_hunt(price, klines_1m, klines_15m):
                 window = klines_1m[-5:]; s_low = min(x["low"] for x in window); s_high = max(x["high"] for x in window); last = klines_1m[-1]
                 if last["low"] < s_low and last["close"] > s_low: return "LONG", name
                 if last["high"] > s_high and last["close"] < s_high: return "SHORT", name
+            elif not klines_1m: return "UNKNOWN", name
             return "NEUTRAL", name
     return "NEUTRAL", "NONE"
 def get_news_score():
@@ -257,58 +273,61 @@ def get_news_score():
     return False, 0, ""
 def get_signals(price, macro, klines_1m, asian_hunt, session_hunt):
     signals = []
-    if macro["DXY_CHG"] > 0.10: signals.append(("DXY_LEVEL", "SHORT"))
+    if macro.get("DXY_CHG_STATUS") == "UNKNOWN": signals.append(("DXY_LEVEL", "UNKNOWN"))
+    elif macro["DXY_CHG"] > 0.10: signals.append(("DXY_LEVEL", "SHORT"))
     elif macro["DXY_CHG"] < -0.10: signals.append(("DXY_LEVEL", "LONG"))
     else: signals.append(("DXY_LEVEL", "NEUTRAL"))
-    if macro["NQ_CHG"] > 0.20: signals.append(("NQ_MOMENTUM", "LONG"))
+    if macro.get("NQ_CHG_STATUS") == "UNKNOWN": signals.append(("NQ_MOMENTUM", "UNKNOWN"))
+    elif macro["NQ_CHG"] > 0.20: signals.append(("NQ_MOMENTUM", "LONG"))
     elif macro["NQ_CHG"] < -0.20: signals.append(("NQ_MOMENTUM", "SHORT"))
     else: signals.append(("NQ_MOMENTUM", "NEUTRAL"))
-    if macro["SPX_CHG"] > 0.20: signals.append(("SPX_MOMENTUM", "LONG"))
+    if macro.get("SPX_CHG_STATUS") == "UNKNOWN": signals.append(("SPX_MOMENTUM", "UNKNOWN"))
+    elif macro["SPX_CHG"] > 0.20: signals.append(("SPX_MOMENTUM", "LONG"))
     elif macro["SPX_CHG"] < -0.20: signals.append(("SPX_MOMENTUM", "SHORT"))
     else: signals.append(("SPX_MOMENTUM", "NEUTRAL"))
-    if macro["GOLD_CHG"] > 0.50: signals.append(("GOLD_AFTER_SWEEP", "SHORT"))
+    if macro.get("GOLD_CHG_STATUS") == "UNKNOWN": signals.append(("GOLD_AFTER_SWEEP", "UNKNOWN"))
+    elif macro["GOLD_CHG"] > 0.50: signals.append(("GOLD_AFTER_SWEEP", "SHORT"))
     elif macro["GOLD_CHG"] < -0.30: signals.append(("GOLD_AFTER_SWEEP", "LONG"))
     else: signals.append(("GOLD_AFTER_SWEEP", "NEUTRAL"))
-    if klines_1m and len(klines_1m) >= 5:
+    if macro.get("OI_CHG_STATUS") == "UNKNOWN": signals.append(("OI_DIVERGENCE", "UNKNOWN"))
+    elif klines_1m and len(klines_1m) >= 5:
         pc = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
         if macro["OI_CHG"] > 0.5 and pc < -0.2: signals.append(("OI_DIVERGENCE", "SHORT"))
         elif macro["OI_CHG"] < -0.5 and pc > 0.2: signals.append(("OI_DIVERGENCE", "LONG"))
         else: signals.append(("OI_DIVERGENCE", "NEUTRAL"))
-    else: signals.append(("OI_DIVERGENCE", "NEUTRAL"))
-    if klines_1m and len(klines_1m) >= 3:
+    else: signals.append(("OI_DIVERGENCE", "UNKNOWN"))
+    if not klines_1m: signals.append(("LIQ_SWEEP", "UNKNOWN"))
+    elif len(klines_1m) >= 3:
         last = klines_1m[-1]; wd = last["close"] - last["low"]; wu = last["high"] - last["close"]; thr = price * 0.002
         if wd > thr and wd > wu * 1.5: signals.append(("LIQ_SWEEP", "LONG"))
         elif wu > thr and wu > wd * 1.5: signals.append(("LIQ_SWEEP", "SHORT"))
         else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
-    else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
-    signals.append(("ASIAN_LIQ_HUNT", asian_hunt if asian_hunt in ("LONG","SHORT") else "NEUTRAL"))
-    signals.append(("SESSION_REOPEN_HUNT", session_hunt if session_hunt in ("LONG","SHORT") else "NEUTRAL"))
+    else: signals.append(("LIQ_SWEEP", "UNKNOWN"))
+    signals.append(("ASIAN_LIQ_HUNT", asian_hunt if asian_hunt in ("LONG","SHORT") else ("UNKNOWN" if asian_hunt=="UNKNOWN" else "NEUTRAL")))
+    signals.append(("SESSION_REOPEN_HUNT", session_hunt if session_hunt in ("LONG","SHORT") else ("UNKNOWN" if session_hunt=="UNKNOWN" else "NEUTRAL")))
     return signals
 def decide(signals):
-    longs = sum(1 for _, v in signals if v == "LONG"); shorts = sum(1 for _, v in signals if v == "SHORT"); decided = longs + shorts
+    longs = sum(1 for _, v in signals if v == "LONG"); shorts = sum(1 for _, v in signals if v == "SHORT"); unknowns = sum(1 for _, v in signals if v == "UNKNOWN"); decided = longs + shorts
     if longs > shorts: dest, agree = "LONG", longs
     elif shorts > longs: dest, agree = "SHORT", shorts
     else: dest, agree = "NONE", 0
-    return dest, agree, decided, longs, shorts, (agree / decided * 100) if decided else 0
+    return dest, agree, decided, longs, shorts, unknowns, (agree / decided * 100) if decided else 0
 def calc_score(signals, dest, macro, is_news):
-    _, agree, decided, _, _, certainty = decide(signals); base = (certainty / 100) * 1.0; align = 0
+    _, agree, decided, _, _, _, certainty = decide(signals); base = (certainty / 100) * 1.0; align = 0
     if dest == "LONG" and macro["NQ_CHG"] > 0 and macro["SPX_CHG"] > 0: align = 0.4
     if dest == "SHORT" and macro["DXY_CHG"] > 0: align = 0.3
     return round(base + align + (0.4 if is_news else 0), 2)
 def calc_sl_tp(price, side, klines, is_sure, session_hunt_active, is_side=False):
     use_wide = CONFIG["WIDE_SL_ENABLED"] and (is_sure or session_hunt_active) and not is_side
-    sl_pct = CONFIG["WIDE_SL_PCT"] if use_wide else CONFIG["SL_PCT"]
-    sl_dist = price * sl_pct; wick_buf = price * CONFIG["WICK_BUFFER_PCT"]
+    sl_pct = CONFIG["WIDE_SL_PCT"] if use_wide else CONFIG["SL_PCT"]; sl_dist = price * sl_pct; wick_buf = price * CONFIG["WICK_BUFFER_PCT"]
     if klines:
         if side == "LONG": initial_mental = min(price - sl_dist, min(c["low"] for c in klines[-15:]) - wick_buf); initial_mental = max(initial_mental, price * 0.985)
         else: initial_mental = max(price + sl_dist, max(c["high"] for c in klines[-15:]) + wick_buf); initial_mental = min(initial_mental, price * 1.015)
     else: initial_mental = price - sl_dist if side == "LONG" else price + sl_dist
-    real_sl = calc_real_from_initial_mental(initial_mental, side)
-    sl_f = abs(price - initial_mental); mult = CONFIG["SIDE_TP_MULT"] if is_side else (CONFIG["TP_MULT_SURE"] if is_sure else CONFIG["TP_MULT_NORMAL"]); tp_dist = sl_f * mult; tp = price + tp_dist if side == "LONG" else price - tp_dist
+    real_sl = calc_real_from_initial_mental(initial_mental, side); sl_f = abs(price - initial_mental); mult = CONFIG["SIDE_TP_MULT"] if is_side else (CONFIG["TP_MULT_SURE"] if is_sure else CONFIG["TP_MULT_NORMAL"]); tp_dist = sl_f * mult; tp = price + tp_dist if side == "LONG" else price - tp_dist
     return round(initial_mental, 1), round(real_sl, 1), round(tp, 1), round(sl_f, 1), round(tp_dist, 1), use_wide
 def calc_fees_ev(price, sl_dist, tp_dist, winprob, qty):
-    pos, fees, slip, total_cost, _ = calc_dynamic_fees(price, qty); margin = pos / CONFIG["LEVERAGE"]
-    tp_profit = (qty * tp_dist) - total_cost; sl_loss = (qty * sl_dist) + total_cost; rr = tp_dist / sl_dist if sl_dist else 0; ev = (winprob/100 * tp_profit) - ((1-winprob/100) * sl_loss); be = tp_profit >= (total_cost * CONFIG["MIN_TP_OVER_FEES"]); return pos, margin, fees, slip, total_cost, tp_profit, sl_loss, rr, ev, be
+    pos, fees, slip, total_cost, _ = calc_dynamic_fees(price, qty); margin = pos / CONFIG["LEVERAGE"]; tp_profit = (qty * tp_dist) - total_cost; sl_loss = (qty * sl_dist) + total_cost; rr = tp_dist / sl_dist if sl_dist else 0; ev = (winprob/100 * tp_profit) - ((1-winprob/100) * sl_loss); be = tp_profit >= (total_cost * CONFIG["MIN_TP_OVER_FEES"]); return pos, margin, fees, slip, total_cost, tp_profit, sl_loss, rr, ev, be
 def get_dynamic_thresholds(is_news, just_lost, mode):
     bal = get_current_balance(mode); day_start = STATE.get("day_start_balance", bal) or bal; daily_dd = (bal - day_start) / day_start if day_start else 0
     if daily_dd <= -CONFIG["MAX_DAILY_LOSS_PCT"]:
@@ -331,7 +350,6 @@ def check_loss_control():
         mins = (now_utc() - STATE["last_loss_time"]).total_seconds() / 60
         if mins < CONFIG["COOLDOWN_AFTER_LOSS_MIN"]: return False, f"WARY: Cooldown {mins:.0f}/{CONFIG['COOLDOWN_AFTER_LOSS_MIN']}min (5min only)"
     return True, ""
-# --- SIDE HUSTLE CHECK: Only when MAIN Fail + No Position + Cert 60-79 + Hunt + Move ---
 def check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, main_pass, asian_hunt, session_hunt, long_liq, short_liq, macro):
     if not CONFIG["SIDE_HUSTLE_ENABLED"]: return False, "NONE", ""
     if STATE["open_position"]: return False, "NONE", "Side Hustle BLOCK: Position already open (MAIN/Add-on dey run)"
@@ -342,17 +360,12 @@ def check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, main
     if not (CONFIG["SIDE_MIN_CERT"] <= certainty <= CONFIG["SIDE_MAX_CERT"]): return False, "NONE", f"Side Hustle Cert {certainty:.0f}% no be 60-79% (MAIN fail range)"
     if agree < CONFIG["SIDE_MIN_AGREE"]: return False, "NONE", f"Side Hustle Agree {agree} < 3"
     if dest not in ("LONG", "SHORT"): return False, "NONE", "Side Hustle No Dest"
-    # Hunt confirm: asian_hunt or session_hunt or liq sweep must agree with dest
-    hunt_ok = (asian_hunt == dest or session_hunt == dest)
-    # Liq Map confirm: LONG hunt = LongLiq > ShortLiq (longs dey get hunted, price go return up). SHORT hunt = ShortLiq > LongLiq
-    liq_ok = (long_liq > short_liq) if dest == "LONG" else (short_liq > long_liq)
+    hunt_ok = (asian_hunt == dest or session_hunt == dest); liq_ok = (long_liq > short_liq) if dest == "LONG" else (short_liq > long_liq)
     if not (hunt_ok or liq_ok): return False, "NONE", f"Side Hustle No Hunt: Asian {asian_hunt} Session {session_hunt} LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} no confirm {dest}"
-    # Price dey move well? Check 15m move or 1m wick sweep
     move_ok = False; move_pct = 0.0
     if klines_1m and len(klines_1m) >= 15:
         move_pct = abs(klines_1m[-1]["close"] - klines_1m[-15]["close"]) / klines_1m[-15]["close"] * 100
         if move_pct >= CONFIG["SIDE_MIN_MOVE_PCT"] * 100: move_ok = True
-    # Also wick sweep check: last candle wick sweep Asia low/high then close back
     wick_ok = False
     if klines_15m:
         asia_low, asia_high = get_asian_range(klines_15m)
@@ -361,13 +374,11 @@ def check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, main
             if dest == "LONG" and asia_low and last["low"] < asia_low and last["close"] > asia_low: wick_ok = True
             if dest == "SHORT" and asia_high and last["high"] > asia_high and last["close"] < asia_high: wick_ok = True
     if not (move_ok or wick_ok): return False, "NONE", f"Side Hustle No Move: Move {move_pct:.2f}% < 0.80% and No Wick Sweep"
-    # OI no expand anyhow - na hunt, no be real trend
     if abs(macro["OI_CHG"]) > 2.0: return False, "NONE", f"Side Hustle OI too high {macro['OI_CHG']:.2f}% - na real trend, no be hunt"
     reason = f"SIDE HUSTLE READY {dest}: MAIN fail Cert {certainty:.0f}% (60-79) Agree {agree} | Hunt Asian {asian_hunt} Session {session_hunt} Liq Long ${long_liq:,.0f} Short ${short_liq:,.0f} | Move {move_pct:.2f}% Wick {wick_ok} | Join body chop quick"
     return True, dest, reason
 def record_close(side, entry, close_price, qty, reason, be_level=0):
-    _, fees, slip, total, _ = calc_dynamic_fees(entry, qty); gross = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty; net = gross - total
-    old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
+    _, fees, slip, total, _ = calc_dynamic_fees(entry, qty); gross = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty; net = gross - total; old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
     if STATE["mode"] == "PAPER": STATE["balance"] += net; STATE["pnl"] += net
     else: STATE["pnl"] += net
     if reason == "TP": STATE["wins"] += 1; log(f"TP HIT +${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Closed {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']}")
@@ -375,8 +386,7 @@ def record_close(side, entry, close_price, qty, reason, be_level=0):
     elif net > 0: STATE["wins"] += 1; log(f"SMALL WIN +${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']}")
     elif net < -0.01: STATE["losses"] += 1; STATE["losses_today"] += 1; STATE["last_loss_time"] = now_utc(); log(f"LOSS ${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']}")
     else: STATE["breakevens"] += 1; log(f"BE CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
-    STATE["open_position"] = None
-    new_bal = refresh_balance(STATE["mode"], f"AFTER-CLOSE-{reason}"); log(f"BALANCE AFTER TRADE: ${new_bal:.2f} - Next Qty go check if e fit higher step (+0.005) or lesser step"); return net
+    STATE["open_position"] = None; new_bal = refresh_balance(STATE["mode"], f"AFTER-CLOSE-{reason}"); log(f"BALANCE AFTER TRADE: ${new_bal:.2f} - Next Qty go check if e fit higher step (+0.005) or lesser step"); return net
 def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
     if flip_dest == "NONE" or flip_dest == side: return False
     if not (flip_certainty >= CONFIG["FLIP_CERTAINTY"] and flip_agree >= CONFIG["FLIP_AGREE"]): return False
@@ -423,7 +433,6 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         wick_cross = (price < p["sl"] if side == "LONG" else price > p["sl"])
         if wick_cross:
             if not p.get("mental_warned"): log(f"MENTAL SL FRONT WICK: Price wicked past MentalSL(FRONT) ${p['sl']:.0f} - HOLDING, hunt wick ignored, RealBackup(BEHIND) ${p['real_sl']:.0f} still dey protect"); p["mental_warned"] = True
-            # ADD-ON ONLY FOR MAIN, NOT FOR SIDE HUSTLE - Side hustle no add-on, chop quick comot
             if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False) and not is_side:
                 bal_now = get_current_balance(STATE["mode"])
                 if STATE["mode"] == "PAPER": bal_now = STATE["balance"]
@@ -450,7 +459,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         else: p["mental_warned"] = False
     return False
 def main():
-    log("BOT V13.7 STARTED - MAIN Lifestyle + SIDE HUSTLE Liq Hunt + ADD-ON Hunt No Flip + CROSS Margin + LONG+SHORT BOTH | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + QTY First 0.002 + Step +0.005 per +$8 from $10 + Paper till Sun 8:30pm WAT -> Auto REAL")
+    log("BOT V13.8 STARTED - MAIN Lifestyle + SIDE HUSTLE + LIVE WORLDWIDE NO HARDCODE NO FAKE NEUTRAL + ADD-ON + CROSS + LONG+SHORT | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + QTY First 0.002 + Step +0.005 per +$8 from $10 + Paper till Sun 8:30pm WAT -> Auto REAL")
     last_heartbeat = now_utc()
     while True:
         try:
@@ -461,12 +470,15 @@ def main():
                     bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL *** Sun 8:30pm WAT reached - Real Balance met: ${bal:.2f} USDT - Bot go trade real now, CROSS Margin ON, Asia opening, good boy mode ON ***")
                     if STATE["open_position"]: log("Closing paper position before REAL switch"); STATE["open_position"] = None
             mode = STATE["mode"]; set_cross_margin(); refresh_balance(mode, "CYCLE-START")
-            price = get_price(); klines_1m = get_klines_1m(20); klines_15m = get_klines(200); macro = get_macro()
+            price, price_src = get_price_live()
+            if price == 0.0: log("NO PRICE - All sources fail, skip cycle"); time.sleep(CONFIG["POLL_SEC"]); continue
+            klines_1m = get_klines_1m(20); klines_15m = get_klines(200); macro = get_macro_live()
             asian_hunt, asia_low, asia_high, long_liq, short_liq = get_asian_hunt(price, klines_15m, klines_1m)
             session_hunt, session_name = get_session_reopen_hunt(price, klines_1m, klines_15m)
             is_news, _, news_reason = get_news_score()
             signals = get_signals(price, macro, klines_1m, asian_hunt, session_hunt)
-            dest, agree, decided, longs, shorts, certainty = decide(signals)
+            dest, agree, decided, longs, shorts, unknowns, certainty = decide(signals)
+            unknown_names = [n for n, v in signals if v == "UNKNOWN"]
             score = calc_score(signals, dest, macro, is_news)
             winprob = max(50, min(75, 50 + (certainty - 50) * 0.4))
             just_lost = STATE["last_loss_time"] is not None and (now_utc() - STATE["last_loss_time"]).total_seconds() < 3600
@@ -480,14 +492,11 @@ def main():
                 if flipped: log(f"FLIP DONE - Next cycle go open new {dest} trade if gates still pass - No candle close loss")
             ok_control, control_reason = check_loss_control()
             session_active = session_hunt in ("LONG","SHORT")
-            # MAIN calc
             main_mental = main_real = main_tp = main_sl_dist = main_tp_dist = 0; main_pos = main_margin = main_fees = main_slip = main_total = main_tp_profit = main_sl_loss = main_rr = main_ev = 0; main_be = False; main_use_wide = False
             if dest in ("LONG", "SHORT") and not STATE["open_position"]:
                 main_mental, main_real, main_tp, main_sl_dist, main_tp_dist, main_use_wide = calc_sl_tp(price, dest, klines_1m, is_sure, session_active, is_side=False)
                 main_pos, main_margin, main_fees, main_slip, main_total, main_tp_profit, main_sl_loss, main_rr, main_ev, main_be = calc_fees_ev(price, main_sl_dist, main_tp_dist, winprob, qty)
-            # SIDE calc (for logging / gates if MAIN fail)
-            side_mental, side_real, side_tp, side_sl_dist, side_tp_dist, side_use_wide = (0,0,0,0,0,False)
-            side_pos = side_margin = side_fees = side_slip = side_total = side_tp_profit = side_sl_loss = side_rr = side_ev = 0; side_be = False
+            side_mental, side_real, side_tp, side_sl_dist, side_tp_dist, side_use_wide = (0,0,0,0,0,False); side_pos = side_margin = side_fees = side_slip = side_total = side_tp_profit = side_sl_loss = side_rr = side_ev = 0; side_be = False
             if dest in ("LONG", "SHORT") and not STATE["open_position"]:
                 side_mental, side_real, side_tp, side_sl_dist, side_tp_dist, side_use_wide = calc_sl_tp(price, dest, klines_1m, False, False, is_side=True)
                 side_pos, side_margin, side_fees, side_slip, side_total, side_tp_profit, side_sl_loss, side_rr, side_ev, side_be = calc_fees_ev(price, side_sl_dist, side_tp_dist, winprob, qty)
@@ -506,17 +515,14 @@ def main():
             gates.append((f"EV ${ev:.4f} > 0", ev > 0 if not STATE["open_position"] else True))
             gates.append((f"LossControl", ok_control))
             all_pass = all(p for _, p in gates); failed = [n for n, p in gates if not p]
-            # SIDE HUSTLE CHECK - only if MAIN fail
             side_ok, side_dest, side_reason = check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, all_pass, asian_hunt, session_hunt, long_liq, short_liq, macro)
-            # Side hustle also need fees/RR check: TP 1.5x must still cover fees 3x and RR >=1.2
-            side_fees_ok = True
             if side_ok:
                 if not (side_tp_profit >= (side_total * CONFIG["MIN_TP_OVER_FEES"])): side_ok = False; side_reason += f" | Side Fees FAIL TP ${side_tp_profit:.4f} < 3x ${side_total:.4f}"
                 if not (side_rr >= CONFIG["SIDE_MIN_RR"]): side_ok = False; side_reason += f" | Side RR {side_rr:.2f} < 1.2"
                 if not ok_control: side_ok = False; side_reason += f" | Side LossControl BLOCK {control_reason}"
             bal_show = STATE["real_balance"] if mode == "REAL" else STATE["balance"]
-            log(f"MODE {mode} CROSS | Long {longs} Short {shorts} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} {mode_str} MAIN {'Pass True' if all_pass else 'Pass False'} | SIDE {'READY '+side_dest if side_ok else 'No'}")
-            log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% NQ {macro['NQ_CHG']:.2f}% SPX {macro['SPX_CHG']:.2f}% GOLD {macro['GOLD_CHG']:.2f}% OI {macro['OI_CHG']:.2f}%")
+            log(f"MODE {mode} CROSS | PriceSrc {price_src} | Long {longs} Short {shorts} UNKNOWN {unknowns} {unknown_names} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} {mode_str} MAIN {'Pass True' if all_pass else 'Pass False'} | SIDE {'READY '+side_dest if side_ok else 'No'}")
+            log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
             log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} | SIDE HUSTLE: {side_reason if side_reason else 'N/A'}")
             log(f"SESSION {session_name} Reopen Hunt {session_hunt} | SL {'WIDE 1.20%' if use_wide else 'NORMAL 0.85%'} | MENTAL FRONT + REAL BEHIND $75 + BE LADDER + FLIP BOSS 75% + ADD-ON Hunt No Flip + SIDE HUSTLE + CROSS")
             log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Pos ${pos:.0f} Margin ${margin:.2f} Lev {CONFIG['LEVERAGE']}x CROSS FIXED | Price ${price:.0f} MentalSL(FRONT) ${mental_sl_show:.0f} RealBackup(BEHIND) ${real_sl_show:.0f} GAP $75 TP ${tp_show:.0f} | SIDE TP ${side_tp:.0f} 1.5x")
@@ -539,7 +545,7 @@ def main():
                     if not STATE.get("first_real_trade_done", False): STATE["first_real_trade_done"] = True; log(f"FIRST REAL TRADE DONE (via Side Hustle) - Next trade go use Step +0.005 per +$8 from $10")
                 STATE["open_position"] = {"side": side_dest, "entry": price, "sl": side_mental, "real_sl": side_real, "tp": side_tp, "certainty": certainty, "is_sure": False, "be_done": False, "be_level": 0, "mental_warned": False, "addon_done": True, "addon_qty": 0.0, "total_qty": qty, "is_side_hustle": True}; STATE["trades_today"] += 1; STATE["last_trade_time"] = now_utc(); STATE["side_hustles"] += 1; STATE["last_side_hustle_time"] = now_utc(); log(f"ORDER PLACED SIDE-HUSTLE ({mode}) {side_dest} - Chop Quick 1.5x TP, No Add-on, BE + Trailing still dey protect - LONG+SHORT Ready")
             elif not all_pass and not side_ok and not STATE["open_position"]:
-                log(f"BLOCK/WARY MAIN: {'; '.join(failed)} {control_reason} | SIDE: {side_reason} - Bot still alive, will trade next cycle")
+                log(f"BLOCK/WARY MAIN: {'; '.join(failed)} {control_reason} | SIDE: {side_reason} | UNKNOWN: {unknown_names} - Bot still alive, will trade next cycle")
             if (now_utc() - last_heartbeat).total_seconds() > CONFIG["HEARTBEAT_MIN"] * 60: log(f"HEARTBEAT OK - MODE {mode} CROSS - Bal ${bal_show:.2f} PnL ${STATE['pnl']:.2f}"); last_heartbeat = now_utc()
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
