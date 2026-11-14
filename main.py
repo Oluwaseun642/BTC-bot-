@@ -1,11 +1,12 @@
 # ============================================================
-# BTC SWEEP BOT - V13.6 FINAL - CURATED + CORRECTED + COMBINED
-# MaxTrade 20 -> SURE 85-90-95% | MaxLoss 5 -> SURE 90-95% | Cooldown 5min
+# BTC SWEEP BOT - V13.7 FINAL - CURATED + CORRECTED + COMBINED
+# MAIN: Certainties / News = Lifestyle | 80%+ Agree 5+ | MaxTrade 20 -> SURE 85-90-95% | MaxLoss 5 -> SURE 90-95% | Cooldown 5min
 # Balance -2% -> Calm 20min -> Back to Normal 80%
 # LONG + SHORT BOTH - Certainty Decide Side, No One-Side Bias
 # FLIP Boss + MentalSL FRONT + RealBackup BEHIND $75 GAP + BE Ladder + Trailing Early + Live All
-# ADD-ON TRADE: Hunt No Be Flip, Bal >= $10 REAL, Once Per Position, Same Side Same Qty, Chop Double On Return
-# CROSS MARGIN ON (Hidden Trading Switch) - Whole Balance Back Position + Add-on
+# ADD-ON TRADE: Hunt No Be Flip, Bal >= $10 REAL, Once Per Position, Same Side Same Qty, Chop Double On Return - ONLY WHEN MAIN TRADE DEY RUN
+# SIDE HUSTLE: Liq Map Hunt Trading - ONLY WHEN NO OPEN POSITION + MAIN FAIL + Cert 60-79% + Price Move + Hunt Confirm - Chop Quick 1.5x TP
+# CROSS MARGIN ON (Hidden Trading Switch) - Whole Balance Back Position + Add-on + Side Hustle
 # QTY: First REAL Trade 0.002 50x | After: +0.005 per +$8 Balance from $10 Upwards | $9-10 Raise = Still +0.005 Once
 # Balance Checked After EVERY Trade + Every Cycle | Qty Fit Go Up Or Down
 # Paper $4.75 till Sun 8:30pm WAT (19:30 UTC 15 Nov) -> Auto REAL, Ready for Asian
@@ -68,9 +69,12 @@ CONFIG = {
     "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc), "BYBIT_BASE": "https://api.bybit.com",
     "ASIAN_ENABLED": True, "ASIAN_START_HOUR_UTC": 0, "ASIAN_END_HOUR_UTC": 8, "ASIAN_SWEEP_BUFFER_PCT": 0.0015,
     "SESSION_HUNT_ENABLED": True, "SESSIONS": [("ASIA", 0, 0), ("LONDON", 7, 0), ("NEWYORK", 13, 30)], "SESSION_HUNT_WINDOW_MIN": 30,
+    # --- SIDE HUSTLE: Liq Map Hunt - NOT Lifestyle, Only When MAIN Fail + No Position ---
+    "SIDE_HUSTLE_ENABLED": True, "SIDE_MIN_CERT": 60.0, "SIDE_MAX_CERT": 79.9, "SIDE_MIN_AGREE": 3,
+    "SIDE_TP_MULT": 1.5, "SIDE_MIN_MOVE_PCT": 0.008, "SIDE_COOLDOWN_MIN": 10, "SIDE_MIN_RR": 1.2,
 }
 API_KEY = os.getenv("BYBIT_API_KEY", ""); API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-STATE = {"mode": "PAPER", "balance": 4.75, "real_balance": 0.0, "day_start_balance": 4.75, "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0, "flips": 0, "doubles": 0, "addons": 0, "trades_today": 0, "losses_today": 0, "last_loss_time": None, "last_trade_time": None, "calm_until": None, "day": datetime.now(timezone.utc).date(), "open_position": None, "last_price": 0.0, "first_real_trade_done": False, "cross_margin_set": False, "last_qty": 0.002, "last_balance_checked": 0.0, "last_macro": {"DXY_CHG": 0.0, "NQ_CHG": 0.0, "SPX_CHG": 0.0, "GOLD_CHG": 0.0, "OI_CHG": 0.0}, "last_liq_map": {"long_liq": 0.0, "short_liq": 0.0, "asia_low": 0.0, "asia_high": 0.0, "hunt": "NONE"}, "last_session": "NONE"}
+STATE = {"mode": "PAPER", "balance": 4.75, "real_balance": 0.0, "day_start_balance": 4.75, "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0, "flips": 0, "doubles": 0, "addons": 0, "side_hustles": 0, "trades_today": 0, "losses_today": 0, "last_loss_time": None, "last_trade_time": None, "last_side_hustle_time": None, "calm_until": None, "day": datetime.now(timezone.utc).date(), "open_position": None, "last_price": 0.0, "first_real_trade_done": False, "cross_margin_set": False, "last_qty": 0.002, "last_balance_checked": 0.0, "last_macro": {"DXY_CHG": 0.0, "NQ_CHG": 0.0, "SPX_CHG": 0.0, "GOLD_CHG": 0.0, "OI_CHG": 0.0}, "last_liq_map": {"long_liq": 0.0, "short_liq": 0.0, "asia_low": 0.0, "asia_high": 0.0, "hunt": "NONE"}, "last_session": "NONE"}
 def now_utc(): return datetime.now(timezone.utc)
 def log(msg): print(f"[{now_utc().strftime('%H:%M:%S %d %b')}] {msg}", flush=True)
 def get_mode(): return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
@@ -92,18 +96,14 @@ def refresh_balance(mode, reason="CYCLE"):
         STATE["last_balance_checked"] = new; return new
     else:
         STATE["last_balance_checked"] = STATE["balance"]; return STATE["balance"]
-# --- CROSS MARGIN: Hidden Trading Switch, Whole Balance Back Position + Add-on, BOTH LONG & SHORT ---
 def set_cross_margin():
     if not CONFIG["CROSS_MARGIN_ENABLED"]: return True
     if STATE.get("cross_margin_set"): return True
     if STATE["mode"] == "PAPER":
-        log("CROSS MARGIN MODE: PAPER - Whole balance dey back position + Add-on (LONG & SHORT)")
-        STATE["cross_margin_set"] = True; return True
+        log("CROSS MARGIN MODE: PAPER - Whole balance dey back position + Add-on + Side Hustle (LONG & SHORT)"); STATE["cross_margin_set"] = True; return True
     if not API_KEY: return False
     try:
-        res = bybit_post("/v5/position/switch-margin-mode", {"category": "linear", "symbol": CONFIG["SYMBOL"], "tradeMode": 0, "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
-        log(f"CROSS MARGIN SET: Bybit tradeMode 0 = CROSS | Lev {CONFIG['LEVERAGE']}x | {res}")
-        STATE["cross_margin_set"] = True; return True
+        res = bybit_post("/v5/position/switch-margin-mode", {"category": "linear", "symbol": CONFIG["SYMBOL"], "tradeMode": 0, "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])}); log(f"CROSS MARGIN SET: Bybit tradeMode 0 = CROSS | Lev {CONFIG['LEVERAGE']}x | {res}"); STATE["cross_margin_set"] = True; return True
     except Exception as e: log(f"CROSS MARGIN SET ERROR {e} - will retry"); return False
 def calc_dynamic_fees(price, qty):
     pos = qty * price; fees = pos * CONFIG["FEE_RATE"] * 2; slip = pos * CONFIG["SLIPPAGE_PCT"] * 2; total = fees + slip; fee_dist = total / qty if qty else 0
@@ -130,23 +130,19 @@ def get_dynamic_qty(price, mode):
         STATE["last_qty"] = base_qty; return base_qty
     bal = refresh_balance(mode, "QTY-CALC-REAL")
     if not STATE.get("first_real_trade_done", False):
-        log(f"FIRST REAL TRADE: Qty 0.002 with 50x Lev CROSS Margin - Testing real water small-small | Bal ${bal:.2f}")
-        STATE["last_qty"] = 0.002; return 0.002
-    if bal < CONFIG["QTY_BASE_BAL"]:
-        qty = CONFIG["QTY_BASE"]; steps = 0
-    else:
-        steps = int((bal - CONFIG["QTY_BASE_BAL"]) // CONFIG["QTY_STEP_BAL"]); qty = round(CONFIG["QTY_BASE"] + steps * CONFIG["QTY_STEP"], 3)
+        log(f"FIRST REAL TRADE: Qty 0.002 with 50x Lev CROSS Margin - Testing real water small-small | Bal ${bal:.2f}"); STATE["last_qty"] = 0.002; return 0.002
+    if bal < CONFIG["QTY_BASE_BAL"]: qty = CONFIG["QTY_BASE"]; steps = 0
+    else: steps = int((bal - CONFIG["QTY_BASE_BAL"]) // CONFIG["QTY_STEP_BAL"]); qty = round(CONFIG["QTY_BASE"] + steps * CONFIG["QTY_STEP"], 3)
     qty = min(qty, CONFIG["REAL_MAX_QTY"])
     if qty != STATE.get("last_qty", 0.002): log(f"QTY TIER CHANGE: Bal ${bal:.2f} -> Steps {steps} x $8 = Qty {STATE.get('last_qty', 0.002)} -> {qty}")
     else: log(f"QTY TIER CHECK: Bal ${bal:.2f} -> Steps {steps} = Qty {qty} (Hold previous Qty till next +$8 complete, next tier at ${CONFIG['QTY_BASE_BAL'] + (steps+1)*CONFIG['QTY_STEP_BAL']:.0f})")
     STATE["last_qty"] = qty; return qty
-def place_real_order(side, price, mental_sl, real_sl_backup, tp, qty, is_addon=False):
+def place_real_order(side, price, mental_sl, real_sl_backup, tp, qty, is_addon=False, is_side=False):
     if not API_KEY or not API_SECRET: log("REAL ORDER BLOCKED: No API keys"); return False
     try:
-        set_cross_margin()
-        bybit_post("/v5/position/set-leverage", {"category": "linear", "symbol": CONFIG["SYMBOL"], "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
+        set_cross_margin(); bybit_post("/v5/position/set-leverage", {"category": "linear", "symbol": CONFIG["SYMBOL"], "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
         res = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Buy" if side == "LONG" else "Sell", "orderType": "Market", "qty": str(qty), "takeProfit": str(round(tp, 1)), "stopLoss": str(round(real_sl_backup, 1)), "tpTriggerBy": "LastPrice", "slTriggerBy": "LastPrice", "timeInForce": "GTC"})
-        tag = "ADD-ON" if is_addon else "MAIN"
+        tag = "ADD-ON" if is_addon else ("SIDE-HUSTLE" if is_side else "MAIN")
         log(f"REAL ORDER PLACED [{tag}] {side} Qty {qty} Entry ~${price:.0f} MentalSL(FRONT) ${mental_sl:.0f} RealSL(BEHIND) ${real_sl_backup:.0f} GAP $75 TP ${tp:.0f} Lev {CONFIG['LEVERAGE']}x CROSS Bybit: {res}"); return res.get("retCode") == 0
     except Exception as e: log(f"REAL ORDER ERROR {e}"); return False
 def update_real_sl(new_real_sl, side):
@@ -299,8 +295,8 @@ def calc_score(signals, dest, macro, is_news):
     if dest == "LONG" and macro["NQ_CHG"] > 0 and macro["SPX_CHG"] > 0: align = 0.4
     if dest == "SHORT" and macro["DXY_CHG"] > 0: align = 0.3
     return round(base + align + (0.4 if is_news else 0), 2)
-def calc_sl_tp(price, side, klines, is_sure, session_hunt_active):
-    use_wide = CONFIG["WIDE_SL_ENABLED"] and (is_sure or session_hunt_active)
+def calc_sl_tp(price, side, klines, is_sure, session_hunt_active, is_side=False):
+    use_wide = CONFIG["WIDE_SL_ENABLED"] and (is_sure or session_hunt_active) and not is_side
     sl_pct = CONFIG["WIDE_SL_PCT"] if use_wide else CONFIG["SL_PCT"]
     sl_dist = price * sl_pct; wick_buf = price * CONFIG["WICK_BUFFER_PCT"]
     if klines:
@@ -308,7 +304,7 @@ def calc_sl_tp(price, side, klines, is_sure, session_hunt_active):
         else: initial_mental = max(price + sl_dist, max(c["high"] for c in klines[-15:]) + wick_buf); initial_mental = min(initial_mental, price * 1.015)
     else: initial_mental = price - sl_dist if side == "LONG" else price + sl_dist
     real_sl = calc_real_from_initial_mental(initial_mental, side)
-    sl_f = abs(price - initial_mental); mult = CONFIG["TP_MULT_SURE"] if is_sure else CONFIG["TP_MULT_NORMAL"]; tp_dist = sl_f * mult; tp = price + tp_dist if side == "LONG" else price - tp_dist
+    sl_f = abs(price - initial_mental); mult = CONFIG["SIDE_TP_MULT"] if is_side else (CONFIG["TP_MULT_SURE"] if is_sure else CONFIG["TP_MULT_NORMAL"]); tp_dist = sl_f * mult; tp = price + tp_dist if side == "LONG" else price - tp_dist
     return round(initial_mental, 1), round(real_sl, 1), round(tp, 1), round(sl_f, 1), round(tp_dist, 1), use_wide
 def calc_fees_ev(price, sl_dist, tp_dist, winprob, qty):
     pos, fees, slip, total_cost, _ = calc_dynamic_fees(price, qty); margin = pos / CONFIG["LEVERAGE"]
@@ -335,10 +331,42 @@ def check_loss_control():
         mins = (now_utc() - STATE["last_loss_time"]).total_seconds() / 60
         if mins < CONFIG["COOLDOWN_AFTER_LOSS_MIN"]: return False, f"WARY: Cooldown {mins:.0f}/{CONFIG['COOLDOWN_AFTER_LOSS_MIN']}min (5min only)"
     return True, ""
+# --- SIDE HUSTLE CHECK: Only when MAIN Fail + No Position + Cert 60-79 + Hunt + Move ---
+def check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, main_pass, asian_hunt, session_hunt, long_liq, short_liq, macro):
+    if not CONFIG["SIDE_HUSTLE_ENABLED"]: return False, "NONE", ""
+    if STATE["open_position"]: return False, "NONE", "Side Hustle BLOCK: Position already open (MAIN/Add-on dey run)"
+    if main_pass: return False, "NONE", "Side Hustle SKIP: MAIN pass, MAIN be lifestyle"
+    if STATE.get("last_side_hustle_time"):
+        mins = (now_utc() - STATE["last_side_hustle_time"]).total_seconds() / 60
+        if mins < CONFIG["SIDE_COOLDOWN_MIN"]: return False, "NONE", f"Side Hustle Cooldown {mins:.0f}/{CONFIG['SIDE_COOLDOWN_MIN']}min"
+    if not (CONFIG["SIDE_MIN_CERT"] <= certainty <= CONFIG["SIDE_MAX_CERT"]): return False, "NONE", f"Side Hustle Cert {certainty:.0f}% no be 60-79% (MAIN fail range)"
+    if agree < CONFIG["SIDE_MIN_AGREE"]: return False, "NONE", f"Side Hustle Agree {agree} < 3"
+    if dest not in ("LONG", "SHORT"): return False, "NONE", "Side Hustle No Dest"
+    # Hunt confirm: asian_hunt or session_hunt or liq sweep must agree with dest
+    hunt_ok = (asian_hunt == dest or session_hunt == dest)
+    # Liq Map confirm: LONG hunt = LongLiq > ShortLiq (longs dey get hunted, price go return up). SHORT hunt = ShortLiq > LongLiq
+    liq_ok = (long_liq > short_liq) if dest == "LONG" else (short_liq > long_liq)
+    if not (hunt_ok or liq_ok): return False, "NONE", f"Side Hustle No Hunt: Asian {asian_hunt} Session {session_hunt} LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} no confirm {dest}"
+    # Price dey move well? Check 15m move or 1m wick sweep
+    move_ok = False; move_pct = 0.0
+    if klines_1m and len(klines_1m) >= 15:
+        move_pct = abs(klines_1m[-1]["close"] - klines_1m[-15]["close"]) / klines_1m[-15]["close"] * 100
+        if move_pct >= CONFIG["SIDE_MIN_MOVE_PCT"] * 100: move_ok = True
+    # Also wick sweep check: last candle wick sweep Asia low/high then close back
+    wick_ok = False
+    if klines_15m:
+        asia_low, asia_high = get_asian_range(klines_15m)
+        if klines_1m:
+            last = klines_1m[-1]
+            if dest == "LONG" and asia_low and last["low"] < asia_low and last["close"] > asia_low: wick_ok = True
+            if dest == "SHORT" and asia_high and last["high"] > asia_high and last["close"] < asia_high: wick_ok = True
+    if not (move_ok or wick_ok): return False, "NONE", f"Side Hustle No Move: Move {move_pct:.2f}% < 0.80% and No Wick Sweep"
+    # OI no expand anyhow - na hunt, no be real trend
+    if abs(macro["OI_CHG"]) > 2.0: return False, "NONE", f"Side Hustle OI too high {macro['OI_CHG']:.2f}% - na real trend, no be hunt"
+    reason = f"SIDE HUSTLE READY {dest}: MAIN fail Cert {certainty:.0f}% (60-79) Agree {agree} | Hunt Asian {asian_hunt} Session {session_hunt} Liq Long ${long_liq:,.0f} Short ${short_liq:,.0f} | Move {move_pct:.2f}% Wick {wick_ok} | Join body chop quick"
+    return True, dest, reason
 def record_close(side, entry, close_price, qty, reason, be_level=0):
-    _, fees, slip, total, _ = calc_dynamic_fees(entry, qty)
-    gross = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty
-    net = gross - total
+    _, fees, slip, total, _ = calc_dynamic_fees(entry, qty); gross = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty; net = gross - total
     old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
     if STATE["mode"] == "PAPER": STATE["balance"] += net; STATE["pnl"] += net
     else: STATE["pnl"] += net
@@ -348,9 +376,7 @@ def record_close(side, entry, close_price, qty, reason, be_level=0):
     elif net < -0.01: STATE["losses"] += 1; STATE["losses_today"] += 1; STATE["last_loss_time"] = now_utc(); log(f"LOSS ${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']}")
     else: STATE["breakevens"] += 1; log(f"BE CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
     STATE["open_position"] = None
-    new_bal = refresh_balance(STATE["mode"], f"AFTER-CLOSE-{reason}")
-    log(f"BALANCE AFTER TRADE: ${new_bal:.2f} - Next Qty go check if e fit higher step (+0.005) or lesser step")
-    return net
+    new_bal = refresh_balance(STATE["mode"], f"AFTER-CLOSE-{reason}"); log(f"BALANCE AFTER TRADE: ${new_bal:.2f} - Next Qty go check if e fit higher step (+0.005) or lesser step"); return net
 def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
     if flip_dest == "NONE" or flip_dest == side: return False
     if not (flip_certainty >= CONFIG["FLIP_CERTAINTY"] and flip_agree >= CONFIG["FLIP_AGREE"]): return False
@@ -358,10 +384,7 @@ def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, sid
     else: return macro["DXY_CHG"] > 0.05 or macro["NQ_CHG"] < 0
 def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, macro):
     if not STATE["open_position"]: return False
-    p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; profit_pct = (price - entry) / entry if side == "LONG" else (entry - price) / entry
-    be_level = p.get("be_level", 0)
-    total_qty = p.get("total_qty", qty)
-    # 1) FLIP FIRST - BOSS, BOTH LONG & SHORT, no wait
+    p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; profit_pct = (price - entry) / entry if side == "LONG" else (entry - price) / entry; be_level = p.get("be_level", 0); total_qty = p.get("total_qty", qty); is_side = p.get("is_side_hustle", False)
     if CONFIG["FLIP_ENABLED"] and is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
         STATE["flips"] += 1; log(f"FLIP {side} -> {flip_dest} CONFIRMED FIRST | Cert {flip_certainty:.0f}% Agree {flip_agree} + Macro DXY {macro['DXY_CHG']:.2f}% NQ {macro['NQ_CHG']:.2f}% - Closing WITH PROFIT at ${price:.0f}, no wait for MentalSL")
         if p.get("be_done"): record_close(side, entry, price, total_qty, "BE", be_level=p.get("be_level", 1))
@@ -369,20 +392,18 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         if STATE["mode"] == "REAL": close_real_position(side, total_qty)
         return True
     hit_tp = (price >= p["tp"] if side == "LONG" else price <= p["tp"])
-    if hit_tp: record_close(side, entry, price, total_qty, "TP"); return False
+    if hit_tp:
+        if is_side: STATE["last_side_hustle_time"] = now_utc()
+        record_close(side, entry, price, total_qty, "TP"); return False
     if CONFIG["BE_LADDER_ENABLED"]:
         target_level = int(profit_pct // CONFIG["BE_LADDER_STEP_PCT"])
         if target_level > be_level and target_level <= CONFIG["BE_LADDER_MAX_LEVEL"]:
-            profit_lock = 3.0 * target_level
-            new_real, total_fees, fee_dist = calc_real_backup(entry, side, total_qty, profit_lock_usd=profit_lock)
-            new_mental = calc_mental_from_real(new_real, side)
+            profit_lock = 3.0 * target_level; new_real, total_fees, fee_dist = calc_real_backup(entry, side, total_qty, profit_lock_usd=profit_lock); new_mental = calc_mental_from_real(new_real, side)
             if (side == "LONG" and new_real > p.get("real_sl", -1e9)) or (side == "SHORT" and new_real < p.get("real_sl", 1e9)):
-                p["real_sl"] = new_real; p["sl"] = new_mental; p["be_level"] = target_level; p["be_done"] = True
-                log(f"BE{target_level} STAMPED: MentalSL(FRONT) -> ${new_mental:.0f} | RealBackup(BEHIND) -> ${new_real:.0f} GAP $75 | Entry ${entry:.0f} + Fees ${total_fees:.4f} + ${profit_lock:.0f} profit | Price ${price:.0f} Profit {profit_pct*100:.2f}%"); update_real_sl(p["real_sl"], side)
+                p["real_sl"] = new_real; p["sl"] = new_mental; p["be_level"] = target_level; p["be_done"] = True; log(f"BE{target_level} STAMPED: MentalSL(FRONT) -> ${new_mental:.0f} | RealBackup(BEHIND) -> ${new_real:.0f} GAP $75 | Entry ${entry:.0f} + Fees ${total_fees:.4f} + ${profit_lock:.0f} profit | Price ${price:.0f} Profit {profit_pct*100:.2f}%"); update_real_sl(p["real_sl"], side)
     if CONFIG["TRAILING_ENABLED"] and profit_pct >= CONFIG["TRAIL_START_PCT"]:
         if profit_pct < CONFIG["BE_TRIGGER_PCT"] and not p.get("be_done"):
-            early_real, _, _ = calc_real_backup(entry, side, total_qty, profit_lock_usd=1.0)
-            early_mental = calc_mental_from_real(early_real, side)
+            early_real, _, _ = calc_real_backup(entry, side, total_qty, profit_lock_usd=1.0); early_mental = calc_mental_from_real(early_real, side)
             if (side == "LONG" and early_real > p.get("real_sl", -1e9)) or (side == "SHORT" and early_real < p.get("real_sl", 1e9)):
                 p["real_sl"] = early_real; p["sl"] = early_mental; log(f"TRAILING EARLY: MentalSL(FRONT) -> ${early_mental:.0f} | RealBackup(BEHIND) -> ${early_real:.0f} GAP $75 | Price ${price:.0f} Profit {profit_pct*100:.2f}% - Lock Fees+$1 before BE1"); update_real_sl(p["real_sl"], side)
         if profit_pct >= CONFIG["TRAIL_STEP_3"]: td = CONFIG["TRAIL_DIST_3"]; label = "Trail 0.80% behind"
@@ -398,20 +419,15 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
             trail_mental = calc_mental_from_real(trail_real, side)
             if (side == "LONG" and trail_real > p["real_sl"]) or (side == "SHORT" and trail_real < p["real_sl"]):
                 p["sl"] = trail_mental; p["real_sl"] = trail_real; log(f"TRAILING {side}: MentalSL(FRONT) -> ${trail_mental:.0f} | RealBackup(BEHIND) -> ${trail_real:.0f} GAP $75 | Price ${price:.0f} Profit {profit_pct*100:.2f}% - {label}"); update_real_sl(p["real_sl"], side)
-    # 5) MENTAL SL + ADD-ON - BOTH LONG & SHORT SYMMETRIC
     if CONFIG["MENTAL_SL_ENABLED"]:
         wick_cross = (price < p["sl"] if side == "LONG" else price > p["sl"])
         if wick_cross:
             if not p.get("mental_warned"): log(f"MENTAL SL FRONT WICK: Price wicked past MentalSL(FRONT) ${p['sl']:.0f} - HOLDING, hunt wick ignored, RealBackup(BEHIND) ${p['real_sl']:.0f} still dey protect"); p["mental_warned"] = True
-            # ADD-ON CHECK: Hunt No Be Flip, Bal >= $10, Once Per Position, Same Side Still Certain
-            # LONG: price wick down, but dest still LONG. SHORT: price wick up, but dest still SHORT.
-            if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False):
+            # ADD-ON ONLY FOR MAIN, NOT FOR SIDE HUSTLE - Side hustle no add-on, chop quick comot
+            if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False) and not is_side:
                 bal_now = get_current_balance(STATE["mode"])
-                # For PAPER test, use PAPER balance, for REAL use REAL balance
                 if STATE["mode"] == "PAPER": bal_now = STATE["balance"]
-                is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE") # dest still original side, no flip
-                still_certain = (flip_certainty >= 80.0 and flip_agree >= 5) if flip_dest == side else False
-                # If dest == NONE but macro still support side, also consider hunt
+                is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE"); still_certain = (flip_certainty >= 80.0 and flip_agree >= 5) if flip_dest == side else False
                 if flip_dest == "NONE":
                     if side == "LONG": still_certain = (macro["DXY_CHG"] < 0.10 and macro["NQ_CHG"] > -0.10)
                     else: still_certain = (macro["DXY_CHG"] > -0.10 and macro["NQ_CHG"] < 0.10)
@@ -419,15 +435,14 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
                     log(f"ADD-ON TRIGGER {side}: MM Hunt against {side}, No Be Flip, Bal ${bal_now:.2f} >= $10, Dest still {side} - Adding ONE more {side} Qty {qty} to chop double when market return to original destination")
                     if STATE["mode"] == "REAL":
                         ok = place_real_order(side, price, p["sl"], p["real_sl"], p["tp"], qty, is_addon=True)
-                        if ok:
-                            p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PLACED {side} Qty {qty} Total Qty Now {p['total_qty']} CROSS Margin - Same TP ${p['tp']:.0f} Same RealBackup ${p['real_sl']:.0f}")
-                    else:
-                        p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PAPER SIM {side} Qty {qty} Total Qty Now {p['total_qty']} - Same TP ${p['tp']:.0f}")
+                        if ok: p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PLACED {side} Qty {qty} Total Qty Now {p['total_qty']} CROSS Margin - Same TP ${p['tp']:.0f} Same RealBackup ${p['real_sl']:.0f}")
+                    else: p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PAPER SIM {side} Qty {qty} Total Qty Now {p['total_qty']} - Same TP ${p['tp']:.0f}")
             real_hit = (price <= p["real_sl"] if side == "LONG" else price >= p["real_sl"])
             if real_hit:
                 beyond = abs(price - p["real_sl"]) / entry
                 if beyond > 0.002:
                     log(f"REALBACKUP BEHIND HIT + 0.20% BEYOND: Price ${price:.0f} past RealBackup ${p['real_sl']:.0f} - Closing with profit locked (Total Qty {total_qty})")
+                    if is_side: STATE["last_side_hustle_time"] = now_utc()
                     if p.get("be_done"): record_close(side, entry, price, total_qty, "BE", be_level=p.get("be_level", 1))
                     else: record_close(side, entry, price, total_qty, "REALBACKUP")
                     if STATE["mode"] == "REAL": close_real_position(side, total_qty)
@@ -435,7 +450,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         else: p["mental_warned"] = False
     return False
 def main():
-    log("BOT V13.6 STARTED - LONG+SHORT BOTH | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + ADD-ON Hunt No Flip Bal>=$10 + CROSS Margin + QTY First 0.002 + Step +0.005 per +$8 from $10 + Balance Check After Every Trade + Paper till Sun 8:30pm WAT -> Auto REAL")
+    log("BOT V13.7 STARTED - MAIN Lifestyle + SIDE HUSTLE Liq Hunt + ADD-ON Hunt No Flip + CROSS Margin + LONG+SHORT BOTH | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + QTY First 0.002 + Step +0.005 per +$8 from $10 + Paper till Sun 8:30pm WAT -> Auto REAL")
     last_heartbeat = now_utc()
     while True:
         try:
@@ -465,15 +480,22 @@ def main():
                 if flipped: log(f"FLIP DONE - Next cycle go open new {dest} trade if gates still pass - No candle close loss")
             ok_control, control_reason = check_loss_control()
             session_active = session_hunt in ("LONG","SHORT")
+            # MAIN calc
+            main_mental = main_real = main_tp = main_sl_dist = main_tp_dist = 0; main_pos = main_margin = main_fees = main_slip = main_total = main_tp_profit = main_sl_loss = main_rr = main_ev = 0; main_be = False; main_use_wide = False
             if dest in ("LONG", "SHORT") and not STATE["open_position"]:
-                mental_sl, real_sl, tp, sl_dist, tp_dist, use_wide = calc_sl_tp(price, dest, klines_1m, is_sure, session_active)
-                pos, margin, fees, slip, total_cost, tp_profit, sl_loss, rr, ev, be = calc_fees_ev(price, sl_dist, tp_dist, winprob, qty)
-            else:
-                if STATE["open_position"]:
-                    p = STATE["open_position"]; mental_sl = p["sl"]; real_sl = p.get("real_sl", mental_sl); tp = p["tp"]; sl_dist = abs(price - mental_sl); tp_dist = abs(tp - price); pos, margin, fees, slip, total_cost, tp_profit, sl_loss, rr, ev, be = 0,0,0,0,0,0,0,0,0,False
-                else: mental_sl = real_sl = tp = sl_dist = tp_dist = pos = margin = fees = slip = total_cost = tp_profit = sl_loss = rr = ev = 0; be = False; use_wide = False
-                if not STATE["open_position"]: use_wide = False
-                else: use_wide = False
+                main_mental, main_real, main_tp, main_sl_dist, main_tp_dist, main_use_wide = calc_sl_tp(price, dest, klines_1m, is_sure, session_active, is_side=False)
+                main_pos, main_margin, main_fees, main_slip, main_total, main_tp_profit, main_sl_loss, main_rr, main_ev, main_be = calc_fees_ev(price, main_sl_dist, main_tp_dist, winprob, qty)
+            # SIDE calc (for logging / gates if MAIN fail)
+            side_mental, side_real, side_tp, side_sl_dist, side_tp_dist, side_use_wide = (0,0,0,0,0,False)
+            side_pos = side_margin = side_fees = side_slip = side_total = side_tp_profit = side_sl_loss = side_rr = side_ev = 0; side_be = False
+            if dest in ("LONG", "SHORT") and not STATE["open_position"]:
+                side_mental, side_real, side_tp, side_sl_dist, side_tp_dist, side_use_wide = calc_sl_tp(price, dest, klines_1m, False, False, is_side=True)
+                side_pos, side_margin, side_fees, side_slip, side_total, side_tp_profit, side_sl_loss, side_rr, side_ev, side_be = calc_fees_ev(price, side_sl_dist, side_tp_dist, winprob, qty)
+            if STATE["open_position"]:
+                p = STATE["open_position"]; mental_sl = p["sl"]; real_sl = p.get("real_sl", mental_sl); tp = p["tp"]; sl_dist = abs(price - mental_sl); tp_dist = abs(tp - price); pos, margin, fees, slip, total_cost, tp_profit, sl_loss, rr, ev, be = 0,0,0,0,0,0,0,0,0,False; use_wide = False; mental_sl_show = mental_sl; real_sl_show = real_sl; tp_show = tp
+            elif dest in ("LONG", "SHORT"):
+                mental_sl_show = main_mental; real_sl_show = main_real; tp_show = main_tp; pos = main_pos; margin = main_margin; fees = main_fees; slip = main_slip; total_cost = main_total; tp_profit = main_tp_profit; sl_loss = main_sl_loss; rr = main_rr; ev = main_ev; be = main_be; use_wide = main_use_wide
+            else: mental_sl_show = real_sl_show = tp_show = pos = margin = fees = slip = total_cost = tp_profit = sl_loss = rr = ev = 0; be = False; use_wide = False
             gates = []
             gates.append((f"Agree {agree}/{decided} Need {need_agree}", agree >= need_agree and decided >= need_agree))
             gates.append((f"Certainty {certainty:.0f}% Need {need_cert:.0f}% [{thresh_label}]", certainty >= need_cert))
@@ -484,25 +506,40 @@ def main():
             gates.append((f"EV ${ev:.4f} > 0", ev > 0 if not STATE["open_position"] else True))
             gates.append((f"LossControl", ok_control))
             all_pass = all(p for _, p in gates); failed = [n for n, p in gates if not p]
+            # SIDE HUSTLE CHECK - only if MAIN fail
+            side_ok, side_dest, side_reason = check_side_hustle(price, klines_1m, klines_15m, dest, certainty, agree, all_pass, asian_hunt, session_hunt, long_liq, short_liq, macro)
+            # Side hustle also need fees/RR check: TP 1.5x must still cover fees 3x and RR >=1.2
+            side_fees_ok = True
+            if side_ok:
+                if not (side_tp_profit >= (side_total * CONFIG["MIN_TP_OVER_FEES"])): side_ok = False; side_reason += f" | Side Fees FAIL TP ${side_tp_profit:.4f} < 3x ${side_total:.4f}"
+                if not (side_rr >= CONFIG["SIDE_MIN_RR"]): side_ok = False; side_reason += f" | Side RR {side_rr:.2f} < 1.2"
+                if not ok_control: side_ok = False; side_reason += f" | Side LossControl BLOCK {control_reason}"
             bal_show = STATE["real_balance"] if mode == "REAL" else STATE["balance"]
-            log(f"MODE {mode} CROSS | Long {longs} Short {shorts} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} {mode_str} {'Pass True' if all_pass else 'Pass False'}")
+            log(f"MODE {mode} CROSS | Long {longs} Short {shorts} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} {mode_str} MAIN {'Pass True' if all_pass else 'Pass False'} | SIDE {'READY '+side_dest if side_ok else 'No'}")
             log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% NQ {macro['NQ_CHG']:.2f}% SPX {macro['SPX_CHG']:.2f}% GOLD {macro['GOLD_CHG']:.2f}% OI {macro['OI_CHG']:.2f}%")
-            log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt}")
-            log(f"SESSION {session_name} Reopen Hunt {session_hunt} | SL {'WIDE 1.20%' if use_wide else 'NORMAL 0.85%'} | MENTAL FRONT + REAL BEHIND $75 + BE LADDER + FLIP BOSS 75% + ADD-ON Hunt No Flip + CROSS")
-            log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Pos ${pos:.0f} Margin ${margin:.2f} Lev {CONFIG['LEVERAGE']}x CROSS FIXED | Price ${price:.0f} MentalSL(FRONT) ${mental_sl:.0f} RealBackup(BEHIND) ${real_sl:.0f} GAP $75 TP ${tp:.0f}")
-            log(f"FEES ${fees:.4f} + SLIPPAGE ${slip:.4f} = Total ${total_cost:.4f} TP Profit ${tp_profit:.4f} >=3x {be} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} DOUBLE{STATE['doubles']} Trades {STATE['trades_today']}/20 Losses {STATE['losses_today']}/5 NEVER_STOP True")
+            log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} | SIDE HUSTLE: {side_reason if side_reason else 'N/A'}")
+            log(f"SESSION {session_name} Reopen Hunt {session_hunt} | SL {'WIDE 1.20%' if use_wide else 'NORMAL 0.85%'} | MENTAL FRONT + REAL BEHIND $75 + BE LADDER + FLIP BOSS 75% + ADD-ON Hunt No Flip + SIDE HUSTLE + CROSS")
+            log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Pos ${pos:.0f} Margin ${margin:.2f} Lev {CONFIG['LEVERAGE']}x CROSS FIXED | Price ${price:.0f} MentalSL(FRONT) ${mental_sl_show:.0f} RealBackup(BEHIND) ${real_sl_show:.0f} GAP $75 TP ${tp_show:.0f} | SIDE TP ${side_tp:.0f} 1.5x")
+            log(f"FEES ${fees:.4f} + SLIPPAGE ${slip:.4f} = Total ${total_cost:.4f} TP Profit ${tp_profit:.4f} >=3x {be} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} SIDE{STATE['side_hustles']} DOUBLE{STATE['doubles']} Trades {STATE['trades_today']}/20 Losses {STATE['losses_today']}/5 NEVER_STOP True")
             if STATE["open_position"] and not flipped:
-                log(f"HOLDING {STATE['open_position']['side']} BE{STATE['open_position'].get('be_level',0)} AddOn {'YES' if STATE['open_position'].get('addon_done') else 'NO'} TotalQty {STATE['open_position'].get('total_qty', qty)} - Mental FRONT / Real BEHIND / BE Ladder / Flip / Add-on dey manage am")
-            elif not all_pass and not STATE["open_position"]:
-                log(f"BLOCK/WARY: {'; '.join(failed)} {control_reason} - Bot still alive, will trade next cycle")
+                kind = "SIDE-HUSTLE" if STATE["open_position"].get("is_side_hustle") else "MAIN"
+                log(f"HOLDING [{kind}] {STATE['open_position']['side']} BE{STATE['open_position'].get('be_level',0)} AddOn {'YES' if STATE['open_position'].get('addon_done') else 'NO'} TotalQty {STATE['open_position'].get('total_qty', qty)} - Mental FRONT / Real BEHIND / BE Ladder / Flip / Add-on dey manage am")
             elif all_pass and not STATE["open_position"]:
-                log(f"TRADE SIGNAL - {mode} {dest} {mode_str} Entry ${price:.0f} MentalSL(FRONT) ${mental_sl:.0f} RealBackup(BEHIND) ${real_sl:.0f} TP ${tp:.0f} Qty {qty} {'WIDE SL' if use_wide else ''} Lev {CONFIG['LEVERAGE']}x CROSS")
+                log(f"TRADE SIGNAL MAIN - {mode} {dest} {mode_str} Entry ${price:.0f} MentalSL(FRONT) ${main_mental:.0f} RealBackup(BEHIND) ${main_real:.0f} TP ${main_tp:.0f} Qty {qty} {'WIDE SL' if main_use_wide else ''} Lev {CONFIG['LEVERAGE']}x CROSS")
                 if mode == "REAL":
-                    ok = place_real_order(dest, price, mental_sl, real_sl, tp, qty)
+                    ok = place_real_order(dest, price, main_mental, main_real, main_tp, qty, is_addon=False, is_side=False)
                     if not ok: log("REAL ORDER FAILED - No trade opened, will retry next cycle"); time.sleep(CONFIG["POLL_SEC"]); continue
-                    if not STATE.get("first_real_trade_done", False):
-                        STATE["first_real_trade_done"] = True; log(f"FIRST REAL TRADE DONE - Next trade go use Step +0.005 per +$8 from $10")
-                STATE["open_position"] = {"side": dest, "entry": price, "sl": mental_sl, "real_sl": real_sl, "tp": tp, "certainty": certainty, "is_sure": is_sure, "be_done": False, "be_level": 0, "mental_warned": False, "addon_done": False, "addon_qty": 0.0, "total_qty": qty}; STATE["trades_today"] += 1; STATE["last_trade_time"] = now_utc(); log(f"ORDER PLACED ({mode}) {dest} - Mental FRONT + Real BEHIND $75 + BE Ladder + Trailing Early + Flip Boss + Add-on Ready + CROSS - LONG+SHORT Ready")
+                    if not STATE.get("first_real_trade_done", False): STATE["first_real_trade_done"] = True; log(f"FIRST REAL TRADE DONE - Next trade go use Step +0.005 per +$8 from $10")
+                STATE["open_position"] = {"side": dest, "entry": price, "sl": main_mental, "real_sl": main_real, "tp": main_tp, "certainty": certainty, "is_sure": is_sure, "be_done": False, "be_level": 0, "mental_warned": False, "addon_done": False, "addon_qty": 0.0, "total_qty": qty, "is_side_hustle": False}; STATE["trades_today"] += 1; STATE["last_trade_time"] = now_utc(); log(f"ORDER PLACED MAIN ({mode}) {dest} - Mental FRONT + Real BEHIND $75 + BE Ladder + Trailing Early + Flip Boss + Add-on Ready + CROSS - LONG+SHORT Ready")
+            elif side_ok and not STATE["open_position"]:
+                log(f"TRADE SIGNAL SIDE-HUSTLE - {mode} {side_dest} Entry ${price:.0f} MentalSL(FRONT) ${side_mental:.0f} RealBackup(BEHIND) ${side_real:.0f} TP ${side_tp:.0f} 1.5x Quick Chop Qty {qty} Lev {CONFIG['LEVERAGE']}x CROSS | Reason: {side_reason}")
+                if mode == "REAL":
+                    ok = place_real_order(side_dest, price, side_mental, side_real, side_tp, qty, is_addon=False, is_side=True)
+                    if not ok: log("REAL SIDE ORDER FAILED - No trade opened, will retry next cycle"); time.sleep(CONFIG["POLL_SEC"]); continue
+                    if not STATE.get("first_real_trade_done", False): STATE["first_real_trade_done"] = True; log(f"FIRST REAL TRADE DONE (via Side Hustle) - Next trade go use Step +0.005 per +$8 from $10")
+                STATE["open_position"] = {"side": side_dest, "entry": price, "sl": side_mental, "real_sl": side_real, "tp": side_tp, "certainty": certainty, "is_sure": False, "be_done": False, "be_level": 0, "mental_warned": False, "addon_done": True, "addon_qty": 0.0, "total_qty": qty, "is_side_hustle": True}; STATE["trades_today"] += 1; STATE["last_trade_time"] = now_utc(); STATE["side_hustles"] += 1; STATE["last_side_hustle_time"] = now_utc(); log(f"ORDER PLACED SIDE-HUSTLE ({mode}) {side_dest} - Chop Quick 1.5x TP, No Add-on, BE + Trailing still dey protect - LONG+SHORT Ready")
+            elif not all_pass and not side_ok and not STATE["open_position"]:
+                log(f"BLOCK/WARY MAIN: {'; '.join(failed)} {control_reason} | SIDE: {side_reason} - Bot still alive, will trade next cycle")
             if (now_utc() - last_heartbeat).total_seconds() > CONFIG["HEARTBEAT_MIN"] * 60: log(f"HEARTBEAT OK - MODE {mode} CROSS - Bal ${bal_show:.2f} PnL ${STATE['pnl']:.2f}"); last_heartbeat = now_utc()
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
