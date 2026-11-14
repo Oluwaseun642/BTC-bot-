@@ -1,11 +1,12 @@
 # ============================================================
-# BTC SWEEP BOT - V13.8 FINAL - MAIN + SIDE HUSTLE + LIVE WORLDWIDE
+# BTC SWEEP BOT - V13.9 FINAL - V13.1 CERTAINTIES + LIVE WORLDWIDE + MAIN + SIDE HUSTLE
 # MAIN: Certainties / News = Lifestyle | 80%+ Agree 5+ | MaxTrade 20 -> SURE 85-90-95% | MaxLoss 5 -> SURE 90-95% | Cooldown 5min
 # Balance -2% -> Calm 20min -> Back to Normal 80%
 # LONG + SHORT BOTH - Certainty Decide Side, No One-Side Bias
 # FLIP Boss + MentalSL FRONT + RealBackup BEHIND $75 GAP + BE Ladder + Trailing Early
 # ADD-ON: Hunt No Be Flip, Bal >= $10 REAL, Once Per Position, Same Side Same Qty - ONLY WHEN MAIN DEY RUN
 # SIDE HUSTLE: Liq Map Hunt - ONLY WHEN NO POSITION + MAIN FAIL + Cert 60-79% + Price Move + Hunt Confirm - TP 1.5x Quick
+# CERTAINTIES V13.1 SOFT: DXY 0.05% NQ/SPX 0.05% GOLD 0.15% OI 0.20% LIQ 0.10% + BTC Momentum Fallback - NO MORE 2/2 BLOCK
 # LIVE WORLDWIDE: NO HARDCODE, NO FAKE NEUTRAL - UNKNOWN != NEUTRAL - If 1 source fail, check elsewhere same cycle
 # CROSS MARGIN ON - Whole Balance Back Position + Add-on + Side Hustle
 # QTY: First REAL 0.002 50x | After: +0.005 per +$8 from $10 Upwards | $9-10 Raise = Still +0.005 Once
@@ -21,7 +22,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.8 - PAPER till Sun 8:30pm WAT, then REAL", 200
+    def _health(): return "BOT ALIVE V13.9 - PAPER till Sun 8:30pm WAT, then REAL", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -157,7 +158,7 @@ def close_real_position(side, qty):
         res = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Sell" if side == "LONG" else "Buy", "orderType": "Market", "qty": str(qty), "timeInForce": "GTC"}); log(f"REAL POSITION CLOSED VIA FLIP {side} Qty {qty} Bybit: {res}"); return True
     except Exception as e: log(f"REAL CLOSE ERROR {e}"); return False
 
-# ========== V13.8 LIVE WORLDWIDE - NO HARDCODE, NO FAKE NEUTRAL ==========
+# ========== V13.9 LIVE WORLDWIDE - NO HARDCODE, NO FAKE NEUTRAL ==========
 def fetch_live_multi(symbols_yahoo, symbols_stooq):
     for sym in symbols_yahoo:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
@@ -187,7 +188,6 @@ def get_price_live():
     if STATE["last_price"]: return STATE["last_price"], "LastPrice-Cached"
     return 0.0, "NO-PRICE"
 def get_klines_live(interval, limit):
-    # Bybit -> Binance fallback, same format
     try:
         r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5); kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl], "Bybit"
     except: pass
@@ -271,41 +271,57 @@ def get_news_score():
         move = (kl[-1]["close"] - kl[0]["close"]) / kl[0]["close"] * 100
         if abs(move) >= 0.8: return True, 85.0, f"VOL SPIKE {move:.2f}% in 15m"
     return False, 0, ""
+
+# ========== V13.9 CERTAINTIES - V13.1 SOFT LOGIC - HARSH REMOVED ==========
 def get_signals(price, macro, klines_1m, asian_hunt, session_hunt):
     signals = []
     if macro.get("DXY_CHG_STATUS") == "UNKNOWN": signals.append(("DXY_LEVEL", "UNKNOWN"))
-    elif macro["DXY_CHG"] > 0.10: signals.append(("DXY_LEVEL", "SHORT"))
-    elif macro["DXY_CHG"] < -0.10: signals.append(("DXY_LEVEL", "LONG"))
+    elif macro["DXY_CHG"] > 0.05: signals.append(("DXY_LEVEL", "SHORT"))
+    elif macro["DXY_CHG"] < -0.05: signals.append(("DXY_LEVEL", "LONG"))
     else: signals.append(("DXY_LEVEL", "NEUTRAL"))
     if macro.get("NQ_CHG_STATUS") == "UNKNOWN": signals.append(("NQ_MOMENTUM", "UNKNOWN"))
-    elif macro["NQ_CHG"] > 0.20: signals.append(("NQ_MOMENTUM", "LONG"))
-    elif macro["NQ_CHG"] < -0.20: signals.append(("NQ_MOMENTUM", "SHORT"))
+    elif macro["NQ_CHG"] > 0.05: signals.append(("NQ_MOMENTUM", "LONG"))
+    elif macro["NQ_CHG"] < -0.05: signals.append(("NQ_MOMENTUM", "SHORT"))
     else: signals.append(("NQ_MOMENTUM", "NEUTRAL"))
     if macro.get("SPX_CHG_STATUS") == "UNKNOWN": signals.append(("SPX_MOMENTUM", "UNKNOWN"))
-    elif macro["SPX_CHG"] > 0.20: signals.append(("SPX_MOMENTUM", "LONG"))
-    elif macro["SPX_CHG"] < -0.20: signals.append(("SPX_MOMENTUM", "SHORT"))
+    elif macro["SPX_CHG"] > 0.05: signals.append(("SPX_MOMENTUM", "LONG"))
+    elif macro["SPX_CHG"] < -0.05: signals.append(("SPX_MOMENTUM", "SHORT"))
     else: signals.append(("SPX_MOMENTUM", "NEUTRAL"))
     if macro.get("GOLD_CHG_STATUS") == "UNKNOWN": signals.append(("GOLD_AFTER_SWEEP", "UNKNOWN"))
-    elif macro["GOLD_CHG"] > 0.50: signals.append(("GOLD_AFTER_SWEEP", "SHORT"))
-    elif macro["GOLD_CHG"] < -0.30: signals.append(("GOLD_AFTER_SWEEP", "LONG"))
+    elif macro["GOLD_CHG"] > 0.15: signals.append(("GOLD_AFTER_SWEEP", "SHORT"))
+    elif macro["GOLD_CHG"] < -0.10: signals.append(("GOLD_AFTER_SWEEP", "LONG"))
     else: signals.append(("GOLD_AFTER_SWEEP", "NEUTRAL"))
     if macro.get("OI_CHG_STATUS") == "UNKNOWN": signals.append(("OI_DIVERGENCE", "UNKNOWN"))
     elif klines_1m and len(klines_1m) >= 5:
         pc = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
-        if macro["OI_CHG"] > 0.5 and pc < -0.2: signals.append(("OI_DIVERGENCE", "SHORT"))
-        elif macro["OI_CHG"] < -0.5 and pc > 0.2: signals.append(("OI_DIVERGENCE", "LONG"))
+        if macro["OI_CHG"] > 0.20 and pc < -0.05: signals.append(("OI_DIVERGENCE", "SHORT"))
+        elif macro["OI_CHG"] < -0.20 and pc > 0.05: signals.append(("OI_DIVERGENCE", "LONG"))
+        elif macro["OI_CHG"] > 0.80: signals.append(("OI_DIVERGENCE", "SHORT"))
+        elif macro["OI_CHG"] < -0.80: signals.append(("OI_DIVERGENCE", "LONG"))
         else: signals.append(("OI_DIVERGENCE", "NEUTRAL"))
     else: signals.append(("OI_DIVERGENCE", "UNKNOWN"))
     if not klines_1m: signals.append(("LIQ_SWEEP", "UNKNOWN"))
     elif len(klines_1m) >= 3:
-        last = klines_1m[-1]; wd = last["close"] - last["low"]; wu = last["high"] - last["close"]; thr = price * 0.002
-        if wd > thr and wd > wu * 1.5: signals.append(("LIQ_SWEEP", "LONG"))
-        elif wu > thr and wu > wd * 1.5: signals.append(("LIQ_SWEEP", "SHORT"))
-        else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
+        last = klines_1m[-1]; wd = last["close"] - last["low"]; wu = last["high"] - last["close"]; thr = price * 0.001
+        if wd > thr and wd > wu * 1.2: signals.append(("LIQ_SWEEP", "LONG"))
+        elif wu > thr and wu > wd * 1.2: signals.append(("LIQ_SWEEP", "SHORT"))
+        else:
+            if len(klines_1m) >= 5:
+                pc5 = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
+                if pc5 > 0.10: signals.append(("LIQ_SWEEP", "LONG"))
+                elif pc5 < -0.10: signals.append(("LIQ_SWEEP", "SHORT"))
+                else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
+            else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
     else: signals.append(("LIQ_SWEEP", "UNKNOWN"))
     signals.append(("ASIAN_LIQ_HUNT", asian_hunt if asian_hunt in ("LONG","SHORT") else ("UNKNOWN" if asian_hunt=="UNKNOWN" else "NEUTRAL")))
     signals.append(("SESSION_REOPEN_HUNT", session_hunt if session_hunt in ("LONG","SHORT") else ("UNKNOWN" if session_hunt=="UNKNOWN" else "NEUTRAL")))
+    asian_val = signals[6][1]; sess_val = signals[7][1]
+    if asian_val == "NEUTRAL" and sess_val == "NEUTRAL" and klines_1m and len(klines_1m) >= 15:
+        pc15 = (klines_1m[-1]["close"] - klines_1m[-15]["close"]) / klines_1m[-15]["close"] * 100
+        if pc15 > 0.15: signals[6] = ("ASIAN_LIQ_HUNT", "LONG"); signals[7] = ("SESSION_REOPEN_HUNT", "LONG")
+        elif pc15 < -0.15: signals[6] = ("ASIAN_LIQ_HUNT", "SHORT"); signals[7] = ("SESSION_REOPEN_HUNT", "SHORT")
     return signals
+
 def decide(signals):
     longs = sum(1 for _, v in signals if v == "LONG"); shorts = sum(1 for _, v in signals if v == "SHORT"); unknowns = sum(1 for _, v in signals if v == "UNKNOWN"); decided = longs + shorts
     if longs > shorts: dest, agree = "LONG", longs
@@ -459,7 +475,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         else: p["mental_warned"] = False
     return False
 def main():
-    log("BOT V13.8 STARTED - MAIN Lifestyle + SIDE HUSTLE + LIVE WORLDWIDE NO HARDCODE NO FAKE NEUTRAL + ADD-ON + CROSS + LONG+SHORT | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + QTY First 0.002 + Step +0.005 per +$8 from $10 + Paper till Sun 8:30pm WAT -> Auto REAL")
+    log("BOT V13.9 STARTED - V13.1 SOFT CERTAINTIES + LIVE WORLDWIDE + MAIN + SIDE HUSTLE + ADD-ON + CROSS + LONG+SHORT | Mental FRONT + Real BEHIND $75 + Flip Boss + BE Ladder + Trailing Early + QTY First 0.002 + Step +0.005 per +$8 from $10 + Paper till Sun 8:30pm WAT -> Auto REAL")
     last_heartbeat = now_utc()
     while True:
         try:
