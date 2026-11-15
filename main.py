@@ -1,30 +1,19 @@
 # ============================================================
-# BTC SWEEP BOT - V13.15.6 FINAL - HUNTER MODE + WORLD MARKETS + BYBIT SYNC + MARKET TRIGGER
-# PAPER TILL 2pm WAT (13:00 UTC 15 Nov 2026), THEN AUTO REAL
-# PATCH V13.15.6:
-#   - HUNT TRIGGER NOW = Conditional MARKET, no be Limit
-#     orderType Market, NO price field, triggerPrice = hunt_price, triggerBy LastPrice
-#     When market touch trigger, Bybit fill at market immediately, no miss
-#   - CROSS + Conditional Hidden still dey: tradeMode 0 = CROSS
-# FIXES FROM V13.15.3:
-#   - Bybit reject: triggerDirection, tpslMode Full, positionIdx 0 added
-#   - Fake HOLDING: check retCode==0 + orderId before set open_position
-#   - Sync every cycle: /v5/position/list, Bybit na truth
-#   - Cancel hunt by orderId only, no cancel-all
-#   - Close REAL before record_close
-#   - Fake hunt fill abs<50 removed
-# NEW HUNTER MODE (BOTH LONG & SHORT):
-#   - Early Join: if price dey go AGAINST certainties + Liq Map pool ahead + World Markets confirm,
-#     join hunters EARLY where bot dey (e.g $63,900 to $65,800), no wait till target
-#   - If miss early (price < $300 to target): HIDE 15 min, no chase, then check certainties vote
-#   - Hunt Block: never enter SHORT while hunters LONG, never LONG while hunters SHORT
-#   - Pre-Hunt Lock: 15 min before session sweep, NO new order
-#   - Profit Lock: hunt against us + profit over fees -> TAKE PROFIT NOW, no wait SL
-#   - Emergency: ONLY if 3 signs together (Divergence + Liq Pool + World confirm), no wick FOMO
-#   - Trailing ALWAYS active: Normal $300/$300, Hunter $200/$200
-#   - Revenge Lock 10 min ONLY after loss/escape/SL, NO lock after TP win
-#   - World Markets: Nikkei, Hang Seng, FTSE, DAX, NQ, SPX, DXY, GOLD every 60 sec
-#   - 1 trade at a time, NEVER_STOP True, CROSS, One-Way
+# BTC SWEEP BOT - V13.15.8 FINAL - HAFFAR CLEAN REAL START
+# PATCH V13.15.8:
+#   - AUTO_SWITCH = 18:00 UTC = 7PM WAT. PAPER till 7pm, then AUTO REAL. No hold-back.
+#   - FRESH REAL START: On switch, RESET pnl/wins/losses/trades/fake_holding/cooldown/hide/revenge to 0/None.
+#     No PAPER fake loss, no fake HOLDING go carry enter REAL progression.
+#   - SYNC BYBIT ON SWITCH: Fetch real balance + real position. If position dey, adopt am. If none, start fresh.
+#   - PAPER FAIL BLOCK REMOVED: Paper PnL < -2 no go block REAL again. Yesterday wahala cleared.
+#   - TRAILING: Trigger $500, Dist $50 (Best + $50 SHORT / Best - $50 LONG). NORMAL + HUNTER.
+#   - COOLDOWN: 1 min SMART RE-CHECK only. After any close, check certainties + hunters 1 min, if still good re-enter at market.
+#   - WORLD MARKETS: Nikkei, HangSeng, FTSE, DAX, NQ, SPX, DXY, GOLD every 60 sec, certainties decide.
+#   - LIQ MAP EVERY CYCLE: LongLiq / ShortLiq / Asia Low/High every 5 sec cycle, hunt detection via liq + world.
+#   - NO BLIND TRADE: Gates Agree 4+ Cert 75%+ Score 0.60+ must pass, else BLOCK.
+#   - MAGIC SL: Emergency $400, Tight SL $500, Profit Lock if hunt against but profit > $50.
+#   - DYNAMIC QTY: Bal < $20 = 0.01, +0.005 per +$8, max 0.100.
+#   - CROSS + Conditional Hidden + Market Trigger still dey.
 # ============================================================
 
 import time, requests, hmac, hashlib, os, threading, json
@@ -34,7 +23,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.15.6 - HUNTER MODE + MARKET TRIGGER - PAPER TILL 2PM WAT THEN REAL", 200
+    def _health(): return "BOT ALIVE V13.15.8 - TRAILING $500/$50 + 7PM WAT REAL FRESH START - NO HOLD BACK", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -55,7 +44,7 @@ print("Self-Ping ON - every 4 min", flush=True)
 
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
-    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 13, 0, tzinfo=timezone.utc),
+    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 18, 0, tzinfo=timezone.utc),
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
     "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
     "MIN_CERTAINTY_NORMAL": 75.0, "MIN_AGREE_NORMAL": 4, "MIN_SCORE_NORMAL": 0.60,
@@ -63,8 +52,8 @@ CONFIG = {
     "TOTAL_SIGNALS": 8, "SURE_CERTAINTY": 95.0, "SURE_AGREE": 6,
     "NEWS_ENABLED": True, "MIN_CERTAINTY_NEWS": 75.0, "MIN_AGREE_NEWS": 4, "MIN_SCORE_NEWS": 0.60,
     "WIDE_SL_USD": 1200.0,
-    "TRAILING_ENABLED": True, "TRAIL_TRIGGER_MOVE_USD": 300.0, "TRAIL_DIST_USD": 300.0,
-    "HUNTER_TRAIL_TRIGGER": 200.0, "HUNTER_TRAIL_DIST": 200.0,
+    "TRAILING_ENABLED": True, "TRAIL_TRIGGER_MOVE_USD": 500.0, "TRAIL_DIST_USD": 50.0,
+    "HUNTER_TRAIL_TRIGGER": 500.0, "HUNTER_TRAIL_DIST": 50.0,
     "HUNTER_SL_USD": 400.0, "HUNTER_TP_MIN_USD": 600.0,
     "FEE_RATE": 0.0006, "SLIPPAGE_PCT": 0.0005,
     "FLIP_ENABLED": True, "FLIP_CERTAINTY": 75.0, "FLIP_AGREE": 4,
@@ -82,7 +71,9 @@ CONFIG = {
     "TP_DIST_USD": 1500.0,
     "PRE_HUNT_LOCK_MIN": 15,
     "HIDE_AFTER_MISS_MIN": 15,
-    "REVENGE_LOCK_MIN": 10,
+    "REVENGE_LOCK_MIN": 1,
+    "SMART_RECHECK_MIN": 1,
+    "COOLDOWN_MIN": 1,
     "HUNT_MIN_LIQ_USD": 2000000.0,
     "HUNT_EARLY_MIN_DIST_USD": 300.0,
     "EMERGENCY_AGAINST_USD": 400.0,
@@ -95,7 +86,7 @@ STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "day_start_bala
     "last_price": 0.0, "cross_margin_set": False, "last_qty": 0.010, "last_balance_checked": 0.0,
     "last_macro": {"DXY_CHG": 0.0, "NQ_CHG": 0.0, "SPX_CHG": 0.0, "GOLD_CHG": 0.0, "OI_CHG": 0.0},
     "last_liq_map": {"long_liq": 0.0, "short_liq": 0.0, "asia_low": 0.0, "asia_high": 0.0, "hunt": "NONE"}, "last_session": "NONE",
-    "hide_until": None, "revenge_until": None, "last_close_reason": None, "last_close_time": None,
+    "hide_until": None, "revenge_until": None, "cooldown_until": None, "last_close_reason": None, "last_close_time": None,
     "world": {}, "world_last_fetch": 0, "paper_start_pnl": 0.0, "paper_fake_holding": 0, "paper_pass": True}
 
 def now_utc(): return datetime.now(timezone.utc)
@@ -195,7 +186,6 @@ def get_dynamic_qty(price):
     else: log(f"QTY TIER CHECK: Bal ${bal:.2f} -> Steps {steps} = Qty {qty}")
     STATE["last_qty"] = qty; return qty
 
-# ===== FIXED ORDERS V13.15.6 - MARKET TRIGGER =====
 def place_real_order(side, price, wide_sl, tp, qty, is_addon=False):
     if not API_KEY or not API_SECRET: log("REAL ORDER BLOCKED: No API keys"); return False
     try:
@@ -213,8 +203,6 @@ def place_real_order(side, price, wide_sl, tp, qty, is_addon=False):
     except Exception as e: log(f"REAL ORDER ERROR {e}"); return False
 
 def place_hunt_limit(side, hunt_price, qty):
-    # PATCHED V13.15.6: Conditional MARKET trigger at market price, no Limit, no price field
-    # Bybit: when LastPrice touch triggerPrice, fill at MARKET immediately, no miss
     if not API_KEY: return False, None
     try:
         direction = 1 if side == "SHORT" else 2
@@ -222,7 +210,6 @@ def place_hunt_limit(side, hunt_price, qty):
             "category": "linear", "symbol": CONFIG["SYMBOL"],
             "side": "Buy" if side == "LONG" else "Sell",
             "orderType": "Market",
-            # NO price field for Market - Bybit go fill at market price when trigger hit
             "triggerPrice": str(round(hunt_price, 1)),
             "triggerBy": "LastPrice",
             "triggerDirection": direction,
@@ -548,13 +535,10 @@ def record_close(side, entry, close_price, qty, reason):
     net = gross - total; old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
     if STATE["mode"] == "PAPER": STATE["balance"] += net; STATE["pnl"] += net
     else: STATE["pnl"] += net
-    if reason in ("WIDE_SL", "HUNTER_ESCAPE", "HUNTER_EMERGENCY"):
-        STATE["revenge_until"] = now_utc() + timedelta(minutes=CONFIG["REVENGE_LOCK_MIN"])
-        STATE["last_close_reason"] = reason; STATE["last_close_time"] = now_utc()
-        log(f"REVENGE LOCK ON: 10 min rest after {reason} loss, no new trade")
-    else:
-        STATE["revenge_until"] = None
-        STATE["last_close_reason"] = reason; STATE["last_close_time"] = now_utc()
+    STATE["cooldown_until"] = now_utc() + timedelta(minutes=CONFIG["COOLDOWN_MIN"])
+    STATE["revenge_until"] = STATE["cooldown_until"]
+    STATE["last_close_reason"] = reason; STATE["last_close_time"] = now_utc()
+    log(f"SMART RECHECK ON: 1 min re-check after {reason} - check certainties + hunters, if still good re-enter at market, no miss entry")
     if reason == "TP": STATE["wins"] += 1; log(f"TP HIT +${net:.2f} - Closed {side} at ${close_price:.0f}")
     elif reason == "TRAILING": STATE["wins"] += 1; log(f"TRAILING PROFIT +${net:.2f} - Closed {side} at ${close_price:.0f}")
     elif reason == "FLIP": STATE["flips"] += 1; log(f"FLIP CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f}")
@@ -593,17 +577,17 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         record_close(side, entry, price, total_qty, "TP"); return False
     if CONFIG["TRAILING_ENABLED"] and favour_move >= trail_trigger:
         if not p.get("trailing_active"):
-            p["trailing_active"] = True; log(f"TRAILING TRIGGERED 👌 {side}: Favour ${favour_move:.0f} >= ${trail_trigger:.0f} - Trailing don take over BE")
+            p["trailing_active"] = True; log(f"TRAILING TRIGGERED 👌 {side}: Favour ${favour_move:.0f} >= ${trail_trigger:.0f} - Trailing don take over BE, SL = Best + $50")
         trail_price = best - trail_dist if side == "LONG" else best + trail_dist
         p["trailing_price"] = trail_price
         if p.get("last_trail_update", 0) != round(trail_price):
             if side == "LONG" and trail_price > p.get("wide_sl", -1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f}"); update_real_sl(trail_price, side)
+                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} (Best - $50)"); update_real_sl(trail_price, side)
             elif side == "SHORT" and trail_price < p.get("wide_sl", 1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f}"); update_real_sl(trail_price, side)
+                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} (Best + $50)"); update_real_sl(trail_price, side)
         hit_trailing = (price <= trail_price if side == "LONG" else price >= trail_price)
         if hit_trailing:
-            log(f"TRAILING HIT - Close WITH PROFIT {side} at ${price:.0f}")
+            log(f"TRAILING HIT - Close WITH PROFIT {side} at ${price:.0f} - Locked profit, 1 min smart recheck then re-enter if still good")
             if STATE["mode"] == "REAL": close_real_position(side, total_qty)
             record_close(side, entry, price, total_qty, "TRAILING"); return False
     else:
@@ -617,7 +601,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
     if hunt_with and pnl_points > 0:
         log(f"🎉 HUNT WITH US, profit +${pnl_points:.0f} — HOLD, trailing dey follow hunters")
     if hunt_against and against_move >= CONFIG["EMERGENCY_AGAINST_USD"] and not p.get("trailing_active"):
-        log(f"🚨 HUNTER AGAINST US! Hunters {hunt_dir}, we {side}, Against ${against_move:.0f} — EMERGENCY CLOSE, no wait WideSL $1200")
+        log(f"🚨 HUNTER AGAINST US! Hunters {hunt_dir}, we {side}, Against ${against_move:.0f} — EMERGENCY CLOSE, no wait WideSL $1200 - 1 min recheck then re-enter if hunters don calm")
         if STATE["mode"] == "REAL": close_real_position(side, total_qty)
         record_close(side, entry, price, total_qty, "HUNTER_ESCAPE"); return False
     elif hunt_against and against_move >= 150 and not p.get("trailing_active"):
@@ -658,7 +642,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
     return False
 
 def main():
-    log("BOT V13.15.6 STARTED - HUNTER MODE + WORLD MARKETS + BYBIT SYNC + MARKET TRIGGER | PAPER TILL 2PM WAT (13:00 UTC) THEN AUTO REAL | Bal $24.33 | WIDE SL $1200 + TRAILING $300 + ADD-ON SAFE + CROSS")
+    log("BOT V13.15.8 STARTED - TRAILING $500/$50 + 7PM WAT REAL FRESH START + NO HOLD BACK | PAPER TILL 7PM WAT THEN AUTO REAL | Bal $24.33 | WIDE SL $1200 + TRAILING $500/$50 + ADD-ON SAFE + CROSS")
     log("RESTART FRESH: Logs cleared, fetching everything live, no old fake HOLDING")
     STATE["paper_start_pnl"] = STATE["pnl"]
     last_heartbeat = now_utc()
@@ -668,22 +652,23 @@ def main():
             if new_mode != STATE["mode"]:
                 if new_mode == "REAL":
                     paper_pnl_now = STATE["pnl"] - STATE["paper_start_pnl"]
-                    log(f"*** CHECKING PAPER TEST BEFORE REAL *** Paper PnL ${paper_pnl_now:.2f} FakeHolding {STATE.get('paper_fake_holding',0)}")
-                    if paper_pnl_now < -2.0 or STATE.get("paper_fake_holding", 0) > 0:
-                        log(f"⛔ PAPER TEST FAIL: PnL ${paper_pnl_now:.2f} or FakeHolding {STATE.get('paper_fake_holding',0)} — STAY PAPER, NO REAL TODAY.")
-                        os.environ["REAL_MODE"] = "false"
-                        STATE["mode"] = "PAPER"
-                        time.sleep(60); continue
-                    bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL 2PM WAT *** Real Balance: ${bal:.2f} USDT - Fetching live positions/orders, CROSS ON ***")
+                    # V13.15.8 - NO HOLD BACK, FRESH REAL START - Paper result no block REAL
+                    log(f"*** PAPER DONE Paper PnL ${paper_pnl_now:.2f} - SWITCHING TO REAL FRESH, NO FAKE LOSS CARRY OVER ***")
+                    # FRESH START: Reset all PAPER stats, no fake loss enter REAL
+                    STATE["pnl"] = 0.0; STATE["wins"] = 0; STATE["losses"] = 0; STATE["breakevens"] = 0; STATE["flips"] = 0; STATE["addons"] = 0; STATE["trades_today"] = 0; STATE["losses_today"] = 0
+                    STATE["paper_fake_holding"] = 0; STATE["paper_start_pnl"] = 0.0; STATE["open_position"] = None; STATE["pending_hunt"] = None
+                    STATE["hide_until"] = None; STATE["revenge_until"] = None; STATE["cooldown_until"] = None; STATE["last_close_reason"] = None; STATE["last_close_time"] = None
+                    bal = get_real_balance(); STATE["day_start_balance"] = bal
+                    log(f"*** AUTO SWITCH TO REAL 7PM WAT *** Real Balance: ${bal:.2f} USDT - Fetching live positions/orders, CROSS ON - FRESH START ***")
                     rp = get_real_position_sync()
-                    log(f"REAL SYNC AT SWITCH: Bybit position = {rp} (must be None before first real trade)")
+                    log(f"REAL SYNC AT SWITCH: Bybit position = {rp} (must be None before first real trade, if dey, we adopt am)")
                     if rp is not None:
                         log(f"REAL POSITION ALREADY DEY {rp} — Adopting am, no new trade till e close")
                         STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"]=="SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"]=="SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "trailing_price": None, "addon_done": False, "total_qty": rp["size"]}
                     STATE["mode"] = "REAL"
                     if STATE.get("pending_hunt"): STATE["pending_hunt"] = None
                     STATE["cross_margin_set"] = False
-                    STATE["hide_until"] = None; STATE["revenge_until"] = None
+                    STATE["hide_until"] = None; STATE["revenge_until"] = None; STATE["cooldown_until"] = None
                 else:
                     STATE["mode"] = new_mode
             mode = STATE["mode"]; set_cross_margin(); refresh_balance("CYCLE-START")
@@ -720,24 +705,21 @@ def main():
                 hunt_dir = "NONE"
             is_pre_hunt, pre_reason = is_pre_hunt_window()
             is_hidden = STATE.get("hide_until") and now_utc() < STATE["hide_until"]
-            is_revenge = STATE.get("revenge_until") and now_utc() < STATE["revenge_until"]
+            is_revenge = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
             if is_hidden: log(f"🙈 HIDE MODE till {STATE['hide_until'].strftime('%H:%M:%S')} — No new trade, wait hunt finish, then check certainties")
-            if is_revenge: log(f"😤 REVENGE LOCK till {STATE['revenge_until'].strftime('%H:%M:%S')} — Rest after loss, no revenge trade")
+            if is_revenge: log(f"⏳ SMART RECHECK till {STATE['cooldown_until'].strftime('%H:%M:%S')} — 1 min check: certainties still go our way? hunters don take over? If yes, re-enter at market immediately")
             flipped = False
             if STATE["open_position"]:
                 flipped = manage_position(price, klines_1m, qty, dest, certainty, agree, macro, long_liq, short_liq, hunt_dir, hunt_target, world)
                 if flipped: log(f"FLIP DONE - Next cycle go open new {dest} trade if gates still pass")
-            # --- PENDING HUNT: MARKET TRIGGER - Bybit triggers, bot syncs ---
             if STATE.get("pending_hunt") and not STATE["open_position"]:
                 ph = STATE["pending_hunt"]; elapsed_min = (now_utc() - ph["time"]).total_seconds() / 60
                 if mode == "REAL":
-                    # REAL: Don't fake-fill. Check Bybit position - if Bybit triggered, adopt it
                     rp2 = get_real_position_sync()
                     if rp2 is not None and rp2["side"] == ph["side"]:
                         log(f"HUNT MARKET TRIGGER FILLED BY BYBIT {ph['side']} @ ${rp2['entry']:.0f} — Adopting Bybit position ✅")
                         STATE["pending_hunt"] = None
                         wide_sl, tp = calc_sl_tp_v1315(rp2["entry"], ph["side"])
-                        # Use Bybit SL/TP if present, else our calc
                         if rp2.get("sl"): wide_sl = float(rp2["sl"])
                         if rp2.get("tp"): tp = float(rp2["tp"])
                         STATE["open_position"] = {"side": ph["side"], "entry": rp2["entry"], "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": rp2["entry"], "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": rp2["size"]}
@@ -753,7 +735,6 @@ def main():
                     else:
                         log(f"HUNT MARKET TRIGGER WAITING {ph['side']} Trigger @ ${ph['hunt_price']:.0f} Elapsed {elapsed_min:.1f}/2 min — Bybit go trigger at market")
                 else:
-                    # PAPER: Simulate Market trigger - fill at market when price touches trigger
                     touched = (price >= ph["hunt_price"] if ph["side"] == "SHORT" else price <= ph["hunt_price"])
                     if touched:
                         log(f"HUNT MARKET TRIGGER FILLED (PAPER SIM) {ph['side']} Trigger @ ${ph['hunt_price']:.0f} Fill at market ${price:.0f}")
@@ -782,7 +763,7 @@ def main():
             log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
             log(f"WORLD Nikkei {world.get('NIKKEI',0):.2f}% HangSeng {world.get('HANG_SENG',0):.2f}% FTSE {world.get('FTSE',0):.2f}% DAX {world.get('DAX',0):.2f}%")
             log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} [{liq_src}] | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} EarlyHunt {hunt_dir} Target ${hunt_target:.0f} | Session {session_name} {session_hunt}")
-            log(f"V13.15.6 Hunter EarlyJoin + Hide + ProfitLock + World + BybitSync + MARKET TRIGGER | WideSL $1200 Trailing $300 Hunter $200")
+            log(f"V13.15.8 Trailing $500/$50 + 1Min Smart Recheck + Hunter + World + BybitSync + MARKET TRIGGER | WideSL $1200 Trailing $500/$50 Hunter $500/$50")
             log(f"Qty {qty} Bal ${bal_show:.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
             log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f} PaperStartPnL ${STATE['paper_start_pnl']:.2f}")
             if STATE["open_position"] and not flipped:
@@ -792,7 +773,7 @@ def main():
                 if is_hidden:
                     log("BLOCK: HIDE MODE — No trade, wait hunt finish")
                 elif is_revenge:
-                    log("BLOCK: REVENGE LOCK — Rest after loss")
+                    log("BLOCK: SMART RECHECK 1 MIN — Check certainties + hunters, if still good re-enter at market, no miss entry")
                 elif is_pre_hunt and hunt_dir == "NONE":
                     log(f"BLOCK: ⛔ PRE-HUNT LOCK {pre_reason} — 15 min to sweep, NO NEW ORDER, wait hunters show hand")
                 elif hunt_dir in ("LONG", "SHORT"):
