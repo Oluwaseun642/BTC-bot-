@@ -1,13 +1,14 @@
 # ============================================================
-# BTC SWEEP BOT - V13.15.1 FINAL - WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE
-# PAPER till Sun 8:30pm WAT (19:30 UTC 15 Nov) -> AUTO REAL
+# BTC SWEEP BOT - V13.15.2 FINAL - REAL NOW + WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE
+# REAL NOW - No wait till 8:30pm, bot don behave well for PAPER
 # EXTRACTED FROM V13.11: Certainties V13.1 + Dynamic Agree + Live Worldwide
 #   Yahoo/Stooq + Bybit/Binance/CoinGecko + Macro + Liq Map + Asian/Session Hunt
 #   News Vol Spike + Flip Boss + CROSS + Balance Check Every Cycle
 # DUMPED FROM V13.11: BE Ladder, BE Over Fees, Trailing Early, Side Hustle,
 #   Max Trade 20, Max Loss 5, Calm 20min, Cooldown, Tight SL 0.85%,
 #   Addon Double, Paper 0.002, TP Mult / RR Gates
-# NEW V13.15.1:
+# NEW V13.15.2:
+#   REAL NOW - AUTO_SWITCH don pass, bot go trade REAL immediately after deploy
 #   NEVER_STOP True, No Max Trade, No Max Loss
 #   QTY: Bal $20 = 0.010 | Every +$8 Bal = +0.005 Qty | $20->0.010, $28->0.015, $36->0.020, $44->0.025...
 #   ENTRY: Hunt Limit 2-min, if no fill cancel + Market enter, Normal Active Qty only
@@ -18,7 +19,6 @@
 #   ADD-ON SAFE PROTOCOL V13.15.1: Max 1, Wick $500-$900 + Certainty never flip + Liq Map confirm
 #     + BALANCE FIT CHECK: Only if (TotalQty+AddQty)*Price <= Bal*50x*0.90
 #     If Bal no fit -> SKIP Add-On, NO ERROR, NO STOP, bot continue trading normal
-#     If Bybit reject -> SKIP, NO ERROR, NO STOP
 #   MARGIN: CROSS | All trades: Conditional Hidden | One-Way Mode Only
 #   FLIP ONLY | Direction only from Certainty 75%+
 # ============================================================
@@ -31,7 +31,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.15.1 - PAPER till Sun 8:30pm WAT, then REAL - WIDE SL + TRAILING ONLY + ADD-ON SAFE", 200
+    def _health(): return "BOT ALIVE V13.15.2 - REAL NOW - WIDE SL + TRAILING ONLY + ADD-ON SAFE", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -51,10 +51,11 @@ def _self_ping_loop():
 threading.Thread(target=_self_ping_loop, daemon=True).start()
 print("Self-Ping ON - every 4 min", flush=True)
 
-# ================= CONFIG V13.15.1 =================
+# ================= CONFIG V13.15.2 - REAL NOW =================
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
-    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc),
+    # REAL NOW - Switch time don pass, bot go go REAL immediately after deploy
+    "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 0, 0, tzinfo=timezone.utc),
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
     "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
     "MIN_CERTAINTY_NORMAL": 75.0, "MIN_AGREE_NORMAL": 4, "MIN_SCORE_NORMAL": 0.60,
@@ -66,7 +67,6 @@ CONFIG = {
     "FEE_RATE": 0.0006, "SLIPPAGE_PCT": 0.0005,
     "FLIP_ENABLED": True, "FLIP_CERTAINTY": 75.0, "FLIP_AGREE": 4,
     "NEVER_STOP": True,
-    # ADD-ON SAFE - Max 1, Balance Fit Check
     "ADDON_ENABLED": True, "ADDON_MAX_PER_POSITION": 1,
     "ADDON_WICK_MIN_USD": 500.0, "ADDON_WICK_MAX_USD": 900.0,
     "ADDON_BUFFER_PCT": 0.90,
@@ -431,7 +431,6 @@ def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, sid
     if flip_dest == "LONG": return macro["DXY_CHG"] < 0.05 or macro["NQ_CHG"] > 0
     else: return macro["DXY_CHG"] > 0.05 or macro["NQ_CHG"] < 0
 
-# ========== MANAGE - WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE ==========
 def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, macro, long_liq, short_liq):
     if not STATE["open_position"]: return False
     p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; total_qty = p.get("total_qty", qty)
@@ -470,7 +469,6 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
             return False
     else:
         if favour_move > 0: log(f"TRAILING SLEEP: Favour ${favour_move:.0f} < $300 trigger, Trailing never trigger yet, Wide SL ${p.get('wide_sl',0):.0f} dey protect")
-    # ===== PATCHED ADD-ON SAFE PROTOCOL V13.15.1 - START =====
     if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False):
         if CONFIG["ADDON_WICK_MIN_USD"] <= against_move <= CONFIG["ADDON_WICK_MAX_USD"]:
             is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE")
@@ -498,7 +496,6 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
                             log(f"ADD-ON PAPER SIM {side} Qty {qty} Total {p['total_qty']} - Same TP ${p['tp']:.0f} - Balance FIT check pass")
                 except Exception as e:
                     log(f"ADD-ON ERROR CAUGHT {e} - Skip Add-On, NO STOP, bot continue trading normal")
-    # ===== PATCHED ADD-ON SAFE PROTOCOL V13.15.1 - END =====
     hit_wide = (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"])
     if hit_wide and not p.get("trailing_active"):
         log(f"WIDE SL HIT: Price ${price:.0f} past Wide SL ${p['wide_sl']:.0f} - Emergency close, hunt too big, Trailing never trigger")
@@ -508,7 +505,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
     return False
 
 def main():
-    log("BOT V13.15.1 STARTED - PAPER till Sun 8:30pm WAT -> AUTO REAL | WIDE SL $1200 + TRAILING ONLY $300 + ADD-ON SAFE + CROSS + HIDDEN + QTY $20=0.010 +0.005 per +$8 | Certainties V13.1 + Live Worldwide Yahoo/Stooq + Liq Map + Flip Only | NEVER_STOP True")
+    log("BOT V13.15.2 STARTED - REAL NOW | WIDE SL $1200 + TRAILING ONLY $300 + ADD-ON SAFE + CROSS + HIDDEN + QTY $20=0.010 +0.005 per +$8 | Certainties V13.1 + Live Worldwide Yahoo/Stooq + Liq Map + Flip Only | NEVER_STOP True")
     last_heartbeat = now_utc()
     while True:
         try:
@@ -516,7 +513,7 @@ def main():
             if new_mode != STATE["mode"]:
                 STATE["mode"] = new_mode
                 if new_mode == "REAL":
-                    bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL *** Sun 8:30pm WAT reached - Real Balance met: ${bal:.2f} USDT - Bot go trade real now, CROSS Margin ON, good boy mode ON ***")
+                    bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL *** Real Balance met: ${bal:.2f} USDT - Bot go trade real now, CROSS Margin ON, good boy mode ON ***")
                     if STATE["open_position"]: log("Closing paper position before REAL switch"); STATE["open_position"] = None
                     if STATE["pending_hunt"]: log("Clearing paper pending hunt before REAL switch"); STATE["pending_hunt"] = None
                     STATE["cross_margin_set"] = False
@@ -573,7 +570,7 @@ def main():
             log(f"SIGNALS: {sig_str}")
             log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
             log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} [{liq_src}] | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} | Session {session_name} {session_hunt}")
-            log(f"V13.15.1 WideSL $1200 + Trailing $300 Only For Profits + Add-On SAFE + Flip Only + CROSS + Hidden")
+            log(f"V13.15.2 WideSL $1200 + Trailing $300 Only For Profits + Add-On SAFE + Flip Only + CROSS + Hidden")
             log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
             log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} Losses {STATE['losses_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
             if STATE["open_position"] and not flipped:
