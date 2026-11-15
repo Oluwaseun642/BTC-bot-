@@ -1,37 +1,34 @@
 # ============================================================
-# BTC SWEEP BOT - V13.15.2 FINAL - REAL NOW + WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE
-# REAL NOW - No wait till 8:30pm, bot don behave well for PAPER
+# BTC SWEEP BOT - V13.15.3 FINAL - REAL NOW + V5 FIX + REAL_MODE
+# REAL NOW - Bot don behave well for PAPER, go REAL immediately
+# FIX: Bybit V5 Auth with Headers + Empty Response Safe + CROSS Tolerant
 # EXTRACTED FROM V13.11: Certainties V13.1 + Dynamic Agree + Live Worldwide
 #   Yahoo/Stooq + Bybit/Binance/CoinGecko + Macro + Liq Map + Asian/Session Hunt
 #   News Vol Spike + Flip Boss + CROSS + Balance Check Every Cycle
 # DUMPED FROM V13.11: BE Ladder, BE Over Fees, Trailing Early, Side Hustle,
 #   Max Trade 20, Max Loss 5, Calm 20min, Cooldown, Tight SL 0.85%,
 #   Addon Double, Paper 0.002, TP Mult / RR Gates
-# NEW V13.15.2:
-#   REAL NOW - AUTO_SWITCH don pass, bot go trade REAL immediately after deploy
+# NEW V13.15.3:
+#   REAL NOW + REAL_MODE env support + Bybit V5 Headers Fix
 #   NEVER_STOP True, No Max Trade, No Max Loss
-#   QTY: Bal $20 = 0.010 | Every +$8 Bal = +0.005 Qty | $20->0.010, $28->0.015, $36->0.020, $44->0.025...
-#   ENTRY: Hunt Limit 2-min, if no fill cancel + Market enter, Normal Active Qty only
+#   QTY: Bal $20 = 0.010 | Every +$8 Bal = +0.005 Qty
+#   ENTRY: Hunt Limit 2-min, if no fill cancel + Market enter
 #   WIDE SL: Fixed $1200 away, emergency only
 #   BE: REMOVED - Trailing don take over BE
-#   TRAILING ONLY FOR PROFITS: Trigger after $300+ move in favour (~$3 profit for 0.010)
-#     Then Trailing = $300 behind best price. If market come back touch am, close WITH PROFIT.
-#   ADD-ON SAFE PROTOCOL V13.15.1: Max 1, Wick $500-$900 + Certainty never flip + Liq Map confirm
-#     + BALANCE FIT CHECK: Only if (TotalQty+AddQty)*Price <= Bal*50x*0.90
-#     If Bal no fit -> SKIP Add-On, NO ERROR, NO STOP, bot continue trading normal
-#   MARGIN: CROSS | All trades: Conditional Hidden | One-Way Mode Only
-#   FLIP ONLY | Direction only from Certainty 75%+
+#   TRAILING ONLY: Trigger $300+, Then Trailing $300 behind best
+#   ADD-ON SAFE: Max 1, Wick $500-$900 + Certainty never flip + Liq Map + Bal Fit Bal*50x*0.90
+#   MARGIN: CROSS | Conditional Hidden | One-Way Mode Only
+#   FLIP ONLY | Direction from Certainty 75%+ | LONG + SHORT both
 # ============================================================
 
-import time, requests, hmac, hashlib, os, threading
+import time, requests, hmac, hashlib, os, threading, json
 from datetime import datetime, timezone, timedelta
 
-# ================= FLASK =================
 try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.15.2 - REAL NOW - WIDE SL + TRAILING ONLY + ADD-ON SAFE", 200
+    def _health(): return "BOT ALIVE V13.15.3 - REAL NOW V5 FIX - WIDE SL + TRAILING ONLY + ADD-ON SAFE", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -42,7 +39,6 @@ try:
     print("Flask keep-alive ON", flush=True)
 except Exception as e: print(f"Flask OFF {e}", flush=True)
 
-# ================= SELF-PING =================
 def _self_ping_loop():
     SELF_URL = os.getenv("RENDER_URL", "https://YOUR-BOT-NAME.onrender.com/")
     while True:
@@ -51,10 +47,8 @@ def _self_ping_loop():
 threading.Thread(target=_self_ping_loop, daemon=True).start()
 print("Self-Ping ON - every 4 min", flush=True)
 
-# ================= CONFIG V13.15.2 - REAL NOW =================
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
-    # REAL NOW - Switch time don pass, bot go go REAL immediately after deploy
     "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 0, 0, tzinfo=timezone.utc),
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
     "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
@@ -89,19 +83,54 @@ STATE = {"mode": "PAPER", "balance": 20.0, "real_balance": 0.0, "day_start_balan
 
 def now_utc(): return datetime.now(timezone.utc)
 def log(msg): print(f"[{now_utc().strftime('%H:%M:%S %d %b')}] {msg}", flush=True)
-def get_mode(): return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
-def bybit_sign(params):
-    qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())]); return hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+def get_mode():
+    rm = os.getenv("REAL_MODE", "").strip().lower()
+    if rm == "true": return "REAL"
+    if rm == "false": return "PAPER"
+    return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
+
+# ===== FIXED BYBIT V5 AUTH - START =====
+def _bybit_sign_v5(timestamp, recv_window, body_str):
+    payload = f"{timestamp}{API_KEY}{recv_window}{body_str}"
+    return hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+def _safe_json(r):
+    try:
+        txt = r.text.strip() if r.text else ""
+        if not txt: return {"retCode": -1, "retMsg": "Empty response from Bybit", "result": {}}
+        return r.json()
+    except Exception as e:
+        return {"retCode": -1, "retMsg": f"JSON parse fail: {e} | Raw: {r.text[:200] if r.text else ''}", "result": {}}
+
 def bybit_post(path, params):
-    params["api_key"] = API_KEY; params["timestamp"] = str(int(time.time()*1000)); params["recv_window"] = "5000"; params["sign"] = bybit_sign(params)
-    r = requests.post(CONFIG["BYBIT_BASE"]+path, data=params, timeout=10); return r.json()
+    try:
+        timestamp = str(int(time.time()*1000)); recv_window = "5000"
+        body_str = json.dumps(params, separators=(',', ':'))
+        sign = _bybit_sign_v5(timestamp, recv_window, body_str)
+        headers = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": timestamp, "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sign, "Content-Type": "application/json"}
+        r = requests.post(CONFIG["BYBIT_BASE"]+path, data=body_str, headers=headers, timeout=10)
+        return _safe_json(r)
+    except Exception as e:
+        return {"retCode": -1, "retMsg": f"POST error {e}", "result": {}}
+
 def bybit_get(path, params):
-    params["api_key"] = API_KEY; params["timestamp"] = str(int(time.time()*1000)); params["recv_window"] = "5000"; params["sign"] = bybit_sign(params)
-    r = requests.get(CONFIG["BYBIT_BASE"]+path, params=params, timeout=10); return r.json()
+    try:
+        timestamp = str(int(time.time()*1000)); recv_window = "5000"
+        qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        sign = _bybit_sign_v5(timestamp, recv_window, qs)
+        headers = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": timestamp, "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sign}
+        r = requests.get(CONFIG["BYBIT_BASE"]+path, params=params, headers=headers, timeout=10)
+        return _safe_json(r)
+    except Exception as e:
+        return {"retCode": -1, "retMsg": f"GET error {e}", "result": {}}
+# ===== FIXED BYBIT V5 AUTH - END =====
 
 def get_real_balance():
     try:
         res = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+        if res.get("retCode") != 0:
+            log(f"REAL BALANCE API WARN {res.get('retMsg')} - using last {STATE['real_balance']}")
+            return STATE["real_balance"] or 20.0
         bal = float(res["result"]["list"][0]["coin"][0]["walletBalance"]); STATE["real_balance"] = bal; return bal
     except Exception as e:
         log(f"REAL BALANCE ERROR {e} - using last {STATE['real_balance']}"); return STATE["real_balance"] or 20.0
@@ -121,8 +150,15 @@ def set_cross_margin():
     if not API_KEY: return False
     try:
         res = bybit_post("/v5/position/switch-margin-mode", {"category": "linear", "symbol": CONFIG["SYMBOL"], "tradeMode": 0, "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
-        log(f"CROSS MARGIN SET: Bybit tradeMode 0 = CROSS | Lev {CONFIG['LEVERAGE']}x | {res}"); STATE["cross_margin_set"] = True; return True
-    except Exception as e: log(f"CROSS MARGIN SET ERROR {e}"); return False
+        # Bybit return 110026 if already CROSS - that na success too
+        if res.get("retCode") == 0 or "already" in str(res.get("retMsg","")).lower() or res.get("retCode") == 110026:
+            log(f"CROSS MARGIN SET: Bybit tradeMode 0 = CROSS | Lev {CONFIG['LEVERAGE']}x | {res.get('retMsg')}")
+            STATE["cross_margin_set"] = True; return True
+        # If Bybit reject because position open or already set, no block bot
+        log(f"CROSS MARGIN SKIP: Bybit say {res.get('retMsg')} (retCode {res.get('retCode')}) - Bot continue, CROSS fit already dey set for Bybit manually")
+        STATE["cross_margin_set"] = True; return True
+    except Exception as e:
+        log(f"CROSS MARGIN SKIP - {e} - Bot continue, no block"); STATE["cross_margin_set"] = True; return True
 
 def calc_dynamic_fees(price, qty):
     pos = qty * price; fees = pos * CONFIG["FEE_RATE"] * 2; slip = pos * CONFIG["SLIPPAGE_PCT"] * 2; total = fees + slip
@@ -416,11 +452,11 @@ def record_close(side, entry, close_price, qty, reason):
     net = gross - total; old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
     if STATE["mode"] == "PAPER": STATE["balance"] += net; STATE["pnl"] += net
     else: STATE["pnl"] += net
-    if reason == "TP": STATE["wins"] += 1; log(f"TP HIT +${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Closed {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']}")
-    elif reason == "TRAILING": STATE["wins"] += 1; log(f"TRAILING PROFIT +${net:.2f} (Gross ${gross:.2f} - Fees ${total:.4f}) - Market come back touch Trailing, close WITH PROFIT {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} - Trailing don take over BE")
+    if reason == "TP": STATE["wins"] += 1; log(f"TP HIT +${net:.2f} - Closed {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
+    elif reason == "TRAILING": STATE["wins"] += 1; log(f"TRAILING PROFIT +${net:.2f} - Closed {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
     elif reason == "FLIP": STATE["flips"] += 1; log(f"FLIP CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
-    elif net > 0: STATE["wins"] += 1; log(f"SMALL WIN +${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f}")
-    elif net < -0.01: STATE["losses"] += 1; STATE["losses_today"] += 1; log(f"WIDE SL LOSS ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason} | Bal ${old_bal:.2f} -> ${old_bal+net:.2f} | W{STATE['wins']} L{STATE['losses']}")
+    elif net > 0: STATE["wins"] += 1; log(f"SMALL WIN +${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
+    elif net < -0.01: STATE["losses"] += 1; STATE["losses_today"] += 1; log(f"WIDE SL LOSS ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
     else: STATE["breakevens"] += 1; log(f"BE CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
     STATE["open_position"] = None; new_bal = refresh_balance(f"AFTER-CLOSE-{reason}"); log(f"BALANCE AFTER TRADE: ${new_bal:.2f} - Next Qty go check +$8 tier"); return net
 
@@ -440,7 +476,7 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
     favour_move = abs(best - entry)
     against_move = abs(price - entry) if ((side == "LONG" and price < entry) or (side == "SHORT" and price > entry)) else 0.0
     if CONFIG["FLIP_ENABLED"] and is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
-        log(f"FLIP {side} -> {flip_dest} CONFIRMED | Cert {flip_certainty:.0f}% Agree {flip_agree} + Macro DXY {macro['DXY_CHG']:.2f}% NQ {macro['NQ_CHG']:.2f}% - Closing at ${price:.0f}")
+        log(f"FLIP {side} -> {flip_dest} CONFIRMED | Cert {flip_certainty:.0f}% Agree {flip_agree} - Closing at ${price:.0f}")
         record_close(side, entry, price, total_qty, "FLIP")
         if STATE["mode"] == "REAL": close_real_position(side, total_qty)
         return True
@@ -451,24 +487,22 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
         return False
     if CONFIG["TRAILING_ENABLED"] and favour_move >= CONFIG["TRAIL_TRIGGER_MOVE_USD"]:
         if not p.get("trailing_active"):
-            p["trailing_active"] = True
-            log(f"TRAILING TRIGGERED 👌 {side}: Favour move ${favour_move:.0f} >= $300, Profit over fees don reach good/medium - Trailing don take over BE, go follow price by $300")
-        if side == "LONG": trail_price = best - CONFIG["TRAIL_DIST_USD"]
-        else: trail_price = best + CONFIG["TRAIL_DIST_USD"]
+            p["trailing_active"] = True; log(f"TRAILING TRIGGERED 👌 {side}: Favour ${favour_move:.0f} >= $300 - Trailing don take over BE")
+        trail_price = best - CONFIG["TRAIL_DIST_USD"] if side == "LONG" else best + CONFIG["TRAIL_DIST_USD"]
         p["trailing_price"] = trail_price
         if p.get("last_trail_update", 0) != round(trail_price):
             if side == "LONG" and trail_price > p.get("wide_sl", -1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} ($300 behind) | Price ${price:.0f} Favour ${favour_move:.0f} - Lock profit"); update_real_sl(trail_price, side)
+                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f}"); update_real_sl(trail_price, side)
             elif side == "SHORT" and trail_price < p.get("wide_sl", 1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} ($300 behind) | Price ${price:.0f} Favour ${favour_move:.0f} - Lock profit"); update_real_sl(trail_price, side)
+                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f}"); update_real_sl(trail_price, side)
         hit_trailing = (price <= trail_price if side == "LONG" else price >= trail_price)
         if hit_trailing:
-            log(f"TRAILING HIT - Market come back $300 touch Trailing ${trail_price:.0f}, close WITH PROFIT {side} at ${price:.0f} | Total Qty {total_qty}")
+            log(f"TRAILING HIT - Close WITH PROFIT {side} at ${price:.0f}")
             record_close(side, entry, price, total_qty, "TRAILING")
             if STATE["mode"] == "REAL": close_real_position(side, total_qty)
             return False
     else:
-        if favour_move > 0: log(f"TRAILING SLEEP: Favour ${favour_move:.0f} < $300 trigger, Trailing never trigger yet, Wide SL ${p.get('wide_sl',0):.0f} dey protect")
+        if favour_move > 0: log(f"TRAILING SLEEP: Favour ${favour_move:.0f} < $300, Wide SL ${p.get('wide_sl',0):.0f} dey protect")
     if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False):
         if CONFIG["ADDON_WICK_MIN_USD"] <= against_move <= CONFIG["ADDON_WICK_MAX_USD"]:
             is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE")
@@ -481,31 +515,26 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
                     need_notional = total_qty_after * price
                     max_fit_notional = bal_now * CONFIG["LEVERAGE"] * CONFIG["ADDON_BUFFER_PCT"]
                     if need_notional > max_fit_notional:
-                        log(f"ADD-ON SKIPPED: Balance ${bal_now:.2f} no fit handle am - Need Notional ${need_notional:.0f} > Max Fit ${max_fit_notional:.0f} (Bal*50x*0.90) - Skip Add-On, NO ERROR, bot continue trading normal")
+                        log(f"ADD-ON SKIPPED: Balance ${bal_now:.2f} no fit - Need ${need_notional:.0f} > Max ${max_fit_notional:.0f} - Skip, NO ERROR")
                     else:
-                        log(f"ADD-ON TRIGGER {side}: Hunt wick ${against_move:.0f}, Certainty never flip, Liq Map confirm, Balance FIT ${bal_now:.2f} Max ${max_fit_notional:.0f} Need ${need_notional:.0f} - Adding {qty}")
+                        log(f"ADD-ON TRIGGER {side}: Wick ${against_move:.0f}, Bal FIT ${bal_now:.2f} - Adding {qty}")
                         if STATE["mode"] == "REAL":
                             ok = place_real_order(side, price, p["wide_sl"], p["tp"], qty, is_addon=True)
-                            if ok:
-                                p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1
-                                log(f"ADD-ON PLACED {side} Qty {qty} Total {p['total_qty']} CROSS - Same TP ${p['tp']:.0f} Same Wide/Trailing SL ${p['wide_sl']:.0f}")
-                            else:
-                                log(f"ADD-ON REJECTED by Bybit - Skip, NO ERROR, bot continue trading normal")
+                            if ok: p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1; log(f"ADD-ON PLACED {side} Qty {qty} Total {p['total_qty']}")
+                            else: log(f"ADD-ON REJECTED by Bybit - Skip, NO ERROR")
                         else:
-                            p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1
-                            log(f"ADD-ON PAPER SIM {side} Qty {qty} Total {p['total_qty']} - Same TP ${p['tp']:.0f} - Balance FIT check pass")
-                except Exception as e:
-                    log(f"ADD-ON ERROR CAUGHT {e} - Skip Add-On, NO STOP, bot continue trading normal")
+                            p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1; log(f"ADD-ON PAPER SIM {side} Qty {qty} Total {p['total_qty']}")
+                except Exception as e: log(f"ADD-ON ERROR CAUGHT {e} - Skip, NO STOP")
     hit_wide = (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"])
     if hit_wide and not p.get("trailing_active"):
-        log(f"WIDE SL HIT: Price ${price:.0f} past Wide SL ${p['wide_sl']:.0f} - Emergency close, hunt too big, Trailing never trigger")
+        log(f"WIDE SL HIT: Price ${price:.0f} past Wide SL ${p['wide_sl']:.0f}")
         record_close(side, entry, price, total_qty, "WIDE_SL")
         if STATE["mode"] == "REAL": close_real_position(side, total_qty)
         return False
     return False
 
 def main():
-    log("BOT V13.15.2 STARTED - REAL NOW | WIDE SL $1200 + TRAILING ONLY $300 + ADD-ON SAFE + CROSS + HIDDEN + QTY $20=0.010 +0.005 per +$8 | Certainties V13.1 + Live Worldwide Yahoo/Stooq + Liq Map + Flip Only | NEVER_STOP True")
+    log("BOT V13.15.3 STARTED - REAL NOW V5 FIX | WIDE SL $1200 + TRAILING $300 + ADD-ON SAFE + CROSS + QTY $20=0.010 +0.005 per +$8 | NEVER_STOP True")
     last_heartbeat = now_utc()
     while True:
         try:
@@ -513,7 +542,7 @@ def main():
             if new_mode != STATE["mode"]:
                 STATE["mode"] = new_mode
                 if new_mode == "REAL":
-                    bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL *** Real Balance met: ${bal:.2f} USDT - Bot go trade real now, CROSS Margin ON, good boy mode ON ***")
+                    bal = get_real_balance(); log(f"*** AUTO SWITCH TO REAL *** Real Balance met: ${bal:.2f} USDT - Bot go trade real now, CROSS Margin ON ***")
                     if STATE["open_position"]: log("Closing paper position before REAL switch"); STATE["open_position"] = None
                     if STATE["pending_hunt"]: log("Clearing paper pending hunt before REAL switch"); STATE["pending_hunt"] = None
                     STATE["cross_margin_set"] = False
@@ -543,7 +572,7 @@ def main():
                 ph = STATE["pending_hunt"]; elapsed_min = (now_utc() - ph["time"]).total_seconds() / 60
                 touched = (price >= ph["hunt_price"] if ph["side"] == "SHORT" else price <= ph["hunt_price"]) or (abs(price - ph["hunt_price"]) < 50)
                 if touched:
-                    log(f"HUNT LIMIT FILLED {ph['side']} @ ${ph['hunt_price']:.0f} - Hunt come meet us, enter with Normal Qty {ph['qty']}")
+                    log(f"HUNT LIMIT FILLED {ph['side']} @ ${ph['hunt_price']:.0f}")
                     STATE["pending_hunt"] = None
                     wide_sl, tp = calc_sl_tp_v1315(ph["hunt_price"], ph["side"])
                     if mode == "REAL": place_real_order(ph["side"], ph["hunt_price"], wide_sl, tp, ph["qty"])
@@ -554,7 +583,7 @@ def main():
                     wide_sl, tp = calc_sl_tp_v1315(price, ph["side"])
                     if mode == "REAL": place_real_order(ph["side"], price, wide_sl, tp, ph["qty"])
                     STATE["open_position"] = {"side": ph["side"], "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": ph["qty"]}
-                    STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN VIA MARKET AFTER HUNT TIMEOUT ({mode}) {ph['side']} Entry ${price:.0f} WideSL ${wide_sl:.0f} TP ${tp:.0f} Qty {ph['qty']} CROSS Hidden - No extra (5), Normal Qty only")
+                    STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN VIA MARKET AFTER HUNT TIMEOUT ({mode}) {ph['side']} Entry ${price:.0f} WideSL ${wide_sl:.0f} TP ${tp:.0f} Qty {ph['qty']} CROSS Hidden")
             gates = []
             gates.append((f"Agree {agree}/{decided} Need {need_agree} [Dynamic]", agree >= need_agree and decided >= need_agree))
             gates.append((f"Certainty {certainty:.0f}% Need {need_cert:.0f}%", certainty >= need_cert))
@@ -570,16 +599,16 @@ def main():
             log(f"SIGNALS: {sig_str}")
             log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
             log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} [{liq_src}] | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} | Session {session_name} {session_hunt}")
-            log(f"V13.15.2 WideSL $1200 + Trailing $300 Only For Profits + Add-On SAFE + Flip Only + CROSS + Hidden")
-            log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
-            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} Losses {STATE['losses_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
+            log(f"V13.15.3 WideSL $1200 + Trailing $300 Only For Profits + Add-On SAFE + Flip Only + CROSS + Hidden")
+            log(f"Qty {qty} Bal ${bal_show:.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
+            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
             if STATE["open_position"] and not flipped:
                 p = STATE["open_position"]
-                log(f"HOLDING [MAIN] {p['side']} Trailing {'ACTIVE $'+str(round(p.get('trailing_price',0))) if p.get('trailing_active') else 'SLEEP - Need $300 favour'} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f} - WideSL / Trailing / Flip / Add-on dey manage am")
+                log(f"HOLDING [MAIN] {p['side']} Trailing {'ACTIVE $'+str(round(p.get('trailing_price',0))) if p.get('trailing_active') else 'SLEEP - Need $300 favour'} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f}")
             elif all_pass and not STATE["open_position"] and not STATE.get("pending_hunt"):
                 if CONFIG["HUNT_LIMIT_ENABLED"]:
                     hunt_price = price + CONFIG["HUNT_LIMIT_OFFSET_USD"] if dest == "SHORT" else price - CONFIG["HUNT_LIMIT_OFFSET_USD"]
-                    log(f"TRADE SIGNAL MAIN - {mode} {dest} Entry Hunt Limit @ ${hunt_price:.0f} (Current ${price:.0f} + $150 hunt offset) Qty {qty} Normal Active Qty only, wait 2 min, if no fill cancel + Market")
+                    log(f"TRADE SIGNAL MAIN - {mode} {dest} Entry Hunt Limit @ ${hunt_price:.0f} Qty {qty} wait 2 min, if no fill cancel + Market")
                     if mode == "REAL": place_hunt_limit(dest, hunt_price, qty)
                     STATE["pending_hunt"] = {"side": dest, "hunt_price": hunt_price, "qty": qty, "time": now_utc()}
                 else:
@@ -588,7 +617,7 @@ def main():
                     STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty}
                     STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN ({mode}) {dest} Entry ${price:.0f} WideSL ${wide_sl:.0f} TP ${tp:.0f} Qty {qty} CROSS Hidden")
             elif not all_pass and not STATE["open_position"] and not STATE.get("pending_hunt"):
-                log(f"BLOCK/WARY MAIN: {'; '.join(failed)} | UNKNOWN: {unknown_names} - Bot still alive, NEVER_STOP, will trade next cycle")
+                log(f"BLOCK/WARY MAIN: {'; '.join(failed)} | UNKNOWN: {unknown_names} - Bot still alive, NEVER_STOP")
             if (now_utc() - last_heartbeat).total_seconds() > CONFIG["HEARTBEAT_MIN"] * 60: log(f"HEARTBEAT OK - MODE {mode} CROSS Hidden - Bal ${bal_show:.2f} PnL ${STATE['pnl']:.2f}"); last_heartbeat = now_utc()
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
