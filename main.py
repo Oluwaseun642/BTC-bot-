@@ -1,5 +1,5 @@
 # ============================================================
-# BTC SWEEP BOT - V13.15 FINAL - WIDE SL + TRAILING ONLY + HUNT ADD-ON
+# BTC SWEEP BOT - V13.15.1 FINAL - WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE
 # PAPER till Sun 8:30pm WAT (19:30 UTC 15 Nov) -> AUTO REAL
 # EXTRACTED FROM V13.11: Certainties V13.1 + Dynamic Agree + Live Worldwide
 #   Yahoo/Stooq + Bybit/Binance/CoinGecko + Macro + Liq Map + Asian/Session Hunt
@@ -7,7 +7,7 @@
 # DUMPED FROM V13.11: BE Ladder, BE Over Fees, Trailing Early, Side Hustle,
 #   Max Trade 20, Max Loss 5, Calm 20min, Cooldown, Tight SL 0.85%,
 #   Addon Double, Paper 0.002, TP Mult / RR Gates
-# NEW V13.15:
+# NEW V13.15.1:
 #   NEVER_STOP True, No Max Trade, No Max Loss
 #   QTY: Bal $20 = 0.010 | Every +$8 Bal = +0.005 Qty | $20->0.010, $28->0.015, $36->0.020, $44->0.025...
 #   ENTRY: Hunt Limit 2-min, if no fill cancel + Market enter, Normal Active Qty only
@@ -15,9 +15,11 @@
 #   BE: REMOVED - Trailing don take over BE
 #   TRAILING ONLY FOR PROFITS: Trigger after $300+ move in favour (~$3 profit for 0.010)
 #     Then Trailing = $300 behind best price. If market come back touch am, close WITH PROFIT.
-#   ADD-ON: Max 1 per cycle, Wick $500-$900 against + Certainty never flip + Liq Map confirm
-#     = Add same direction, same Qty, double profit at TP / Trailing
-#   MARGIN: CROSS | All trades: Conditional Hidden
+#   ADD-ON SAFE PROTOCOL V13.15.1: Max 1, Wick $500-$900 + Certainty never flip + Liq Map confirm
+#     + BALANCE FIT CHECK: Only if (TotalQty+AddQty)*Price <= Bal*50x*0.90
+#     If Bal no fit -> SKIP Add-On, NO ERROR, NO STOP, bot continue trading normal
+#     If Bybit reject -> SKIP, NO ERROR, NO STOP
+#   MARGIN: CROSS | All trades: Conditional Hidden | One-Way Mode Only
 #   FLIP ONLY | Direction only from Certainty 75%+
 # ============================================================
 
@@ -29,7 +31,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.15 - PAPER till Sun 8:30pm WAT, then REAL - WIDE SL + TRAILING ONLY + HUNT ADD-ON", 200
+    def _health(): return "BOT ALIVE V13.15.1 - PAPER till Sun 8:30pm WAT, then REAL - WIDE SL + TRAILING ONLY + ADD-ON SAFE", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -49,40 +51,32 @@ def _self_ping_loop():
 threading.Thread(target=_self_ping_loop, daemon=True).start()
 print("Self-Ping ON - every 4 min", flush=True)
 
-# ================= CONFIG V13.15 =================
+# ================= CONFIG V13.15.1 =================
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
-    # PAPER -> REAL AUTO SWITCH - Sun 8:30pm WAT = 19:30 UTC 15 Nov 2026
     "AUTO_SWITCH_UTC": datetime(2026, 11, 15, 19, 30, tzinfo=timezone.utc),
-    # QTY LADDER - Haffar math: $20 = 0.010, +0.005 per +$8
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
     "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
-    # CERTAINTY - Kept from V13.11
     "MIN_CERTAINTY_NORMAL": 75.0, "MIN_AGREE_NORMAL": 4, "MIN_SCORE_NORMAL": 0.60,
     "MIN_AGREE_DYNAMIC": 4, "DYNAMIC_AGREE_CERT": 90.0,
     "TOTAL_SIGNALS": 8, "SURE_CERTAINTY": 95.0, "SURE_AGREE": 6,
     "NEWS_ENABLED": True, "MIN_CERTAINTY_NEWS": 75.0, "MIN_AGREE_NEWS": 4, "MIN_SCORE_NEWS": 0.60,
-    # WIDE SL + TRAILING ONLY - NEW
     "WIDE_SL_USD": 1200.0,
     "TRAILING_ENABLED": True, "TRAIL_TRIGGER_MOVE_USD": 300.0, "TRAIL_DIST_USD": 300.0,
     "FEE_RATE": 0.0006, "SLIPPAGE_PCT": 0.0005,
-    # FLIP ONLY
     "FLIP_ENABLED": True, "FLIP_CERTAINTY": 75.0, "FLIP_AGREE": 4,
     "NEVER_STOP": True,
-    # ADD-ON HUNT - Max 1
+    # ADD-ON SAFE - Max 1, Balance Fit Check
     "ADDON_ENABLED": True, "ADDON_MAX_PER_POSITION": 1,
     "ADDON_WICK_MIN_USD": 500.0, "ADDON_WICK_MAX_USD": 900.0,
-    # CROSS + HIDDEN
+    "ADDON_BUFFER_PCT": 0.90,
     "CROSS_MARGIN_ENABLED": True, "MARGIN_MODE": "CROSS",
     "CONDITIONAL_HIDDEN": True,
-    # HUNT LIMIT ENTRY
     "HUNT_LIMIT_ENABLED": True, "HUNT_LIMIT_WAIT_MIN": 2, "HUNT_LIMIT_OFFSET_USD": 150.0,
-    # ASIAN / SESSION - Kept from V13.11
     "ASIAN_ENABLED": True, "ASIAN_START_HOUR_UTC": 0, "ASIAN_END_HOUR_UTC": 8, "ASIAN_SWEEP_BUFFER_PCT": 0.0015,
     "SESSION_HUNT_ENABLED": True, "SESSIONS": [("ASIA", 0, 0), ("LONDON", 7, 0), ("NEWYORK", 13, 30)], "SESSION_HUNT_WINDOW_MIN": 30,
     "POLL_SEC": 5, "HEARTBEAT_MIN": 10,
     "BYBIT_BASE": "https://api.bybit.com",
-    # Wide TP - bot holds wide TP, trailing go close am with profit if market come back
     "TP_DIST_USD": 1500.0,
 }
 API_KEY = os.getenv("BYBIT_API_KEY", ""); API_SECRET = os.getenv("BYBIT_API_SECRET", "")
@@ -134,12 +128,10 @@ def calc_dynamic_fees(price, qty):
     pos = qty * price; fees = pos * CONFIG["FEE_RATE"] * 2; slip = pos * CONFIG["SLIPPAGE_PCT"] * 2; total = fees + slip
     return pos, fees, slip, total
 
-# ========== QTY LADDER V13.15 - $20=0.010, +0.005 per +$8 ==========
 def get_dynamic_qty(price):
     bal = refresh_balance("QTY-CALC")
     if bal < CONFIG["QTY_BASE_BAL"]:
-        qty = CONFIG["QTY_BASE"]
-        steps = 0
+        qty = CONFIG["QTY_BASE"]; steps = 0
     else:
         steps = int((bal - CONFIG["QTY_BASE_BAL"]) // CONFIG["QTY_STEP_BAL"])
         qty = round(CONFIG["QTY_BASE"] + steps * CONFIG["QTY_STEP"], 3)
@@ -150,7 +142,6 @@ def get_dynamic_qty(price):
         log(f"QTY TIER CHECK: Bal ${bal:.2f} -> Steps {steps} = Qty {qty} (Next tier at ${CONFIG['QTY_BASE_BAL'] + (steps+1)*CONFIG['QTY_STEP_BAL']:.0f})")
     STATE["last_qty"] = qty; return qty
 
-# ========== ORDERS - CROSS + CONDITIONAL HIDDEN ==========
 def place_real_order(side, price, wide_sl, tp, qty, is_addon=False):
     if not API_KEY or not API_SECRET: log("REAL ORDER BLOCKED: No API keys"); return False
     try:
@@ -195,7 +186,6 @@ def close_real_position(side, qty):
         log(f"REAL POSITION CLOSED {side} Qty {qty} | {res}"); return True
     except Exception as e: log(f"REAL CLOSE ERROR {e}"); return False
 
-# ========== V13.11 LIVE WORLDWIDE - KEPT 100% ==========
 def fetch_live_multi(symbols_yahoo, symbols_stooq):
     for sym in symbols_yahoo:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
@@ -348,7 +338,6 @@ def get_news_score():
         if abs(move) >= 0.8: return True, 85.0, f"VOL SPIKE {move:.2f}% in 15m"
     return False, 0, ""
 
-# ========== CERTAINTIES V13.1 SOFT + DYNAMIC AGREE - KEPT ==========
 def get_signals(price, macro, klines_1m, asian_hunt, session_hunt):
     signals = []
     if macro.get("DXY_CHG_STATUS") == "UNKNOWN": signals.append(("DXY_LEVEL", "UNKNOWN"))
@@ -442,7 +431,7 @@ def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, sid
     if flip_dest == "LONG": return macro["DXY_CHG"] < 0.05 or macro["NQ_CHG"] > 0
     else: return macro["DXY_CHG"] > 0.05 or macro["NQ_CHG"] < 0
 
-# ========== MANAGE - WIDE SL + TRAILING ONLY + HUNT ADD-ON ==========
+# ========== MANAGE - WIDE SL + TRAILING ONLY + HUNT ADD-ON SAFE ==========
 def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, macro, long_liq, short_liq):
     if not STATE["open_position"]: return False
     p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; total_qty = p.get("total_qty", qty)
@@ -481,17 +470,35 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
             return False
     else:
         if favour_move > 0: log(f"TRAILING SLEEP: Favour ${favour_move:.0f} < $300 trigger, Trailing never trigger yet, Wide SL ${p.get('wide_sl',0):.0f} dey protect")
+    # ===== PATCHED ADD-ON SAFE PROTOCOL V13.15.1 - START =====
     if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False):
         if CONFIG["ADDON_WICK_MIN_USD"] <= against_move <= CONFIG["ADDON_WICK_MAX_USD"]:
             is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE")
             liq_confirm = (short_liq > long_liq) if side == "SHORT" else (long_liq > short_liq)
             if is_hunt_not_flip and liq_confirm:
-                log(f"ADD-ON TRIGGER {side}: Hunt wick ${against_move:.0f} against {side} ($500-$900), Certainty never flip, Liq Map confirm hunt Long ${long_liq:,.0f} Short ${short_liq:,.0f} - Adding ONE more {side} Qty {qty} for double profit at TP/Trailing")
-                if STATE["mode"] == "REAL":
-                    ok = place_real_order(side, price, p["wide_sl"], p["tp"], qty, is_addon=True)
-                    if ok: p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PLACED {side} Qty {qty} Total Qty Now {p['total_qty']} CROSS - Same TP ${p['tp']:.0f} Same Wide/Trailing SL ${p['wide_sl']:.0f}")
-                else:
-                    p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = round(total_qty + qty, 3); STATE["addons"] += 1; log(f"ADD-ON PAPER SIM {side} Qty {qty} Total Qty Now {p['total_qty']} - Same TP ${p['tp']:.0f}")
+                try:
+                    bal_now = get_current_balance()
+                    if bal_now <= 0: bal_now = 20.0
+                    total_qty_after = round(total_qty + qty, 3)
+                    need_notional = total_qty_after * price
+                    max_fit_notional = bal_now * CONFIG["LEVERAGE"] * CONFIG["ADDON_BUFFER_PCT"]
+                    if need_notional > max_fit_notional:
+                        log(f"ADD-ON SKIPPED: Balance ${bal_now:.2f} no fit handle am - Need Notional ${need_notional:.0f} > Max Fit ${max_fit_notional:.0f} (Bal*50x*0.90) - Skip Add-On, NO ERROR, bot continue trading normal")
+                    else:
+                        log(f"ADD-ON TRIGGER {side}: Hunt wick ${against_move:.0f}, Certainty never flip, Liq Map confirm, Balance FIT ${bal_now:.2f} Max ${max_fit_notional:.0f} Need ${need_notional:.0f} - Adding {qty}")
+                        if STATE["mode"] == "REAL":
+                            ok = place_real_order(side, price, p["wide_sl"], p["tp"], qty, is_addon=True)
+                            if ok:
+                                p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1
+                                log(f"ADD-ON PLACED {side} Qty {qty} Total {p['total_qty']} CROSS - Same TP ${p['tp']:.0f} Same Wide/Trailing SL ${p['wide_sl']:.0f}")
+                            else:
+                                log(f"ADD-ON REJECTED by Bybit - Skip, NO ERROR, bot continue trading normal")
+                        else:
+                            p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1
+                            log(f"ADD-ON PAPER SIM {side} Qty {qty} Total {p['total_qty']} - Same TP ${p['tp']:.0f} - Balance FIT check pass")
+                except Exception as e:
+                    log(f"ADD-ON ERROR CAUGHT {e} - Skip Add-On, NO STOP, bot continue trading normal")
+    # ===== PATCHED ADD-ON SAFE PROTOCOL V13.15.1 - END =====
     hit_wide = (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"])
     if hit_wide and not p.get("trailing_active"):
         log(f"WIDE SL HIT: Price ${price:.0f} past Wide SL ${p['wide_sl']:.0f} - Emergency close, hunt too big, Trailing never trigger")
@@ -501,11 +508,10 @@ def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, m
     return False
 
 def main():
-    log("BOT V13.15 STARTED - PAPER till Sun 8:30pm WAT -> AUTO REAL | WIDE SL $1200 + TRAILING ONLY $300 + HUNT ADD-ON 1x + CROSS + HIDDEN + QTY $20=0.010 +0.005 per +$8 | Certainties V13.1 + Live Worldwide Yahoo/Stooq + Liq Map + Flip Only | NEVER_STOP True")
+    log("BOT V13.15.1 STARTED - PAPER till Sun 8:30pm WAT -> AUTO REAL | WIDE SL $1200 + TRAILING ONLY $300 + ADD-ON SAFE + CROSS + HIDDEN + QTY $20=0.010 +0.005 per +$8 | Certainties V13.1 + Live Worldwide Yahoo/Stooq + Liq Map + Flip Only | NEVER_STOP True")
     last_heartbeat = now_utc()
     while True:
         try:
-            # PAPER -> REAL AUTO SWITCH
             new_mode = get_mode()
             if new_mode != STATE["mode"]:
                 STATE["mode"] = new_mode
@@ -567,7 +573,7 @@ def main():
             log(f"SIGNALS: {sig_str}")
             log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
             log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} [{liq_src}] | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} | Session {session_name} {session_hunt}")
-            log(f"V13.15 WideSL $1200 + Trailing $300 Only For Profits + Hunt Add-On 1x + Flip Only + CROSS + Hidden")
+            log(f"V13.15.1 WideSL $1200 + Trailing $300 Only For Profits + Add-On SAFE + Flip Only + CROSS + Hidden")
             log(f"Qty {qty} Bal ${bal_show:.2f} DayStart ${STATE.get('day_start_balance', bal_show):.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
             log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} Losses {STATE['losses_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
             if STATE["open_position"] and not flipped:
