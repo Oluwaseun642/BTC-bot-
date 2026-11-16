@@ -1,5 +1,6 @@
+
 # ============================================================
-# BTC SWEEP BOT - V13.15.9 - HAFFAR CLEAN REAL START - PART 1/2
+# BTC SWEEP BOT - V13.15.9 - HAFFAR CLEAN REAL START
 # PATCH V13.15.9 - MACRO BRAIN + FLIP NO HIDE:
 #   RULE #1: DO NOT CHANGE V13.15.8 LOGIC. Macro Brain is ADDITIVE ONLY.
 #   MACRO_BRAIN_ENABLED = ON/OFF switch. If OFF or API fail -> trade exactly like V13.15.8.
@@ -48,6 +49,7 @@ print("Self-Ping ON - every 4 min", flush=True)
 
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
+    # PAPER till 2am WAT Nov 16 = 01:00 UTC Nov 16
     "AUTO_SWITCH_UTC": datetime(2026, 11, 16, 1, 0, tzinfo=timezone.utc),
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
     "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
@@ -82,6 +84,7 @@ CONFIG = {
     "HUNT_EARLY_MIN_DIST_USD": 300.0,
     "EMERGENCY_AGAINST_USD": 400.0,
     "PROFIT_LOCK_MIN_USD": 50.0,
+    # ===== MACRO BRAIN V13.15.9 - ADDITIVE ONLY =====
     "MACRO_BRAIN_ENABLED": True,
     "MACRO_ALERT_DXY_DROP": -0.5, "MACRO_ALERT_JPY_DROP": -0.8,
     "MACRO_CONFIRM_DXY_DROP": -1.0, "MACRO_CONFIRM_JPY_DROP": -1.5,
@@ -101,6 +104,7 @@ STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "day_start_bala
     "last_liq_map": {"long_liq": 0.0, "short_liq": 0.0, "asia_low": 0.0, "asia_high": 0.0, "hunt": "NONE"}, "last_session": "NONE",
     "hide_until": None, "revenge_until": None, "cooldown_until": None, "last_close_reason": None, "last_close_time": None,
     "world": {}, "world_last_fetch": 0, "paper_start_pnl": 0.0, "paper_fake_holding": 0, "paper_pass": True,
+    # Macro Brain state - additive, never overwrites core
     "macro_brain": {"score": 0.0, "bias": "NEUTRAL", "alert": None, "alert_time": None, "confirm_count": 0, "flip_pending": None, "last_check": 0},
     "macro_history": {"dxy_1h_ago": None, "jpy_1h_ago": None, "dxy_1h_time": None},
 }
@@ -284,6 +288,7 @@ def fetch_live_multi(symbols_yahoo, symbols_stooq):
     return None, "FAIL"
 
 def fetch_yahoo_price(sym):
+    # Live price for DXY / USDJPY / US10Y - no cache
     try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
             r = requests.get(f"{base}/v8/finance/chart/{sym}?range=1d&interval=5m", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
@@ -292,6 +297,7 @@ def fetch_yahoo_price(sym):
             if closes:
                 cur = float(closes[-1]); prev = float(meta.get("previousClose") or closes[0])
                 chg_day = (cur - prev)/prev*100 if prev else 0.0
+                # 1h change: approx last 12x5m candles
                 chg_1h = (cur - closes[-13])/closes[-13]*100 if len(closes) >= 13 and closes[-13] else 0.0
                 return cur, chg_day, chg_1h
     except Exception as e:
@@ -381,6 +387,7 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
         funding, funding_src = get_funding_live()
         fng, fng_src = get_fear_greed_live()
         rsi_1h = calc_rsi(klines_15m[-60:] if klines_15m else [], 14) if klines_15m else 50.0
+        # Volume: compare last 5x1m volume proxy via range vs avg
         vol_spike = False; vol_mult = 1.0
         if klines_1m and len(klines_1m) >= 15:
             recent = sum(abs(k["high"]-k["low"]) for k in klines_1m[-5:])
@@ -388,6 +395,7 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
             if avg > 0:
                 vol_mult = recent / max(avg, 1)
                 vol_spike = vol_mult >= CONFIG["MACRO_VOLUME_MULT"]
+        # Scoring -10 SHORT to +10 LONG
         score = 0.0; details = []
         if dxy_1h is not None:
             if dxy_1h > 0.2: score -= 2; details.append(f"DXY 1h +{dxy_1h:.2f}% SHORT+2")
@@ -405,13 +413,16 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
         if macro_old.get("NQ_CHG", 0) < -0.5: score -= 1; details.append("NQ down SHORT+1")
         if macro_old.get("OI_CHG", 0) < -0.5 and price < 66000: score -= 0.5; details.append("OI falling SHORT")
         bias = "SHORT" if score <= -2 else "LONG" if score >= 2 else "NEUTRAL"
+        # FLIP NO HIDE logic
         alert = None; flip = None
         mb = STATE["macro_brain"]
+        # ALERT stage
         if (dxy_1h is not None and dxy_1h <= CONFIG["MACRO_ALERT_DXY_DROP"]) or (jpy_1h is not None and jpy_1h <= CONFIG["MACRO_ALERT_JPY_DROP"]):
             if mb.get("alert") is None:
                 mb["alert"] = "DXY/JPY DROP"; mb["alert_time"] = now_utc(); mb["confirm_count"] = 0
                 log(f"MACRO ALERT: DXY 1h {dxy_1h} JPY 1h {jpy_1h} - PAUSE new SHORT 15m only, no close open")
             alert = "PAUSE_SHORT"
+        # CONFIRM stage - need 4/5
         if mb.get("alert"):
             elapsed = (now_utc() - mb["alert_time"]).total_seconds()/60 if mb.get("alert_time") else 99
             confirms = 0; c_details = []
@@ -419,6 +430,7 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
             if jpy_1h is not None and jpy_1h <= CONFIG["MACRO_CONFIRM_JPY_DROP"]: confirms += 1; c_details.append("JPY -1.5%")
             if price >= CONFIG["MACRO_RECLAIM_LONG"]: confirms += 1; c_details.append(f"BTC reclaim {CONFIG['MACRO_RECLAIM_LONG']}")
             if vol_spike: confirms += 1; c_details.append(f"Volume {vol_mult:.1f}x")
+            # News proxy: big 15m move = news spike
             if klines_1m and len(klines_1m) >= 15:
                 mv15 = (klines_1m[-1]["close"]-klines_1m[-15]["close"])/klines_1m[-15]["close"]*100
                 if abs(mv15) >= 0.8: confirms += 1; c_details.append(f"News spike {mv15:.2f}%")
@@ -430,6 +442,7 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
             elif elapsed >= CONFIG["MACRO_CONFIRM_MIN"]:
                 log(f"MACRO ALERT FAKE - {elapsed:.0f}m no confirm ({confirms}/5) - Back to SHORT, cancel LONG plan")
                 mb["alert"] = None; mb["flip_pending"] = None; alert = None
+        # Opposite DUMP confirm
         if dxy_1h is not None and dxy_1h >= CONFIG["MACRO_CONFIRM_DXY_PUMP"] and price < CONFIG["MACRO_BREAK_SHORT"] and vol_spike:
             flip = {"dir": "SHORT", "entry_low": 63000, "entry_high": 63500, "sl": 65000, "tp1": 62000, "tp2": 60000, "reasons": ["DXY +1%", "BTC break 62978", "Volume spike"]}
             log("MACRO DUMP CONFIRMED - Confirm SHORT, trade it")
@@ -439,7 +452,8 @@ def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
     except Exception as e:
         log(f"MACRO BRAIN ERROR {e} - FALLBACK to old bot, no block")
         return {"score": 0.0, "bias": "NEUTRAL", "detail": f"ERROR {e}", "alert": None, "flip": None}
-        def get_macro_live():
+
+def get_macro_live():
     world = get_world_markets()
     dxy = world.get("DXY", 0.0); nq = world.get("NQ", 0.0); spx = world.get("SPX", 0.0); gold = world.get("GOLD", 0.0)
     oi_chg = None; oi_src = "FAIL"
@@ -557,6 +571,7 @@ def world_confirms_hunt(hunt_dir, world):
 def detect_early_hunt(price, cert_dest, klines_1m, long_liq, short_liq, asia_low, asia_high, world):
     if not klines_1m or len(klines_1m) < 5: return "NONE", 0.0, ""
     pc5 = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
+    # Asia Hunter Strength: need Liq + World + Volume, not wick alone
     vol_ok = False
     if len(klines_1m) >= 10:
         recent_range = sum(abs(k["high"]-k["low"]) for k in klines_1m[-5:])
@@ -820,6 +835,7 @@ def main():
             price, price_src = get_price_live()
             if price == 0.0: log("NO PRICE - All sources fail, skip cycle"); time.sleep(CONFIG["POLL_SEC"]); continue
             klines_1m = get_klines_1m(20); klines_15m = get_klines(200); macro = get_macro_live(); world = STATE.get("world", {})
+            # MACRO BRAIN - ADDITIVE ONLY, never blocks old bot if it fails
             macro_brain = get_macro_brain_live(price, klines_1m, klines_15m, macro)
             asian_hunt, asia_low, asia_high, long_liq, short_liq, liq_src = get_asian_hunt(price, klines_15m, klines_1m)
             session_hunt, session_name = get_session_reopen_hunt(price, klines_1m, klines_15m)
@@ -844,8 +860,10 @@ def main():
             is_pre_hunt, pre_reason = is_pre_hunt_window()
             is_hidden = STATE.get("hide_until") and now_utc() < STATE["hide_until"]
             is_revenge = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
+            # MACRO PAUSE - only pause new SHORT, never close open, never block old bot long
             macro_pause_short = macro_brain.get("alert") == "PAUSE_SHORT"
             if macro_pause_short: log(f"⏸️ MACRO PAUSE: DXY/JPY drop alert - Pause new SHORT 15m, wait confirm. Open position untouched.")
+            # MACRO FLIP - if confirmed, override dest to flip direction
             macro_flip = macro_brain.get("flip")
             if macro_flip and not STATE["open_position"]:
                 log(f"🔄 MACRO FLIP TRADE READY: {macro_flip['dir']} Reasons {macro_flip.get('reasons')} Entry {macro_flip['entry_low']}-{macro_flip['entry_high']} SL {macro_flip['sl']} TP1 {macro_flip['tp1']} TP2 {macro_flip['tp2']}")
@@ -902,6 +920,7 @@ def main():
             elif dest in ("LONG", "SHORT"):
                 wide_sl_show, tp_show = calc_sl_tp_v1315(price, dest); trail_show = 0
             else: wide_sl_show = tp_show = trail_show = 0
+            # Macro flip bypasses normal gates - it already confirmed 4/5
             if macro_flip and not STATE["open_position"]:
                 all_pass = True; log("MACRO FLIP BYPASS GATES - 4/5 confirmed, trade it, no hide")
             log(f"MODE {mode} CROSS Hidden | PriceSrc {price_src} | Long {longs} Short {shorts} UNKNOWN {unknowns} {unknown_names} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} Need {need_agree} {'SURE' if is_sure else 'NEWS' if is_news else 'NORMAL'} MAIN {'Pass True' if all_pass else 'Pass False'} | NEVER_STOP True | MACRO {macro_brain.get('bias')} Score {macro_brain.get('score'):+.1f} Alert {macro_brain.get('alert')} Flip {macro_flip['dir'] if macro_flip else 'None'}")
@@ -943,6 +962,7 @@ def main():
                     if hunt_block:
                         log("BLOCKED BY HUNT — Hide, wait hunt finish")
                     else:
+                        # Macro Flip uses its own SL/TP, not WideSL $1200
                         if macro_flip:
                             f_sl = macro_flip["sl"]; f_tp = macro_flip["tp1"]
                             log(f"MACRO FLIP TRADE - {mode} {dest} Entry ${price:.0f} SL ${f_sl:.0f} TP1 ${f_tp:.0f} TP2 {macro_flip['tp2']}")
