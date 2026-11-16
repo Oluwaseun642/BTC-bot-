@@ -1,11 +1,9 @@
-# BTC SWEEP BOT V13.16.2 SLIM FINAL - GOLD PICKER SMART - HUNTER DEAD
-# FROM V13.15.9 -> V13.16.0 Slim -> V13.16.2 LIQ 5-LAYER FIX
-# CLEANED: Duplicates + Cache + Hunter + Dead Coinglass placeholder REMOVED
-# KEEP: Trailing $500/$50, WideSL $1200, TP $1500, Macro LIVE no cache,
-# News, AddOn, CROSS, Dynamic Qty, NEVER_STOP, No Max Trade/Loss
-# NEW: Sweep Hide Conditional 2min, 85% Bypass, Flip Only If Both Flip,
-# Small Chops 75-84%, Skip Fake <75%
-# NEW V13.16.2: LIQ 5-LAYER Binance > Bybit > OKX > Coinbase/Kraken Vol > Proxy-REAL
+# BTC SWEEP BOT V13.16.3 SLIM FINAL - GOLD PICKER SMART - HUNTER DEAD
+# FROM V13.16.2 -> V13.16.3 HUNT-CONFIRMED EMERGENCY + FLIP 2-MODE FIX
+# FIX: Emergency ONLY if Hunt Confirmed 3/4 (Cert + Liq + World + Macro), small wick = HOLD
+# FIX: Flip Normal = Thorough 3/4 + Macro agree, Flip High Vitality = Cert 90% Agree 6 Macro 4 News = Flip Immediately
+# KEEP: Trailing $500/$50, WideSL $1200, TP $1500, Macro LIVE no cache, News, AddOn, CROSS, Dynamic Qty, NEVER_STOP
+# KEEP: Sweep Hide 2min, 85% Bypass, Small Chops 75-84%, Skip Fake <75%, LIQ 5-LAYER
 
 import time, requests, hmac, hashlib, os, threading, json
 from datetime import datetime, timezone, timedelta
@@ -13,7 +11,7 @@ try:
     from flask import Flask
     _a = Flask(__name__)
     @_a.route("/")
-    def _h(): return "BOT ALIVE V13.16.2 SLIM GOLD PICKER LIQ 5-LAYER", 200
+    def _h(): return "BOT ALIVE V13.16.3 SLIM GOLD PICKER HUNT-CONFIRMED", 200
     def _rf():
         try: _a.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), use_reloader=False)
         except Exception as e: print(f"Flask {e}", flush=True)
@@ -261,10 +259,9 @@ def get_macro_live():
     except: pass
     return {"DXY_CHG": w["DXY"], "NQ_CHG": w["NQ"], "SPX_CHG": w["SPX"], "GOLD_CHG": w["GOLD"], "OI_CHG": oi, "OI_SRC": oi_src}
 
-# --- V13.16.2 LIQ 5-LAYER - CORRECTED ---
+# --- V13.16.3 LIQ 5-LAYER ---
 def get_liq(price, k1):
     ll = sl = 0.0
-    # 1) BINANCE - Real liq
     try:
         r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100", timeout=5)
         d = r.json()
@@ -277,7 +274,6 @@ def get_liq(price, k1):
                 log(f"LIQ LIVE Binance Long ${ll:,.0f} Short ${sl:,.0f}")
                 return ll, sl, "Binance-LIVE"
     except Exception as e: log(f"LIQ Binance fail {e}")
-    # 2) BYBIT
     try:
         r = requests.get("https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=50", timeout=5)
         lst = r.json().get("result", {}).get("list", [])
@@ -289,12 +285,9 @@ def get_liq(price, k1):
             log(f"LIQ LIVE Bybit Long ${ll:,.0f} Short ${sl:,.0f}")
             return ll, sl, "Bybit-LIVE"
     except Exception as e: log(f"LIQ Bybit fail {e}")
-    # 3) OKX - CORRECTED parsing: data -> details list
     try:
         r = requests.get("https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&uly=BTC-USDT-SWAP&limit=100", timeout=5)
-        j = r.json()
-        d = j.get("data", [])
-        ll2 = sl2 = 0.0
+        j = r.json(); d = j.get("data", []); ll2 = sl2 = 0.0
         if d and len(d) > 0:
             for grp in d:
                 details = grp.get("details", []) if isinstance(grp, dict) else []
@@ -308,30 +301,21 @@ def get_liq(price, k1):
                 log(f"LIQ LIVE OKX Long ${ll2:,.0f} Short ${sl2:,.0f}")
                 return ll2, sl2, "OKX-LIVE"
     except Exception as e: log(f"LIQ OKX fail {e}")
-    # 4) COINBASE + KRAKEN - Real volume for proxy, CORRECTED math
     coinbase_vol_usd_per_min = 0.0
     try:
-        r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/stats", timeout=5)
-        d = r.json()
-        # Coinbase stats: volume = BTC volume last 30 days, volume_30day is in BTC
+        r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/stats", timeout=5); d = r.json()
         vol_30d_btc = float(d.get("volume", 0) or d.get("volume_30day", 0) or 0)
-        # Per-min USD vol = (30d BTC / 30 / 1440) * price
         if vol_30d_btc > 0: coinbase_vol_usd_per_min = (vol_30d_btc / 30 / 1440) * price
         log(f"LIQ BACKUP Coinbase 1m Vol ~${coinbase_vol_usd_per_min:,.0f}")
     except Exception as e: log(f"Coinbase vol fail {e}")
     try:
-        r = requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", timeout=5)
-        d = r.json().get("result", {})
+        r = requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", timeout=5); d = r.json().get("result", {})
         for k, v in d.items():
-            kraken_vol_24h = float(v.get("v", [0, 0])[1]) * price
-            log(f"LIQ BACKUP Kraken 24h Vol ${kraken_vol_24h:,.0f}")
-            break
+            kraken_vol_24h = float(v.get("v", [0, 0])[1]) * price; log(f"LIQ BACKUP Kraken 24h Vol ${kraken_vol_24h:,.0f}"); break
     except Exception as e: log(f"Kraken fail {e}")
-    # 5) FINAL REAL PROXY
     try:
         if k1 and len(k1) >= 20:
-            total_range = sum(abs(k["high"] - k["low"]) for k in k1[-20:])
-            est_total = total_range * price * 0.05
+            total_range = sum(abs(k["high"] - k["low"]) for k in k1[-20:]); est_total = total_range * price * 0.05
             if coinbase_vol_usd_per_min > 0: est_total = max(est_total, coinbase_vol_usd_per_min * 20)
             if est_total < 500000: est_total = 500000.0
             pc = (k1[-1]["close"] - k1[-20]["close"]) / k1[-20]["close"] * 100 if k1[-20]["close"] else 0
@@ -429,22 +413,63 @@ def record_close(side, entry, close_p, qty, reason):
     else: STATE["breakevens"] += 1
     log(f"CLOSE {reason} {side} ${net:.2f} at ${close_p:.0f} - 1 min Smart Recheck")
     STATE["open_position"] = None; log(f"BALANCE ${refresh_balance():.2f}"); return net
-def is_flip_confirmed(flip_dest, cert, agree, macro, side):
-    if flip_dest == "NONE" or flip_dest == side: return False
-    if not (cert >= CONFIG["FLIP_CERTAINTY"] and agree >= CONFIG["FLIP_AGREE"]): return False
-    mb = STATE["macro_brain"]["bias"]
-    if mb != flip_dest: log(f"FLIP BLOCKED Cert {flip_dest} but Macro {mb} - NO FLIP"); return False
-    return True
-def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl):
+
+# --- V13.16.3 HUNT CONFIRMED + FLIP 2-MODE ---
+def check_hunt_confirmed(side, dest, cert, agree, macro, world, ll, sl):
+    # Hunt Confirmed = at least 3/4: Cert flip + Liq Map + World + Macro Brain
+    confirms = []
+    if dest != "NONE" and dest != side and cert >= 75 and agree >= 4:
+        confirms.append(f"Cert flip {dest} Cert {cert:.0f}% Agree {agree}")
+    liq_us = ll if side == "SHORT" else sl
+    liq_opp = sl if side == "SHORT" else ll
+    if liq_us > 1000000 and liq_us > liq_opp * 1.2:
+        confirms.append(f"Liq hunt us ${liq_us:,.0f} > opp ${liq_opp:,.0f}")
+    if world:
+        opp_count = 0
+        if dest == "LONG":
+            if world.get("DXY", 0) < -0.05: opp_count += 1
+            if world.get("NQ", 0) > 0.05: opp_count += 1
+            if world.get("SPX", 0) > 0.05: opp_count += 1
+            if world.get("GOLD", 0) < -0.10: opp_count += 1
+        elif dest == "SHORT":
+            if world.get("DXY", 0) > 0.05: opp_count += 1
+            if world.get("NQ", 0) < -0.05: opp_count += 1
+            if world.get("SPX", 0) < -0.05: opp_count += 1
+            if world.get("GOLD", 0) > 0.15: opp_count += 1
+        if opp_count >= 3:
+            confirms.append(f"World {opp_count}/4 opposite {dest}")
+    mb_bias = STATE["macro_brain"].get("bias", "NEUTRAL")
+    if mb_bias == dest:
+        confirms.append(f"Macro Brain {mb_bias} = {dest}")
+    return len(confirms) >= 3, confirms, len(confirms)
+
+def is_flip_confirmed(flip_dest, cert, agree, macro, side, world=None, ll=0, sl=0, is_news=False, macro_score=0):
+    if flip_dest == "NONE" or flip_dest == side: return False, "No flip dest"
+    # HIGH VITALITY FLIP - Flip immediately: Fed/Hike/News high vitality
+    if cert >= 90 and agree >= 6 and abs(macro_score) >= 4 and is_news:
+        return True, f"HIGH VITALITY FLIP IMMEDIATE Cert {cert:.0f}% Agree {agree} Macro {macro_score} News {is_news}"
+    # NORMAL FLIP - Confirm well well, need 3/4
+    confirmed, reasons, n = check_hunt_confirmed(side, flip_dest, cert, agree, macro, world or STATE.get("world", {}), ll, sl)
+    if not confirmed:
+        return False, f"FLIP BLOCKED Need 3/4 confirm, got {n}/4 {reasons}"
+    if STATE["macro_brain"].get("bias") != flip_dest:
+        return False, f"FLIP BLOCKED Macro {STATE['macro_brain'].get('bias')} != {flip_dest}"
+    return True, f"FLIP CONFIRMED Thorough {n}/4 {reasons}"
+
+def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=None, is_news=False, macro_score=0):
     if not STATE["open_position"]: return False
     p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; tq = p.get("total_qty", qty)
     best = max(p.get("best_price", entry), price) if side == "LONG" else min(p.get("best_price", entry), price)
     p["best_price"] = best; favour = abs(best-entry); pnl_pts = (price-entry) if side == "LONG" else (entry-price)
     against = abs(price-entry) if ((side == "LONG" and price < entry) or (side == "SHORT" and price > entry)) else 0
-    if CONFIG["FLIP_ENABLED"] and is_flip_confirmed(flip_dest, cert, agree, macro, side):
-        log(f"FLIP {side}->{flip_dest} CONFIRMED Macro+Cert BOTH")
-        if STATE["mode"] == "REAL": close_real_position(side, tq)
-        record_close(side, entry, price, tq, "FLIP"); return True
+    if CONFIG["FLIP_ENABLED"]:
+        flip_ok, flip_reason = is_flip_confirmed(flip_dest, cert, agree, macro, side, world, ll, sl, is_news, macro_score)
+        if flip_ok:
+            log(f"FLIP {side}->{flip_dest} {flip_reason}")
+            if STATE["mode"] == "REAL": close_real_position(side, tq)
+            record_close(side, entry, price, tq, "FLIP"); return True
+        elif flip_dest != "NONE" and flip_dest != side:
+            log(f"FLIP CHECK BLOCKED {flip_reason}")
     if (price >= p["tp"] if side == "LONG" else price <= p["tp"]):
         if STATE["mode"] == "REAL": close_real_position(side, tq)
         record_close(side, entry, price, tq, "TP"); return False
@@ -459,10 +484,19 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl):
             record_close(side, entry, price, tq, "TRAILING"); return False
     elif favour > 0: log(f"TRAILING SLEEP Favour ${favour:.0f}<500 WideSL ${p['wide_sl']:.0f}")
     if pnl_pts > 50 and against > 0: log(f"PROFIT +${pnl_pts:.0f} HOLD Trailing go lock")
+    # V13.16.3 EMERGENCY - ONLY if Hunt Confirmed 3/4, small wick = HOLD no FOMO close
     if against >= 400 and not p.get("trailing_active"):
-        log(f"EMERGENCY AGAINST ${against:.0f} - CLOSE, no wait WideSL")
-        if STATE["mode"] == "REAL": close_real_position(side, tq)
-        record_close(side, entry, price, tq, "EMERGENCY"); return False
+        hunt_ok, hunt_reasons, hunt_n = check_hunt_confirmed(side, flip_dest, cert, agree, macro, world or STATE.get("world", {}), ll, sl)
+        if hunt_ok:
+            log(f"EMERGENCY HUNT CONFIRMED {hunt_n}/4 {hunt_reasons} Against ${against:.0f} - CLOSE, no be small wick")
+            if STATE["mode"] == "REAL": close_real_position(side, tq)
+            record_close(side, entry, price, tq, "EMERGENCY"); return False
+        else:
+            log(f"EMERGENCY HOLD Small wick Against ${against:.0f} Hunt only {hunt_n}/4 {hunt_reasons} - HOLD, fit come back, no FOMO close")
+            if against >= 1200:
+                log(f"EMERGENCY HARD WideSL $1200 reached - CLOSE")
+                if STATE["mode"] == "REAL": close_real_position(side, tq)
+                record_close(side, entry, price, tq, "EMERGENCY"); return False
     if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False) and 500 <= against <= 900:
         if (flip_dest == side or flip_dest == "NONE") and ((sl > ll) if side == "SHORT" else (ll > sl)):
             bal = get_current_balance() or 24.33; after = round(tq+qty, 3)
@@ -470,18 +504,15 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl):
                 if STATE["mode"] == "REAL":
                     if place_real_order(side, price, p["wide_sl"], p["tp"], qty, True): p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1
                 else: p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; log(f"ADD-ON PAPER {side} {qty} Total {after}")
-    # FIXED: WideSL check must still work even if trailing active - trailing SL is wide_sl itself
     if (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]):
-        # If trailing active, wide_sl == trailing price, so this IS trailing hit, already handled above, but keep as safety
         if not p.get("trailing_active") or (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]):
-            # Avoid double close if trailing already handled - check if we already returned, else close
             log(f"WIDE SL HIT ${price:.0f} vs ${p['wide_sl']:.0f}")
             if STATE["mode"] == "REAL": close_real_position(side, tq)
             record_close(side, entry, price, tq, "WIDE_SL"); return False
     return False
 
 def main():
-    log("BOT V13.16.2 SLIM FINAL GOLD PICKER STARTED - HUNTER DEAD LIQ 5-LAYER | Trailing $500/$50 WideSL $1200")
+    log("BOT V13.16.3 SLIM FINAL GOLD PICKER STARTED - HUNTER DEAD LIQ 5-LAYER HUNT-CONFIRMED | Trailing $500/$50 WideSL $1200")
     last_hb = now_utc()
     while True:
         try:
@@ -528,7 +559,7 @@ def main():
             if mflip: log(f"MACRO FLIP READY {mflip['dir']} {mflip.get('reasons')} Need Cert agree too")
             is_revenge = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
             flipped = False
-            if STATE["open_position"]: flipped = manage_position(price, qty, dest, cert, agree, macro, ll, sl)
+            if STATE["open_position"]: flipped = manage_position(price, qty, dest, cert, agree, macro, ll, sl, world, is_news, mb.get("score", 0))
             gates = [(f"Agree {agree}/{decided} Need {need_agree}", agree >= need_agree and decided >= need_agree), (f"Cert {cert:.0f}% Need {need_cert:.0f}%", cert >= need_cert), (f"Score {score:.2f}/{need_score:.2f}", score >= need_score)]
             all_pass = all(p for _, p in gates); failed = [n for n, p in gates if not p]
             bal_show = STATE["real_balance"] if mode == "REAL" else STATE["balance"]
@@ -566,4 +597,4 @@ def main():
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
 if __name__ == "__main__": main()
-# END V13.16.2 SLIM FINAL
+# END V13.16.3 SLIM FINAL
