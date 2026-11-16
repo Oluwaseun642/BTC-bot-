@@ -1,1009 +1,494 @@
-
-# ============================================================
-# BTC SWEEP BOT - V13.15.9 - HAFFAR CLEAN REAL START
-# PATCH V13.15.9 - MACRO BRAIN + FLIP NO HIDE:
-#   RULE #1: DO NOT CHANGE V13.15.8 LOGIC. Macro Brain is ADDITIVE ONLY.
-#   MACRO_BRAIN_ENABLED = ON/OFF switch. If OFF or API fail -> trade exactly like V13.15.8.
-#   AUTO_SWITCH = 2026-11-16 01:00 UTC = 2AM WAT TODAY NOV 16. PAPER till 2am, then AUTO REAL FRESH.
-#   FRESH REAL START: On switch, RESET pnl/wins/losses/trades/fake_holding/cooldown/hide/revenge to 0/None.
-#   SYNC BYBIT ON SWITCH: Fetch real balance + real position. If position dey, adopt am. If none, start fresh.
-#   PAPER FAIL BLOCK REMOVED: Paper PnL < -2 no go block REAL.
-#   TRAILING: Trigger $500, Dist $50 (Best + $50 SHORT / Best - $50 LONG). NORMAL + HUNTER.
-#   COOLDOWN: 1 min SMART RE-CHECK only. After any close, check certainties + hunters 1 min, if still good re-enter.
-#   WORLD MARKETS: Nikkei, HangSeng, FTSE, DAX, NQ, SPX, DXY, GOLD every 60 sec, certainties decide.
-#   LIQ MAP EVERY CYCLE: LongLiq / ShortLiq / Asia Low/High every 5 sec cycle, hunt detection via liq + world + volume.
-#   MACRO BRAIN LIVE: DXY, USDJPY, US10Y, Funding, FearGreed, RSI, ETF-proxy, News - every cycle, NO CACHE, NO FIXED TALK.
-#   FLIP NO HIDE: Old VETO (hide 1h) DELETED. New: ALERT -0.5% DXY pause 15m, CONFIRM 4/5 -> FLIP & TRADE, FAKE -> back to SHORT.
-#   ASIA HUNTERS READY: Hunter needs Liq >= $2M + Volume spike + World confirm + Asia sweep, else BLOCK.
-#   NO BLIND TRADE: Gates Agree 4+ Cert 75%+ Score 0.60+ must pass, else BLOCK.
-#   MAGIC SL: Emergency $400, Tight SL $500, Profit Lock if hunt against but profit > $50.
-#   DYNAMIC QTY: Bal < $20 = 0.01, +0.005 per +$8, max 0.100.
-#   CROSS + Conditional Hidden + Market Trigger still dey.
-# ============================================================
+# BTC SWEEP BOT V13.16.0 SLIM - GOLD PICKER SMART - HUNTER DEAD
+# FROM V13.15.9 - CLEANED: Duplicates + Cache + Hunter dead code REMOVED
+# KEEP: Trailing $500/$50, WideSL $1200, TP $1500, Macro LIVE no cache,
+# News, AddOn, CROSS, Dynamic Qty, NEVER_STOP, No Max Trade/Loss
+# NEW: Sweep Hide Conditional 2min, 85% Bypass, Flip Only If Both Flip,
+# Small Chops 75-84%, Skip Fake <75%
 
 import time, requests, hmac, hashlib, os, threading, json
 from datetime import datetime, timezone, timedelta
-
 try:
     from flask import Flask
-    _flask_app = Flask(__name__)
-    @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V13.15.9 - MACRO BRAIN + FLIP NO HIDE + PAPER TILL 2AM WAT NOV16 THEN REAL", 200
-    @_flask_app.route("/health")
-    def _health2(): return "OK", 200
-    def _run_flask():
-        try:
-            port = int(os.getenv("PORT", 10000)); _flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
-        except Exception as e: print(f"Flask error {e}", flush=True)
-    threading.Thread(target=_run_flask, daemon=True).start()
-    print("Flask keep-alive ON", flush=True)
+    _a = Flask(__name__)
+    @_a.route("/")
+    def _h(): return "BOT ALIVE V13.16.0 SLIM GOLD PICKER", 200
+    def _rf():
+        try: _a.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), use_reloader=False)
+        except Exception as e: print(f"Flask {e}", flush=True)
+    threading.Thread(target=_rf, daemon=True).start()
 except Exception as e: print(f"Flask OFF {e}", flush=True)
-
-def _self_ping_loop():
-    SELF_URL = os.getenv("RENDER_URL", "https://YOUR-BOT-NAME.onrender.com/")
-    while True:
-        try: time.sleep(240); requests.get(SELF_URL, timeout=10); print("SELF-PING OK", flush=True)
-        except Exception as e: print(f"SELF-PING FAIL {e}", flush=True)
-threading.Thread(target=_self_ping_loop, daemon=True).start()
-print("Self-Ping ON - every 4 min", flush=True)
 
 CONFIG = {
     "SYMBOL": "BTCUSDT", "LEVERAGE": 50,
-    # PAPER till 2am WAT Nov 16 = 01:00 UTC Nov 16
     "AUTO_SWITCH_UTC": datetime(2026, 11, 16, 1, 0, tzinfo=timezone.utc),
-    "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0,
-    "REAL_MIN_QTY": 0.010, "REAL_MAX_QTY": 0.100,
+    "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_BASE_BAL": 20.0, "QTY_STEP_BAL": 8.0, "REAL_MAX_QTY": 0.100,
     "MIN_CERTAINTY_NORMAL": 75.0, "MIN_AGREE_NORMAL": 4, "MIN_SCORE_NORMAL": 0.60,
-    "MIN_AGREE_DYNAMIC": 4, "DYNAMIC_AGREE_CERT": 90.0,
-    "TOTAL_SIGNALS": 8, "SURE_CERTAINTY": 95.0, "SURE_AGREE": 6,
+    "SURE_CERTAINTY": 95.0, "SURE_AGREE": 6,
     "NEWS_ENABLED": True, "MIN_CERTAINTY_NEWS": 75.0, "MIN_AGREE_NEWS": 4, "MIN_SCORE_NEWS": 0.60,
-    "WIDE_SL_USD": 1200.0,
+    "WIDE_SL_USD": 1200.0, "TP_DIST_USD": 1500.0,
     "TRAILING_ENABLED": True, "TRAIL_TRIGGER_MOVE_USD": 500.0, "TRAIL_DIST_USD": 50.0,
-    "HUNTER_TRAIL_TRIGGER": 500.0, "HUNTER_TRAIL_DIST": 50.0,
-    "HUNTER_SL_USD": 400.0, "HUNTER_TP_MIN_USD": 600.0,
     "FEE_RATE": 0.0006, "SLIPPAGE_PCT": 0.0005,
     "FLIP_ENABLED": True, "FLIP_CERTAINTY": 75.0, "FLIP_AGREE": 4,
-    "NEVER_STOP": True,
-    "ADDON_ENABLED": True, "ADDON_MAX_PER_POSITION": 1,
-    "ADDON_WICK_MIN_USD": 500.0, "ADDON_WICK_MAX_USD": 900.0,
-    "ADDON_BUFFER_PCT": 0.90,
-    "CROSS_MARGIN_ENABLED": True, "MARGIN_MODE": "CROSS",
-    "CONDITIONAL_HIDDEN": True,
-    "HUNT_LIMIT_ENABLED": True, "HUNT_LIMIT_WAIT_MIN": 2, "HUNT_LIMIT_OFFSET_USD": 150.0,
-    "ASIAN_ENABLED": True, "ASIAN_START_HOUR_UTC": 0, "ASIAN_END_HOUR_UTC": 8, "ASIAN_SWEEP_BUFFER_PCT": 0.0015,
-    "SESSION_HUNT_ENABLED": True, "SESSIONS": [("ASIA", 0, 0), ("LONDON", 7, 0), ("NEWYORK", 13, 30)], "SESSION_HUNT_WINDOW_MIN": 30,
-    "POLL_SEC": 5, "HEARTBEAT_MIN": 10,
-    "BYBIT_BASE": "https://api.bybit.com",
-    "TP_DIST_USD": 1500.0,
-    "PRE_HUNT_LOCK_MIN": 15,
-    "HIDE_AFTER_MISS_MIN": 15,
-    "REVENGE_LOCK_MIN": 1,
-    "SMART_RECHECK_MIN": 1,
-    "COOLDOWN_MIN": 1,
-    "HUNT_MIN_LIQ_USD": 2000000.0,
-    "HUNT_EARLY_MIN_DIST_USD": 300.0,
-    "EMERGENCY_AGAINST_USD": 400.0,
-    "PROFIT_LOCK_MIN_USD": 50.0,
-    # ===== MACRO BRAIN V13.15.9 - ADDITIVE ONLY =====
-    "MACRO_BRAIN_ENABLED": True,
-    "MACRO_ALERT_DXY_DROP": -0.5, "MACRO_ALERT_JPY_DROP": -0.8,
-    "MACRO_CONFIRM_DXY_DROP": -1.0, "MACRO_CONFIRM_JPY_DROP": -1.5,
-    "MACRO_CONFIRM_DXY_PUMP": 1.0,
+    "NEVER_STOP": True, "ADDON_ENABLED": True, "ADDON_WICK_MIN_USD": 500.0, "ADDON_WICK_MAX_USD": 900.0, "ADDON_BUFFER_PCT": 0.90,
+    "GOLD_PICKER_ENABLED": True, "HUNTER_ENABLED": False,
+    "HIGH_CERT_BYPASS": 85.0, "SWEEP_WAIT_MIN": 2, "HUNT_MIN_LIQ_USD": 2000000.0,
+    "POLL_SEC": 5, "HEARTBEAT_MIN": 10, "BYBIT_BASE": "https://api.bybit.com",
+    "COOLDOWN_MIN": 1, "EMERGENCY_AGAINST_USD": 400.0, "PROFIT_LOCK_MIN_USD": 50.0,
+    "MACRO_BRAIN_ENABLED": True, "MACRO_ALERT_DXY_DROP": -0.5, "MACRO_ALERT_JPY_DROP": -0.8,
+    "MACRO_CONFIRM_DXY_DROP": -1.0, "MACRO_CONFIRM_JPY_DROP": -1.5, "MACRO_CONFIRM_DXY_PUMP": 1.0,
     "MACRO_RECLAIM_LONG": 65746.0, "MACRO_BREAK_SHORT": 62978.0,
     "MACRO_FLIP_PULLBACK_LOW": 65800.0, "MACRO_FLIP_PULLBACK_HIGH": 66000.0,
     "MACRO_FLIP_SL": 64900.0, "MACRO_FLIP_TP1": 68000.0, "MACRO_FLIP_TP2": 70500.0,
-    "MACRO_CONFIRM_MIN": 15, "MACRO_PAUSE_MIN": 15,
-    "MACRO_VOLUME_MULT": 2.0,
+    "MACRO_CONFIRM_MIN": 15, "MACRO_VOLUME_MULT": 2.0,
 }
 API_KEY = os.getenv("BYBIT_API_KEY", ""); API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "day_start_balance": 24.33, "pnl": 0.0,
-    "wins": 0, "losses": 0, "breakevens": 0, "flips": 0, "addons": 0, "trades_today": 0, "losses_today": 0,
-    "day": datetime.now(timezone.utc).date(), "open_position": None, "pending_hunt": None,
-    "last_price": 0.0, "cross_margin_set": False, "last_qty": 0.010, "last_balance_checked": 0.0,
-    "last_macro": {"DXY_CHG": 0.0, "NQ_CHG": 0.0, "SPX_CHG": 0.0, "GOLD_CHG": 0.0, "OI_CHG": 0.0},
-    "last_liq_map": {"long_liq": 0.0, "short_liq": 0.0, "asia_low": 0.0, "asia_high": 0.0, "hunt": "NONE"}, "last_session": "NONE",
-    "hide_until": None, "revenge_until": None, "cooldown_until": None, "last_close_reason": None, "last_close_time": None,
-    "world": {}, "world_last_fetch": 0, "paper_start_pnl": 0.0, "paper_fake_holding": 0, "paper_pass": True,
-    # Macro Brain state - additive, never overwrites core
-    "macro_brain": {"score": 0.0, "bias": "NEUTRAL", "alert": None, "alert_time": None, "confirm_count": 0, "flip_pending": None, "last_check": 0},
-    "macro_history": {"dxy_1h_ago": None, "jpy_1h_ago": None, "dxy_1h_time": None},
-}
+STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0, "flips": 0, "addons": 0, "trades_today": 0,
+    "open_position": None, "last_price": 0.0, "cross_margin_set": False, "last_qty": 0.010,
+    "hide_until": None, "cooldown_until": None, "world": {},
+    "macro_brain": {"score": 0.0, "bias": "NEUTRAL", "alert": None, "alert_time": None, "confirm_count": 0, "flip_pending": None},
+    "sweep_wait": None, "sweep_wait_dir": None}
 
 def now_utc(): return datetime.now(timezone.utc)
-def log(msg): print(f"[{now_utc().strftime('%H:%M:%S %d %b')}] {msg}", flush=True)
+def log(m): print(f"[{now_utc().strftime('%H:%M:%S %d %b')}] {m}", flush=True)
 def get_mode():
     rm = os.getenv("REAL_MODE", "").strip().lower()
     if rm == "true": return "REAL"
     if rm == "false": return "PAPER"
     return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
 
-def _bybit_sign_v5(timestamp, recv_window, body_str):
-    payload = f"{timestamp}{API_KEY}{recv_window}{body_str}"
-    return hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-def _safe_json(r):
+def _sign(ts, rw, body):
+    return hmac.new(API_SECRET.encode(), f"{ts}{API_KEY}{rw}{body}".encode(), hashlib.sha256).hexdigest()
+def _safe(r):
     try:
-        txt = r.text.strip() if r.text else ""
-        if not txt: return {"retCode": -1, "retMsg": "Empty response from Bybit", "result": {}}
-        return r.json()
-    except Exception as e:
-        return {"retCode": -1, "retMsg": f"JSON parse fail: {e}", "result": {}}
-def bybit_post(path, params):
+        t = r.text.strip()
+        return r.json() if t else {"retCode": -1, "retMsg": "Empty", "result": {}}
+    except Exception as e: return {"retCode": -1, "retMsg": f"JSON {e}", "result": {}}
+def bybit_post(path, p):
     try:
-        timestamp = str(int(time.time()*1000)); recv_window = "5000"
-        body_str = json.dumps(params, separators=(',', ':'))
-        sign = _bybit_sign_v5(timestamp, recv_window, body_str)
-        headers = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": timestamp, "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sign, "Content-Type": "application/json"}
-        r = requests.post(CONFIG["BYBIT_BASE"]+path, data=body_str, headers=headers, timeout=10)
-        return _safe_json(r)
-    except Exception as e: return {"retCode": -1, "retMsg": f"POST error {e}", "result": {}}
-def bybit_get(path, params):
+        ts = str(int(time.time()*1000)); body = json.dumps(p, separators=(',', ':')); s = _sign(ts, "5000", body)
+        h = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN": s, "Content-Type": "application/json"}
+        return _safe(requests.post(CONFIG["BYBIT_BASE"]+path, data=body, headers=h, timeout=10))
+    except Exception as e: return {"retCode": -1, "retMsg": str(e), "result": {}}
+def bybit_get(path, p):
     try:
-        timestamp = str(int(time.time()*1000)); recv_window = "5000"
-        qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-        sign = _bybit_sign_v5(timestamp, recv_window, qs)
-        headers = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": timestamp, "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sign}
-        r = requests.get(CONFIG["BYBIT_BASE"]+path, params=params, headers=headers, timeout=10)
-        return _safe_json(r)
-    except Exception as e: return {"retCode": -1, "retMsg": f"GET error {e}", "result": {}}
+        ts = str(int(time.time()*1000)); qs = "&".join([f"{k}={v}" for k, v in sorted(p.items())]); s = _sign(ts, "5000", qs)
+        h = {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": "5000", "X-BAPI-SIGN": s}
+        return _safe(requests.get(CONFIG["BYBIT_BASE"]+path, params=p, headers=h, timeout=10))
+    except Exception as e: return {"retCode": -1, "retMsg": str(e), "result": {}}
 
 def get_real_balance():
     try:
-        res = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
-        if res.get("retCode") != 0:
-            log(f"REAL BALANCE API WARN {res.get('retMsg')} - using last {STATE['real_balance']}")
-            return STATE["real_balance"] or 24.33
-        bal = float(res["result"]["list"][0]["coin"][0]["walletBalance"]); STATE["real_balance"] = bal; return bal
-    except Exception as e:
-        log(f"REAL BALANCE ERROR {e} - using last {STATE['real_balance']}"); return STATE["real_balance"] or 24.33
+        r = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+        if r.get("retCode") != 0: return STATE["real_balance"] or 24.33
+        b = float(r["result"]["list"][0]["coin"][0]["walletBalance"]); STATE["real_balance"] = b; return b
+    except: return STATE["real_balance"] or 24.33
 def get_current_balance(): return STATE["real_balance"] if STATE["mode"] == "REAL" else STATE["balance"]
-def refresh_balance(reason="CYCLE"):
-    if STATE["mode"] == "REAL":
-        old = STATE["real_balance"]; new = get_real_balance()
-        if abs(new - old) > 0.001: log(f"BALANCE CHECK [{reason}]: REAL ${old:.2f} -> ${new:.2f}")
-        STATE["last_balance_checked"] = new; return new
-    STATE["last_balance_checked"] = STATE["balance"]; return STATE["balance"]
-
+def refresh_balance():
+    return get_real_balance() if STATE["mode"] == "REAL" else STATE["balance"]
 def get_real_position_sync():
     if STATE["mode"] != "REAL" or not API_KEY: return None
     try:
-        res = bybit_get("/v5/position/list", {"category": "linear", "symbol": CONFIG["SYMBOL"]})
-        if res.get("retCode") != 0: return None
-        lst = res["result"].get("list", [])
-        for p in lst:
-            sz = float(p.get("size", 0))
-            if sz > 0:
-                return {"side": "LONG" if p.get("side")=="Buy" else "SHORT", "size": sz, "entry": float(p.get("avgPrice", 0)), "sl": p.get("stopLoss"), "tp": p.get("takeProfit")}
-        return None
-    except: return None
-
+        r = bybit_get("/v5/position/list", {"category": "linear", "symbol": CONFIG["SYMBOL"]})
+        if r.get("retCode") != 0: return None
+        for p in r["result"].get("list", []):
+            if float(p.get("size", 0)) > 0:
+                return {"side": "LONG" if p.get("side") == "Buy" else "SHORT", "size": float(p.get("size", 0)), "entry": float(p.get("avgPrice", 0)), "sl": p.get("stopLoss"), "tp": p.get("takeProfit")}
+    except: pass
+    return None
 def set_cross_margin():
-    if not CONFIG["CROSS_MARGIN_ENABLED"]: return True
     if STATE.get("cross_margin_set"): return True
-    if STATE["mode"] == "PAPER":
-        log("CROSS MARGIN: PAPER - Whole balance dey back position + Add-on"); STATE["cross_margin_set"] = True; return True
+    if STATE["mode"] == "PAPER": STATE["cross_margin_set"] = True; return True
     if not API_KEY: return False
     try:
-        res = bybit_post("/v5/position/switch-margin-mode", {"category": "linear", "symbol": CONFIG["SYMBOL"], "tradeMode": 0, "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
-        if res.get("retCode") == 0 or "already" in str(res.get("retMsg","")).lower() or res.get("retCode") == 110026:
-            log(f"CROSS MARGIN SET: Bybit tradeMode 0 = CROSS | Lev {CONFIG['LEVERAGE']}x | {res.get('retMsg')}")
-            STATE["cross_margin_set"] = True; return True
-        log(f"CROSS MARGIN SKIP: Bybit say {res.get('retMsg')} (retCode {res.get('retCode')}) - Bot continue")
+        bybit_post("/v5/position/switch-margin-mode", {"category": "linear", "symbol": CONFIG["SYMBOL"], "tradeMode": 0, "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
         STATE["cross_margin_set"] = True; return True
-    except Exception as e:
-        log(f"CROSS MARGIN SKIP - {e}"); STATE["cross_margin_set"] = True; return True
-
-def calc_dynamic_fees(price, qty):
-    pos = qty * price; fees = pos * CONFIG["FEE_RATE"] * 2; slip = pos * CONFIG["SLIPPAGE_PCT"] * 2; total = fees + slip
-    return pos, fees, slip, total
+    except: STATE["cross_margin_set"] = True; return True
+def calc_fees(price, qty):
+    pos = qty*price; return pos, pos*CONFIG["FEE_RATE"]*2, pos*CONFIG["SLIPPAGE_PCT"]*2, pos*CONFIG["FEE_RATE"]*2 + pos*CONFIG["SLIPPAGE_PCT"]*2
 def get_dynamic_qty(price):
-    bal = refresh_balance("QTY-CALC")
-    if bal < CONFIG["QTY_BASE_BAL"]: qty = CONFIG["QTY_BASE"]; steps = 0
-    else:
-        steps = int((bal - CONFIG["QTY_BASE_BAL"]) // CONFIG["QTY_STEP_BAL"])
-        qty = round(CONFIG["QTY_BASE"] + steps * CONFIG["QTY_STEP"], 3)
-    qty = min(qty, CONFIG["REAL_MAX_QTY"])
-    if qty != STATE.get("last_qty", 0.010): log(f"QTY TIER CHANGE: Bal ${bal:.2f} -> Steps {steps} = Qty {qty}")
-    else: log(f"QTY TIER CHECK: Bal ${bal:.2f} -> Steps {steps} = Qty {qty}")
-    STATE["last_qty"] = qty; return qty
-
-def place_real_order(side, price, wide_sl, tp, qty, is_addon=False):
-    if not API_KEY or not API_SECRET: log("REAL ORDER BLOCKED: No API keys"); return False
+    bal = refresh_balance()
+    qty = CONFIG["QTY_BASE"] if bal < 20 else round(CONFIG["QTY_BASE"] + int((bal-20)//8)*CONFIG["QTY_STEP"], 3)
+    return min(qty, CONFIG["REAL_MAX_QTY"])
+def place_real_order(side, price, sl, tp, qty, is_addon=False):
+    if not API_KEY: log("REAL BLOCKED No API"); return False
     try:
         set_cross_margin()
         bybit_post("/v5/position/set-leverage", {"category": "linear", "symbol": CONFIG["SYMBOL"], "buyLeverage": str(CONFIG["LEVERAGE"]), "sellLeverage": str(CONFIG["LEVERAGE"])})
-        res = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Buy" if side == "LONG" else "Sell",
-            "orderType": "Market", "qty": str(qty), "takeProfit": str(round(tp, 1)), "stopLoss": str(round(wide_sl, 1)),
-            "tpTriggerBy": "LastPrice", "slTriggerBy": "LastPrice", "tpslMode": "Full", "positionIdx": 0, "timeInForce": "GTC"})
-        if res.get("retCode") == 0:
-            log(f"REAL ORDER OK [{'ADD-ON' if is_addon else 'MAIN'}] {side} Qty {qty} OrderId {res['result'].get('orderId')} Entry ~${price:.0f} SL ${wide_sl:.0f} TP ${tp:.0f}")
-            return True
-        else:
-            log(f"REAL ORDER REJECTED ❌ {side} Qty {qty} | retCode {res.get('retCode')} {res.get('retMsg')} — NO POSITION SET")
-            return False
-    except Exception as e: log(f"REAL ORDER ERROR {e}"); return False
-
-def place_hunt_limit(side, hunt_price, qty):
-    if not API_KEY: return False, None
+        r = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Buy" if side == "LONG" else "Sell", "orderType": "Market", "qty": str(qty), "takeProfit": str(round(tp, 1)), "stopLoss": str(round(sl, 1)), "tpTriggerBy": "LastPrice", "slTriggerBy": "LastPrice", "tpslMode": "Full", "positionIdx": 0, "timeInForce": "GTC"})
+        log(f"REAL ORDER {'OK' if r.get('retCode')==0 else 'REJECTED '+str(r.get('retMsg'))} {side} Qty {qty} Entry ${price:.0f} SL ${sl:.0f} TP ${tp:.0f}")
+        return r.get("retCode") == 0
+    except Exception as e: log(f"REAL ORDER ERR {e}"); return False
+def update_real_sl(sl, side):
+    if STATE["mode"] != "REAL" or not API_KEY: return True
     try:
-        direction = 1 if side == "SHORT" else 2
-        res = bybit_post("/v5/order/create", {
-            "category": "linear", "symbol": CONFIG["SYMBOL"],
-            "side": "Buy" if side == "LONG" else "Sell",
-            "orderType": "Market",
-            "triggerPrice": str(round(hunt_price, 1)),
-            "triggerBy": "LastPrice",
-            "triggerDirection": direction,
-            "tpslMode": "Full", "positionIdx": 0,
-            "timeInForce": "GTC",
-            "qty": str(qty),
-            "reduceOnly": False,
-        })
-        if res.get("retCode") == 0:
-            oid = res["result"].get("orderId"); log(f"HUNT MARKET TRIGGER OK {side} Trigger @ ${hunt_price:.0f} OrderId {oid} Dir {direction} — Fill at market, no miss"); return True, oid
-        else:
-            log(f"HUNT MARKET TRIGGER REJECTED ❌ {res.get('retMsg')} — No fake pending"); return False, None
-    except Exception as e: log(f"HUNT MARKET TRIGGER ERROR {e}"); return False, None
-
-def cancel_hunt_limit(order_id=None):
-    try:
-        if API_KEY and STATE["mode"] == "REAL" and order_id:
-            bybit_post("/v5/order/cancel", {"category": "linear", "symbol": CONFIG["SYMBOL"], "orderId": order_id})
-        elif API_KEY and STATE["mode"] == "REAL" and not order_id:
-            log("CANCEL HUNT: No orderId, skip cancel-all to protect real TP/SL")
-    except: pass
-    STATE["pending_hunt"] = None
-    log("HUNT MARKET TRIGGER CANCELLED - Enter Market gangan")
-
-def update_real_sl(new_sl, side):
-    if STATE["mode"] != "REAL": return True
-    if not API_KEY: return False
-    try:
-        res = bybit_post("/v5/position/trading-stop", {"category": "linear", "symbol": CONFIG["SYMBOL"], "stopLoss": str(round(new_sl, 1)), "slTriggerBy": "LastPrice", "positionIdx": 0})
-        log(f"REAL SL UPDATED -> ${new_sl:.0f} | {res.get('retMsg')}"); return res.get("retCode") == 0
-    except Exception as e: log(f"REAL SL UPDATE ERROR {e}"); return False
-
+        r = bybit_post("/v5/position/trading-stop", {"category": "linear", "symbol": CONFIG["SYMBOL"], "stopLoss": str(round(sl, 1)), "slTriggerBy": "LastPrice", "positionIdx": 0})
+        return r.get("retCode") == 0
+    except: return False
 def close_real_position(side, qty):
     if STATE["mode"] != "REAL": return True
     try:
-        res = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Sell" if side == "LONG" else "Buy", "orderType": "Market", "qty": str(qty), "timeInForce": "GTC", "positionIdx": 0})
-        log(f"REAL POSITION CLOSED {side} Qty {qty} | retCode {res.get('retCode')} {res.get('retMsg')}"); return res.get("retCode") == 0
-    except Exception as e: log(f"REAL CLOSE ERROR {e}"); return False
+        r = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Sell" if side == "LONG" else "Buy", "orderType": "Market", "qty": str(qty), "timeInForce": "GTC", "positionIdx": 0})
+        return r.get("retCode") == 0
+    except: return False
 
-def fetch_live_multi(symbols_yahoo, symbols_stooq):
-    for sym in symbols_yahoo:
+# --- LIVE FETCH - NO CACHE, every cycle fresh ---
+def yahoo_chg(sym):
+    try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
-            try:
-                headers = {"User-Agent": "Mozilla/5.0"}; r = requests.get(f"{base}/v8/finance/chart/{sym}?range=1d&interval=1m", headers=headers, timeout=5)
-                meta = r.json()["chart"]["result"][0]["meta"]; price = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0); prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
-                if price and prev and price != prev: return round((price - prev) / prev * 100, 3), f"Yahoo:{sym}"
-            except: continue
-    for s in symbols_stooq:
-        try:
-            r = requests.get(f"https://stooq.com/q/d/l/?s={s}&i=d", timeout=5); lines = [l.strip().split(",") for l in r.text.strip().splitlines() if "," in l]; closes = []
-            for row in lines[1:]:
-                try: closes.append(float(row[4]))
-                except: pass
-            if len(closes) >= 2 and closes[-2]: return round((closes[-1]-closes[-2])/closes[-2]*100, 3), f"Stooq:{s}"
-        except: continue
-    return None, "FAIL"
-
-def fetch_yahoo_price(sym):
-    # Live price for DXY / USDJPY / US10Y - no cache
+            r = requests.get(f"{base}/v8/finance/chart/{sym}?range=1d&interval=1m", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+            meta = r.json()["chart"]["result"][0]["meta"]; price = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0); prev = float(meta.get("previousClose") or price)
+            if price and prev and price != prev: return round((price-prev)/prev*100, 3), price, prev
+    except: pass
+    return None, None, None
+def yahoo_price_1h(sym):
     try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
             r = requests.get(f"{base}/v8/finance/chart/{sym}?range=1d&interval=5m", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-            res = r.json()["chart"]["result"][0]; meta = res["meta"]; closes = res["indicators"]["quote"][0].get("close", [])
-            closes = [c for c in closes if c is not None]
+            res = r.json()["chart"]["result"][0]; closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c is not None]
             if closes:
-                cur = float(closes[-1]); prev = float(meta.get("previousClose") or closes[0])
-                chg_day = (cur - prev)/prev*100 if prev else 0.0
-                # 1h change: approx last 12x5m candles
-                chg_1h = (cur - closes[-13])/closes[-13]*100 if len(closes) >= 13 and closes[-13] else 0.0
+                cur = float(closes[-1]); prev = float(res["meta"].get("previousClose") or closes[0])
+                chg_day = (cur-prev)/prev*100 if prev else 0; chg_1h = (cur-closes[-13])/closes[-13]*100 if len(closes) >= 13 and closes[-13] else 0
                 return cur, chg_day, chg_1h
-    except Exception as e:
-        log(f"YAHOO PRICE FAIL {sym}: {e}")
+    except Exception as e: log(f"YAHOO FAIL {sym} {e}")
     return None, None, None
-
-def get_world_markets():
-    now_ts = time.time()
-    if now_ts - STATE.get("world_last_fetch", 0) < 60 and STATE.get("world"):
-        return STATE["world"]
-    world = {}
-    pairs = [("NIKKEI", ["^N225"], ["^N225"]), ("HANG_SENG", ["^HSI"], ["^HSI"]), ("FTSE", ["^FTSE"], ["^FTSE"]), ("DAX", ["^GDAXI"], ["^GDAXI"]), ("NQ", ["NQ=F"], ["nq.f"]), ("SPX", ["ES=F"], ["es.f"]), ("GOLD", ["GC=F"], ["gc.f"]), ("DXY", ["DX-Y.NYB"], ["dx.f"])]
-    for name, yahoo, stooq in pairs:
-        chg, src = fetch_live_multi(yahoo, stooq)
-        world[name] = chg if chg is not None else STATE.get("world", {}).get(name, 0.0)
-        world[name+"_SRC"] = src
-    STATE["world"] = world; STATE["world_last_fetch"] = now_ts
-    log(f"WORLD LIVE Nikkei {world.get('NIKKEI',0):.2f}% HangSeng {world.get('HANG_SENG',0):.2f}% FTSE {world.get('FTSE',0):.2f}% DAX {world.get('DAX',0):.2f}% NQ {world.get('NQ',0):.2f}% SPX {world.get('SPX',0):.2f}% DXY {world.get('DXY',0):.2f}% GOLD {world.get('GOLD',0):.2f}%")
-    return world
-
+def get_world():
+    w = {}
+    for name, sym in [("NIKKEI", "^N225"), ("HANG_SENG", "^HSI"), ("FTSE", "^FTSE"), ("DAX", "^GDAXI"), ("NQ", "NQ=F"), ("SPX", "ES=F"), ("GOLD", "GC=F"), ("DXY", "DX-Y.NYB")]:
+        chg, _, _ = yahoo_chg(sym); w[name] = chg if chg is not None else 0.0
+    STATE["world"] = w
+    log(f"WORLD LIVE Nikkei {w['NIKKEI']:.2f}% HSI {w['HANG_SENG']:.2f}% FTSE {w['FTSE']:.2f}% DAX {w['DAX']:.2f}% NQ {w['NQ']:.2f}% SPX {w['SPX']:.2f}% DXY {w['DXY']:.2f}% GOLD {w['GOLD']:.2f}%")
+    return w
 def get_price_live():
+    for url, fn in [("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", "bybit"), ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "binance")]:
+        try:
+            r = requests.get(url, timeout=5)
+            p = float(r.json()["result"]["list"][0]["lastPrice"]) if fn == "bybit" else float(r.json()["price"])
+            STATE["last_price"] = p; return p, fn
+        except: continue
+    return STATE["last_price"] or 0.0, "Cached"
+def get_klines(interval, limit):
+    # interval: "1" or "15" - single function, no duplicate
     try:
-        r = requests.get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", timeout=5); p = float(r.json()["result"]["list"][0]["lastPrice"]); STATE["last_price"] = p; return p, "Bybit"
-    except: pass
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5); p = float(r.json()["price"]); STATE["last_price"] = p; return p, "Binance"
-    except: pass
-    try:
-        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=5); p = float(r.json()["bitcoin"]["usd"]); STATE["last_price"] = p; return p, "CoinGecko"
-    except: pass
-    if STATE["last_price"]: return STATE["last_price"], "LastPrice-Cached"
-    return 0.0, "NO-PRICE"
-
-def get_klines_live(interval, limit):
-    try:
-        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5); kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl], "Bybit"
-    except: pass
-    try:
-        b_interval = "1m" if interval == "1" else "15m"; r = requests.get(f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={b_interval}&limit={limit}", timeout=5); kl = r.json(); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl], "Binance"
-    except: pass
-    return [], "FAIL"
-def get_klines(limit=200):
-    kl, _ = get_klines_live("15", limit); return kl
-def get_klines_1m(limit=20):
-    kl, _ = get_klines_live("1", limit); return kl
-
+        r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5)
+        kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl]
+    except:
+        try:
+            bi = "1m" if interval == "1" else "15m"; r = requests.get(f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={bi}&limit={limit}", timeout=5)
+            return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in r.json()]
+        except: return []
 def calc_rsi(klines, period=14):
     if not klines or len(klines) < period+1: return 50.0
-    closes = [k["close"] for k in klines]
-    gains, losses = [], []
+    closes = [k["close"] for k in klines]; gains = []; losses = []
     for i in range(1, len(closes)):
-        d = closes[i]-closes[i-1]
-        gains.append(max(d,0)); losses.append(max(-d,0))
-    gains = gains[-period:]; losses = losses[-period:]
-    avg_gain = sum(gains)/period; avg_loss = sum(losses)/period
-    if avg_loss == 0: return 100.0
-    rs = avg_gain/avg_loss
-    return round(100 - (100/(1+rs)), 1)
-
-def get_funding_live():
+        d = closes[i]-closes[i-1]; gains.append(max(d, 0)); losses.append(max(-d, 0))
+    ag = sum(gains[-period:])/period; al = sum(losses[-period:])/period
+    if al == 0: return 100.0
+    return round(100 - (100/(1+ag/al)), 1)
+def get_funding():
     try:
         r = requests.get("https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1", timeout=5)
         lst = r.json()["result"].get("list", [])
         if lst: return float(lst[0].get("fundingRate", 0))*100, "Bybit-LIVE"
     except: pass
-    try:
-        r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1", timeout=5)
-        d = r.json()
-        if d: return float(d[0].get("fundingRate", 0))*100, "Binance-LIVE"
-    except: pass
     return 0.0, "FAIL"
-
-def get_fear_greed_live():
+def get_fear():
     try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5)
-        v = int(r.json()["data"][0]["value"]); return v, "Alternative-LIVE"
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5); return int(r.json()["data"][0]["value"]), "Alternative-LIVE"
     except: return 50, "FAIL"
 
-# ===== MACRO BRAIN - LIVE, ADDITIVE, FALLBACK TO OLD BOT =====
-def get_macro_brain_live(price, klines_1m, klines_15m, macro_old):
-    if not CONFIG["MACRO_BRAIN_ENABLED"]:
-        return {"score": 0.0, "bias": "NEUTRAL", "detail": "OFF - Old bot only", "alert": None, "flip": None}
+def get_macro_brain(price, k1, k15, macro_old):
+    if not CONFIG["MACRO_BRAIN_ENABLED"]: return {"score": 0.0, "bias": "NEUTRAL", "alert": None, "flip": None}
     try:
-        dxy_price, dxy_day, dxy_1h = fetch_yahoo_price("DX-Y.NYB")
-        jpy_price, jpy_day, jpy_1h = fetch_yahoo_price("USDJPY=X")
-        tnx_price, tnx_day, tnx_1h = fetch_yahoo_price("^TNX")
-        funding, funding_src = get_funding_live()
-        fng, fng_src = get_fear_greed_live()
-        rsi_1h = calc_rsi(klines_15m[-60:] if klines_15m else [], 14) if klines_15m else 50.0
-        # Volume: compare last 5x1m volume proxy via range vs avg
+        dxy_p, dxy_d, dxy_1h = yahoo_price_1h("DX-Y.NYB"); jpy_p, jpy_d, jpy_1h = yahoo_price_1h("USDJPY=X"); tnx_p, tnx_d, tnx_1h = yahoo_price_1h("^TNX")
+        funding, fsrc = get_funding(); fng, fsrc2 = get_fear(); rsi = calc_rsi(k15[-60:] if k15 else [], 14)
         vol_spike = False; vol_mult = 1.0
-        if klines_1m and len(klines_1m) >= 15:
-            recent = sum(abs(k["high"]-k["low"]) for k in klines_1m[-5:])
-            avg = sum(abs(k["high"]-k["low"]) for k in klines_1m[-15:-5]) / 10 if len(klines_1m) >= 15 else recent
-            if avg > 0:
-                vol_mult = recent / max(avg, 1)
-                vol_spike = vol_mult >= CONFIG["MACRO_VOLUME_MULT"]
-        # Scoring -10 SHORT to +10 LONG
-        score = 0.0; details = []
+        if k1 and len(k1) >= 15:
+            rec = sum(abs(k["high"]-k["low"]) for k in k1[-5:]); avg = sum(abs(k["high"]-k["low"]) for k in k1[-15:-5])/10
+            if avg > 0: vol_mult = rec/max(avg, 1); vol_spike = vol_mult >= CONFIG["MACRO_VOLUME_MULT"]
+        score = 0.0; det = []
         if dxy_1h is not None:
-            if dxy_1h > 0.2: score -= 2; details.append(f"DXY 1h +{dxy_1h:.2f}% SHORT+2")
-            elif dxy_1h < -0.5: score += 2; details.append(f"DXY 1h {dxy_1h:.2f}% LONG+2")
-            if dxy_price and dxy_price > 102.5: score -= 1; details.append("DXY>102.5 SHORT+1")
+            if dxy_1h > 0.2: score -= 2; det.append(f"DXY 1h +{dxy_1h:.2f}% SHORT+2")
+            elif dxy_1h < -0.5: score += 2; det.append(f"DXY 1h {dxy_1h:.2f}% LONG+2")
+            if dxy_p and dxy_p > 102.5: score -= 1; det.append("DXY>102.5 SHORT+1")
         if jpy_1h is not None:
-            if jpy_1h < -1.5: score += 2; details.append(f"USDJPY 1h {jpy_1h:.2f}% INTERVENTION LONG+2")
-            elif jpy_1h < -0.8: score += 1; details.append("USDJPY dropping LONG+1")
-        if tnx_day is not None and tnx_day > 0.5: score -= 1; details.append("US10Y up SHORT+1")
-        if funding < -0.01: score += 1; details.append(f"Funding {funding:.4f}% shorts crowded LONG+1")
-        elif funding > 0.02: score -= 1; details.append("Funding high SHORT+1")
-        if rsi_1h < 25: score += 1; details.append(f"RSI {rsi_1h} oversold LONG+1 (no chase SHORT)")
-        elif rsi_1h > 70: score -= 1; details.append("RSI overbought SHORT+1")
-        if fng <= 10: score += 0.5; details.append(f"FearGreed {fng} extreme fear bounce risk")
-        if macro_old.get("NQ_CHG", 0) < -0.5: score -= 1; details.append("NQ down SHORT+1")
-        if macro_old.get("OI_CHG", 0) < -0.5 and price < 66000: score -= 0.5; details.append("OI falling SHORT")
+            if jpy_1h < -1.5: score += 2; det.append("USDJPY -1.5% INTERVENTION LONG+2")
+            elif jpy_1h < -0.8: score += 1; det.append("USDJPY dropping LONG+1")
+        if tnx_d is not None and tnx_d > 0.5: score -= 1; det.append("US10Y up SHORT+1")
+        if funding < -0.01: score += 1; det.append("Funding shorts crowded LONG+1")
+        elif funding > 0.02: score -= 1; det.append("Funding high SHORT+1")
+        if rsi < 25: score += 1; det.append(f"RSI {rsi} oversold LONG+1")
+        elif rsi > 70: score -= 1; det.append("RSI overbought SHORT+1")
+        if fng <= 10: score += 0.5; det.append(f"Fear {fng} bounce risk")
+        if macro_old.get("NQ_CHG", 0) < -0.5: score -= 1; det.append("NQ down SHORT+1")
         bias = "SHORT" if score <= -2 else "LONG" if score >= 2 else "NEUTRAL"
-        # FLIP NO HIDE logic
-        alert = None; flip = None
-        mb = STATE["macro_brain"]
-        # ALERT stage
-        if (dxy_1h is not None and dxy_1h <= CONFIG["MACRO_ALERT_DXY_DROP"]) or (jpy_1h is not None and jpy_1h <= CONFIG["MACRO_ALERT_JPY_DROP"]):
-            if mb.get("alert") is None:
-                mb["alert"] = "DXY/JPY DROP"; mb["alert_time"] = now_utc(); mb["confirm_count"] = 0
-                log(f"MACRO ALERT: DXY 1h {dxy_1h} JPY 1h {jpy_1h} - PAUSE new SHORT 15m only, no close open")
+        mb = STATE["macro_brain"]; alert = None; flip = None
+        if (dxy_1h is not None and dxy_1h <= -0.5) or (jpy_1h is not None and jpy_1h <= -0.8):
+            if mb.get("alert") is None: mb["alert"] = "DXY/JPY DROP"; mb["alert_time"] = now_utc(); mb["confirm_count"] = 0; log(f"MACRO ALERT DXY {dxy_1h} JPY {jpy_1h} - PAUSE new SHORT 15m")
             alert = "PAUSE_SHORT"
-        # CONFIRM stage - need 4/5
         if mb.get("alert"):
-            elapsed = (now_utc() - mb["alert_time"]).total_seconds()/60 if mb.get("alert_time") else 99
-            confirms = 0; c_details = []
-            if dxy_1h is not None and dxy_1h <= CONFIG["MACRO_CONFIRM_DXY_DROP"]: confirms += 1; c_details.append("DXY -1%")
-            if jpy_1h is not None and jpy_1h <= CONFIG["MACRO_CONFIRM_JPY_DROP"]: confirms += 1; c_details.append("JPY -1.5%")
-            if price >= CONFIG["MACRO_RECLAIM_LONG"]: confirms += 1; c_details.append(f"BTC reclaim {CONFIG['MACRO_RECLAIM_LONG']}")
-            if vol_spike: confirms += 1; c_details.append(f"Volume {vol_mult:.1f}x")
-            # News proxy: big 15m move = news spike
-            if klines_1m and len(klines_1m) >= 15:
-                mv15 = (klines_1m[-1]["close"]-klines_1m[-15]["close"])/klines_1m[-15]["close"]*100
-                if abs(mv15) >= 0.8: confirms += 1; c_details.append(f"News spike {mv15:.2f}%")
-            mb["confirm_count"] = confirms
-            if confirms >= 4:
-                flip = {"dir": "LONG", "entry_low": CONFIG["MACRO_FLIP_PULLBACK_LOW"], "entry_high": CONFIG["MACRO_FLIP_PULLBACK_HIGH"], "sl": CONFIG["MACRO_FLIP_SL"], "tp1": CONFIG["MACRO_FLIP_TP1"], "tp2": CONFIG["MACRO_FLIP_TP2"], "reasons": c_details}
-                log(f"MACRO FLIP CONFIRMED 4/5 {c_details} - FLIP TO LONG, NO HIDE, TRADE IT")
-                mb["alert"] = None; mb["flip_pending"] = flip
-            elif elapsed >= CONFIG["MACRO_CONFIRM_MIN"]:
-                log(f"MACRO ALERT FAKE - {elapsed:.0f}m no confirm ({confirms}/5) - Back to SHORT, cancel LONG plan")
-                mb["alert"] = None; mb["flip_pending"] = None; alert = None
-        # Opposite DUMP confirm
-        if dxy_1h is not None and dxy_1h >= CONFIG["MACRO_CONFIRM_DXY_PUMP"] and price < CONFIG["MACRO_BREAK_SHORT"] and vol_spike:
-            flip = {"dir": "SHORT", "entry_low": 63000, "entry_high": 63500, "sl": 65000, "tp1": 62000, "tp2": 60000, "reasons": ["DXY +1%", "BTC break 62978", "Volume spike"]}
-            log("MACRO DUMP CONFIRMED - Confirm SHORT, trade it")
-        mb["score"] = score; mb["bias"] = bias; mb["last_check"] = time.time()
-        log(f"MACRO BRAIN LIVE Score {score:+.1f} Bias {bias} | DXY ${dxy_price} 1h {dxy_1h} | USDJPY {jpy_price} 1h {jpy_1h} | 10Y {tnx_day}% | Funding {funding:.4f}% {funding_src} | Fear {fng} {fng_src} | RSI {rsi_1h} | Vol {vol_mult:.1f}x | {' | '.join(details)}")
-        return {"score": score, "bias": bias, "detail": " | ".join(details), "alert": alert, "flip": flip, "dxy_1h": dxy_1h, "jpy_1h": jpy_1h, "vol_spike": vol_spike}
-    except Exception as e:
-        log(f"MACRO BRAIN ERROR {e} - FALLBACK to old bot, no block")
-        return {"score": 0.0, "bias": "NEUTRAL", "detail": f"ERROR {e}", "alert": None, "flip": None}
+            el = (now_utc()-mb["alert_time"]).total_seconds()/60 if mb.get("alert_time") else 99; conf = 0; cd = []
+            if dxy_1h is not None and dxy_1h <= -1.0: conf += 1; cd.append("DXY -1%")
+            if jpy_1h is not None and jpy_1h <= -1.5: conf += 1; cd.append("JPY -1.5%")
+            if price >= CONFIG["MACRO_RECLAIM_LONG"]: conf += 1; cd.append("BTC reclaim 65746")
+            if vol_spike: conf += 1; cd.append(f"Vol {vol_mult:.1f}x")
+            if k1 and len(k1) >= 15:
+                mv = (k1[-1]["close"]-k1[-15]["close"])/k1[-15]["close"]*100
+                if abs(mv) >= 0.8: conf += 1; cd.append(f"News {mv:.2f}%")
+            mb["confirm_count"] = conf
+            if conf >= 4:
+                flip = {"dir": "LONG", "sl": CONFIG["MACRO_FLIP_SL"], "tp1": CONFIG["MACRO_FLIP_TP1"], "tp2": CONFIG["MACRO_FLIP_TP2"], "reasons": cd}
+                log(f"MACRO FLIP CONFIRMED 4/5 {cd} - FLIP TO LONG"); mb["alert"] = None; mb["flip_pending"] = flip
+            elif el >= 15: log(f"MACRO ALERT FAKE {el:.0f}m {conf}/5 - Back to SHORT"); mb["alert"] = None; mb["flip_pending"] = None; alert = None
+        if dxy_1h is not None and dxy_1h >= 1.0 and price < CONFIG["MACRO_BREAK_SHORT"] and vol_spike:
+            flip = {"dir": "SHORT", "sl": 65000, "tp1": 62000, "tp2": 60000, "reasons": ["DXY +1%", "BTC break 62978", "Vol spike"]}; log("MACRO DUMP CONFIRMED SHORT")
+        mb["score"] = score; mb["bias"] = bias
+        log(f"MACRO BRAIN Score {score:+.1f} Bias {bias} | DXY 1h {dxy_1h} JPY 1h {jpy_1h} | Funding {funding:.4f}% {fsrc} | Fear {fng} | RSI {rsi} | Vol {vol_mult:.1f}x | {' | '.join(det)}")
+        return {"score": score, "bias": bias, "alert": alert, "flip": flip}
+    except Exception as e: log(f"MACRO ERR {e}"); return {"score": 0.0, "bias": "NEUTRAL", "alert": None, "flip": None}
 
 def get_macro_live():
-    world = get_world_markets()
-    dxy = world.get("DXY", 0.0); nq = world.get("NQ", 0.0); spx = world.get("SPX", 0.0); gold = world.get("GOLD", 0.0)
-    oi_chg = None; oi_src = "FAIL"
+    w = get_world(); oi = 0.0; oi_src = "FAIL"
     try:
-        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5); lst = r.json()["result"]["list"]; oi_chg = (float(lst[-1]["openInterest"]) - float(lst[0]["openInterest"])) / float(lst[0]["openInterest"]) * 100; oi_src = "Bybit"
-    except:
-        try:
-            r = requests.get("https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=5", timeout=5); lst = r.json(); oi_chg = (float(lst[-1]["sumOpenInterest"]) - float(lst[0]["sumOpenInterest"])) / float(lst[0]["sumOpenInterest"]) * 100; oi_src = "Binance"
-        except: oi_chg = None
-    macro = {}
-    for k, v, src in [("DXY_CHG", dxy, world.get("DXY_SRC","Yahoo")), ("NQ_CHG", nq, world.get("NQ_SRC","Yahoo")), ("SPX_CHG", spx, world.get("SPX_SRC","Yahoo")), ("GOLD_CHG", gold, world.get("GOLD_SRC","Yahoo")), ("OI_CHG", oi_chg, oi_src)]:
-        if v is None: macro[k] = STATE["last_macro"].get(k, 0.0); macro[k+"_STATUS"] = "UNKNOWN"; macro[k+"_SRC"] = "UNKNOWN-Using-Last"
-        else: macro[k] = v; macro[k+"_STATUS"] = "LIVE"; macro[k+"_SRC"] = src; STATE["last_macro"][k] = v
-    print(f"LIVE SRC DXY:{macro['DXY_CHG_SRC']} NQ:{macro['NQ_CHG_SRC']} SPX:{macro['SPX_CHG_SRC']} GOLD:{macro['GOLD_CHG_SRC']} OI:{macro['OI_CHG_SRC']}", flush=True); return macro
-
-def get_liquidation_map(price, klines_1m=None, macro=None):
-    long_liq = 0.0; short_liq = 0.0; src = "FAIL"
-    try:
-        r = requests.get("https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=50", timeout=5); lst = r.json().get("result", {}).get("list", [])
-        for x in lst:
-            try:
-                sz = float(x.get("size", 0)) * float(x.get("price", price))
-                if x.get("side") == "Sell": long_liq += sz
-                elif x.get("side") == "Buy": short_liq += sz
-            except: pass
-        if long_liq + short_liq > 0: src = "Bybit"
+        r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5); lst = r.json()["result"]["list"]; oi = (float(lst[-1]["openInterest"])-float(lst[0]["openInterest"]))/float(lst[0]["openInterest"])*100; oi_src = "Bybit"
     except: pass
-    if long_liq + short_liq == 0:
-        try:
-            r = requests.get("https://fapi.binance.com/fapi/v1/forceOrders?symbol=BTCUSDT&limit=50", timeout=5); lst = r.json()
-            for x in lst:
-                try:
-                    sz = float(x.get("origQty", 0)) * float(x.get("price", price))
-                    if x.get("side") == "SELL": long_liq += sz
-                    elif x.get("side") == "BUY": short_liq += sz
-                except: pass
-            if long_liq + short_liq > 0: src = "Binance"
-        except: pass
-    if long_liq + short_liq == 0:
-        try:
-            vol = 0.0
-            if klines_1m:
-                for k in klines_1m[-5:]: vol += abs(k["high"] - k["low"]) * 0.002 * price
-            if vol <= 0: vol = 50000.0
-            if klines_1m and len(klines_1m) >= 5:
-                pc = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
-                if pc < 0: long_liq = vol * 0.6; short_liq = vol * 0.4
-                elif pc > 0: long_liq = vol * 0.4; short_liq = vol * 0.6
-                else: long_liq = vol * 0.5; short_liq = vol * 0.5
-            else: long_liq = vol * 0.5; short_liq = vol * 0.5
-            src = "Proxy-Vol/OI"
-        except: long_liq = 50000.0; short_liq = 50000.0; src = "Proxy-Fallback"
-    return long_liq, short_liq, src
-
-def get_asian_range(klines_15m):
-    asia_lows = []; asia_highs = []
-    for k in klines_15m:
+    return {"DXY_CHG": w["DXY"], "NQ_CHG": w["NQ"], "SPX_CHG": w["SPX"], "GOLD_CHG": w["GOLD"], "OI_CHG": oi, "OI_SRC": oi_src}
+def get_liq(price, k1):
+    ll = sl = 0.0; src = "FAIL"
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=50", timeout=5)
+        for x in r.json().get("result", {}).get("list", []):
+            sz = float(x.get("size", 0))*float(x.get("price", price))
+            if x.get("side") == "Sell": ll += sz
+            elif x.get("side") == "Buy": sl += sz
+        if ll+sl > 0: src = "Bybit"
+    except: pass
+    if ll+sl == 0:
+        vol = sum(abs(k["high"]-k["low"])*0.002*price for k in k1[-5:]) if k1 else 50000
+        if vol <= 0: vol = 50000
+        pc = (k1[-1]["close"]-k1[-5]["close"])/k1[-5]["close"]*100 if k1 and len(k1) >= 5 else 0
+        ll, sl = (vol*0.6, vol*0.4) if pc < 0 else (vol*0.4, vol*0.6) if pc > 0 else (vol*0.5, vol*0.5); src = "Proxy-Vol"
+    return ll, sl, src
+def get_asia_range(k15):
+    lows = []; highs = []
+    for k in k15:
         try:
             dt = datetime.fromtimestamp(k["time"]/1000, tz=timezone.utc)
-            if dt.date() == now_utc().date() and 0 <= dt.hour < 8: asia_lows.append(k["low"]); asia_highs.append(k["high"])
+            if dt.date() == now_utc().date() and 0 <= dt.hour < 8: lows.append(k["low"]); highs.append(k["high"])
         except: pass
-    if asia_lows and asia_highs: return min(asia_lows), max(asia_highs)
-    if len(klines_15m) >= 32:
-        w = klines_15m[-32:]; return min(x["low"] for x in w), max(x["high"] for x in w)
+    if lows: return min(lows), max(highs)
+    if len(k15) >= 32: return min(x["low"] for x in k15[-32:]), max(x["high"] for x in k15[-32:])
     return 0.0, 0.0
+def get_sweep(price, k15, k1):
+    # Single sweep check - replaces Asian + Session duplicate
+    a_low, a_high = get_asia_range(k15); ll, sl, src = get_liq(price, k1); hunt = "NEUTRAL"
+    if a_low and a_high and k1:
+        last = k1[-1]
+        if last["low"] < a_low and last["close"] > a_low and ll > sl: hunt = "LONG"
+        elif last["high"] > a_high and last["close"] < a_high and sl > ll: hunt = "SHORT"
+    return hunt, a_low, a_high, ll, sl, src
 
-def get_asian_hunt(price, klines_15m, klines_1m):
-    if not CONFIG["ASIAN_ENABLED"]: return "NEUTRAL", 0.0, 0.0, 0.0, 0.0, "FAIL"
-    asia_low, asia_high = get_asian_range(klines_15m); long_liq, short_liq, liq_src = get_liquidation_map(price, klines_1m); hunt = "NEUTRAL"
-    if asia_low and asia_high and klines_1m:
-        buf = price * CONFIG["ASIAN_SWEEP_BUFFER_PCT"]; last = klines_1m[-1]
-        if last["low"] < asia_low and last["close"] > asia_low and long_liq > short_liq: hunt = "LONG"
-        elif last["high"] > asia_high and last["close"] < asia_high and short_liq > long_liq: hunt = "SHORT"
-        elif last["low"] < asia_low - buf and last["close"] > asia_low: hunt = "LONG"
-        elif last["high"] > asia_high + buf and last["close"] < asia_high: hunt = "SHORT"
-    else:
-        if not klines_1m: hunt = "UNKNOWN"
-    STATE["last_liq_map"] = {"long_liq": long_liq, "short_liq": short_liq, "asia_low": asia_low, "asia_high": asia_high, "hunt": hunt}; return hunt, asia_low, asia_high, long_liq, short_liq, liq_src
-
-def get_session_reopen_hunt(price, klines_1m, klines_15m):
-    if not CONFIG["SESSION_HUNT_ENABLED"]: return "NEUTRAL", "NONE"
-    now = now_utc()
-    for name, hh, mm in CONFIG["SESSIONS"]:
-        open_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0); mins_since = (now - open_dt).total_seconds() / 60
-        if 0 <= mins_since <= CONFIG["SESSION_HUNT_WINDOW_MIN"]:
-            STATE["last_session"] = name
-            if klines_1m and len(klines_1m) >= 5:
-                window = klines_1m[-5:]; s_low = min(x["low"] for x in window); s_high = max(x["high"] for x in window); last = klines_1m[-1]
-                if last["low"] < s_low and last["close"] > s_low: return "LONG", name
-                if last["high"] > s_high and last["close"] < s_high: return "SHORT", name
-            elif not klines_1m: return "UNKNOWN", name
-            return "NEUTRAL", name
-    return "NEUTRAL", "NONE"
-
-def is_pre_hunt_window():
-    now = now_utc(); mins_now = now.hour*60 + now.minute
-    for end_min in [8*60, 13*60+30]:
-        diff = end_min - mins_now
-        if 0 <= diff <= CONFIG["PRE_HUNT_LOCK_MIN"]: return True, f"PRE-HUNT {diff} min to sweep"
-    return False, "NORMAL"
-
-def world_confirms_hunt(hunt_dir, world):
-    if hunt_dir == "LONG":
-        asia_up = world.get("NIKKEI", 0) > 0.2 and world.get("HANG_SENG", 0) > 0.2
-        london_up = world.get("FTSE", 0) > 0.2 and world.get("DAX", 0) > 0.2
-        ny_up = world.get("NQ", 0) > 0.05 and world.get("SPX", 0) > 0.05
-        return asia_up or london_up or ny_up
-    if hunt_dir == "SHORT":
-        asia_down = world.get("NIKKEI", 0) < -0.2 and world.get("HANG_SENG", 0) < -0.2
-        london_down = world.get("FTSE", 0) < -0.2 and world.get("DAX", 0) < -0.2
-        ny_down = world.get("NQ", 0) < -0.05 and world.get("SPX", 0) < -0.05
-        return asia_down or london_down or ny_down
+def is_hunt_expected(dest, ll, sl, macro_bias):
+    if macro_bias == dest: return False, "Macro already decided"
+    pool = sl if dest == "LONG" else ll if dest == "SHORT" else 0
+    now = now_utc(); mins = now.hour*60+now.minute; to_next = min([(o-mins) % 1440 for o in [0, 420, 810]])
+    if pool >= CONFIG["HUNT_MIN_LIQ_USD"] and (to_next <= 30 or macro_bias == "NEUTRAL"):
+        return True, f"HUNT EXPECTED Liq ${pool:,.0f} + session {to_next}m Macro {macro_bias}"
+    return False, f"No hunt Liq ${pool:,.0f} Macro {macro_bias} Next {to_next}m"
+def is_sweep_done(dest, k1, a_low, a_high):
+    if not k1: return False
+    last = k1[-1]
+    if dest == "LONG" and a_low: return last["low"] < a_low and last["close"] > a_low
+    if dest == "SHORT" and a_high: return last["high"] > a_high and last["close"] < a_high
     return False
-
-def detect_early_hunt(price, cert_dest, klines_1m, long_liq, short_liq, asia_low, asia_high, world):
-    if not klines_1m or len(klines_1m) < 5: return "NONE", 0.0, ""
-    pc5 = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
-    # Asia Hunter Strength: need Liq + World + Volume, not wick alone
-    vol_ok = False
-    if len(klines_1m) >= 10:
-        recent_range = sum(abs(k["high"]-k["low"]) for k in klines_1m[-5:])
-        avg_range = sum(abs(k["high"]-k["low"]) for k in klines_1m[-10:-5]) or 1
-        vol_ok = recent_range > avg_range * 1.2
-    if cert_dest == "SHORT" and pc5 > 0.30:
-        target = asia_high if asia_high > price and (asia_high - price) < 2000 else price + 1200
-        pool = short_liq
-        if pool >= CONFIG["HUNT_MIN_LIQ_USD"] or (asia_high and target == asia_high):
-            if world_confirms_hunt("LONG", world) and vol_ok:
-                dist = target - price
-                if dist >= CONFIG["HUNT_EARLY_MIN_DIST_USD"]:
-                    return "LONG", target, f"EARLY HUNT LONG STRONG: Cert SHORT but price UP {pc5:.2f}% in 5m, Liq ${pool:,.0f}, World confirms, Vol OK, Target ${target:.0f} Dist ${dist:.0f}"
-                else:
-                    return "MISS", target, f"HUNT MISS: Target ${target:.0f} too close ${dist:.0f} < $300, HIDE"
-            else:
-                return "NONE", 0.0, "HUNT WEAK: Liq/World/Vol no agree - no Hunter trigger"
-    if cert_dest == "LONG" and pc5 < -0.30:
-        target = asia_low if asia_low and asia_low < price and (price - asia_low) < 2000 else price - 1200
-        pool = long_liq
-        if pool >= CONFIG["HUNT_MIN_LIQ_USD"] or (asia_low and target == asia_low):
-            if world_confirms_hunt("SHORT", world) and vol_ok:
-                dist = price - target
-                if dist >= CONFIG["HUNT_EARLY_MIN_DIST_USD"]:
-                    return "SHORT", target, f"EARLY HUNT SHORT STRONG: Cert LONG but price DOWN {pc5:.2f}% in 5m, Liq ${pool:,.0f}, World confirms, Vol OK, Target ${target:.0f} Dist ${dist:.0f}"
-                else:
-                    return "MISS", target, f"HUNT MISS: Target ${target:.0f} too close ${dist:.0f} < $300, HIDE"
-    return "NONE", 0.0, ""
-
-def get_news_score():
-    if not CONFIG["NEWS_ENABLED"]: return False, 0, ""
-    kl = get_klines_1m(15)
+def get_news():
+    if not CONFIG["NEWS_ENABLED"]: return False, ""
+    kl = get_klines("1", 15)
     if len(kl) >= 15:
-        move = (kl[-1]["close"] - kl[0]["close"]) / kl[0]["close"] * 100
-        if abs(move) >= 0.8: return True, 85.0, f"VOL SPIKE {move:.2f}% in 15m"
-    return False, 0, ""
-
-def get_signals(price, macro, klines_1m, asian_hunt, session_hunt):
-    signals = []
-    if macro.get("DXY_CHG_STATUS") == "UNKNOWN": signals.append(("DXY_LEVEL", "UNKNOWN"))
-    elif macro["DXY_CHG"] > 0.05: signals.append(("DXY_LEVEL", "SHORT"))
-    elif macro["DXY_CHG"] < -0.05: signals.append(("DXY_LEVEL", "LONG"))
-    else: signals.append(("DXY_LEVEL", "NEUTRAL"))
-    if macro.get("NQ_CHG_STATUS") == "UNKNOWN": signals.append(("NQ_MOMENTUM", "UNKNOWN"))
-    elif macro["NQ_CHG"] > 0.05: signals.append(("NQ_MOMENTUM", "LONG"))
-    elif macro["NQ_CHG"] < -0.05: signals.append(("NQ_MOMENTUM", "SHORT"))
-    else: signals.append(("NQ_MOMENTUM", "NEUTRAL"))
-    if macro.get("SPX_CHG_STATUS") == "UNKNOWN": signals.append(("SPX_MOMENTUM", "UNKNOWN"))
-    elif macro["SPX_CHG"] > 0.05: signals.append(("SPX_MOMENTUM", "LONG"))
-    elif macro["SPX_CHG"] < -0.05: signals.append(("SPX_MOMENTUM", "SHORT"))
-    else: signals.append(("SPX_MOMENTUM", "NEUTRAL"))
-    if macro.get("GOLD_CHG_STATUS") == "UNKNOWN": signals.append(("GOLD_AFTER_SWEEP", "UNKNOWN"))
-    elif macro["GOLD_CHG"] > 0.15: signals.append(("GOLD_AFTER_SWEEP", "SHORT"))
-    elif macro["GOLD_CHG"] < -0.10: signals.append(("GOLD_AFTER_SWEEP", "LONG"))
-    else: signals.append(("GOLD_AFTER_SWEEP", "NEUTRAL"))
-    if macro.get("OI_CHG_STATUS") == "UNKNOWN": signals.append(("OI_DIVERGENCE", "UNKNOWN"))
-    elif klines_1m and len(klines_1m) >= 5:
-        pc = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
-        if macro["OI_CHG"] > 0.20 and pc < -0.05: signals.append(("OI_DIVERGENCE", "SHORT"))
-        elif macro["OI_CHG"] < -0.20 and pc > 0.05: signals.append(("OI_DIVERGENCE", "LONG"))
-        elif macro["OI_CHG"] > 0.80: signals.append(("OI_DIVERGENCE", "SHORT"))
-        elif macro["OI_CHG"] < -0.80: signals.append(("OI_DIVERGENCE", "LONG"))
-        else: signals.append(("OI_DIVERGENCE", "NEUTRAL"))
-    else: signals.append(("OI_DIVERGENCE", "UNKNOWN"))
-    if not klines_1m: signals.append(("LIQ_SWEEP", "UNKNOWN"))
-    elif len(klines_1m) >= 3:
-        last = klines_1m[-1]; wd = last["close"] - last["low"]; wu = last["high"] - last["close"]; thr = price * 0.001
-        if wd > thr and wd > wu * 1.2: signals.append(("LIQ_SWEEP", "LONG"))
-        elif wu > thr and wu > wd * 1.2: signals.append(("LIQ_SWEEP", "SHORT"))
+        mv = (kl[-1]["close"]-kl[0]["close"])/kl[0]["close"]*100
+        if abs(mv) >= 0.8: return True, f"VOL SPIKE {mv:.2f}% 15m"
+    return False, ""
+def get_signals(price, macro, k1, hunt):
+    s = []
+    s.append(("DXY", "SHORT" if macro["DXY_CHG"] > 0.05 else "LONG" if macro["DXY_CHG"] < -0.05 else "NEUTRAL"))
+    s.append(("NQ", "LONG" if macro["NQ_CHG"] > 0.05 else "SHORT" if macro["NQ_CHG"] < -0.05 else "NEUTRAL"))
+    s.append(("SPX", "LONG" if macro["SPX_CHG"] > 0.05 else "SHORT" if macro["SPX_CHG"] < -0.05 else "NEUTRAL"))
+    s.append(("GOLD", "SHORT" if macro["GOLD_CHG"] > 0.15 else "LONG" if macro["GOLD_CHG"] < -0.10 else "NEUTRAL"))
+    # OI
+    if k1 and len(k1) >= 5:
+        pc = (k1[-1]["close"]-k1[-5]["close"])/k1[-5]["close"]*100
+        if macro["OI_CHG"] > 0.8: s.append(("OI", "SHORT"))
+        elif macro["OI_CHG"] < -0.8: s.append(("OI", "LONG"))
+        elif macro["OI_CHG"] > 0.2 and pc < -0.05: s.append(("OI", "SHORT"))
+        elif macro["OI_CHG"] < -0.2 and pc > 0.05: s.append(("OI", "LONG"))
+        else: s.append(("OI", "NEUTRAL"))
+    else: s.append(("OI", "NEUTRAL"))
+    # LIQ SWEEP - wick + close back
+    if k1 and len(k1) >= 3:
+        last = k1[-1]; wd = last["close"]-last["low"]; wu = last["high"]-last["close"]; thr = price*0.001
+        if wd > thr and wd > wu*1.2: s.append(("SWEEP", "LONG"))
+        elif wu > thr and wu > wd*1.2: s.append(("SWEEP", "SHORT"))
         else:
-            if len(klines_1m) >= 5:
-                pc5 = (klines_1m[-1]["close"] - klines_1m[-5]["close"]) / klines_1m[-5]["close"] * 100
-                if pc5 > 0.10: signals.append(("LIQ_SWEEP", "LONG"))
-                elif pc5 < -0.10: signals.append(("LIQ_SWEEP", "SHORT"))
-                else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
-            else: signals.append(("LIQ_SWEEP", "NEUTRAL"))
-    else: signals.append(("LIQ_SWEEP", "UNKNOWN"))
-    signals.append(("ASIAN_LIQ_HUNT", asian_hunt if asian_hunt in ("LONG","SHORT") else ("UNKNOWN" if asian_hunt=="UNKNOWN" else "NEUTRAL")))
-    signals.append(("SESSION_REOPEN_HUNT", session_hunt if session_hunt in ("LONG","SHORT") else ("UNKNOWN" if session_hunt=="UNKNOWN" else "NEUTRAL")))
-    asian_val = signals[6][1]; sess_val = signals[7][1]
-    if asian_val == "NEUTRAL" and sess_val == "NEUTRAL" and klines_1m and len(klines_1m) >= 15:
-        pc15 = (klines_1m[-1]["close"] - klines_1m[-15]["close"]) / klines_1m[-15]["close"] * 100
-        if pc15 > 0.15: signals[6] = ("ASIAN_LIQ_HUNT", "LONG"); signals[7] = ("SESSION_REOPEN_HUNT", "LONG")
-        elif pc15 < -0.15: signals[6] = ("ASIAN_LIQ_HUNT", "SHORT"); signals[7] = ("SESSION_REOPEN_HUNT", "SHORT")
-    return signals
-
+            pc5 = (k1[-1]["close"]-k1[-5]["close"])/k1[-5]["close"]*100 if len(k1) >= 5 else 0
+            s.append(("SWEEP", "LONG" if pc5 > 0.10 else "SHORT" if pc5 < -0.10 else "NEUTRAL"))
+    else: s.append(("SWEEP", "NEUTRAL"))
+    s.append(("HUNT", hunt if hunt in ("LONG", "SHORT") else "NEUTRAL"))
+    # Momentum fill - if hunt neutral, use 15m momentum as 8th signal
+    if s[-1][1] == "NEUTRAL" and k1 and len(k1) >= 15:
+        pc15 = (k1[-1]["close"]-k1[-15]["close"])/k1[-15]["close"]*100
+        if pc15 > 0.15: s[-1] = ("HUNT", "LONG")
+        elif pc15 < -0.15: s[-1] = ("HUNT", "SHORT")
+    return s
 def decide(signals):
-    longs = sum(1 for _, v in signals if v == "LONG"); shorts = sum(1 for _, v in signals if v == "SHORT"); unknowns = sum(1 for _, v in signals if v == "UNKNOWN"); decided = longs + shorts
-    if longs > shorts: dest, agree = "LONG", longs
-    elif shorts > longs: dest, agree = "SHORT", shorts
-    else: dest, agree = "NONE", 0
-    return dest, agree, decided, longs, shorts, unknowns, (agree / decided * 100) if decided else 0
-def get_needed_agree(certainty, agree, decided, base_need):
-    if decided >= 4 and agree == decided: return agree
-    if certainty >= CONFIG["DYNAMIC_AGREE_CERT"] and agree >= CONFIG["MIN_AGREE_DYNAMIC"]: return CONFIG["MIN_AGREE_DYNAMIC"]
-    return base_need
+    L = sum(1 for _, v in signals if v == "LONG"); S = sum(1 for _, v in signals if v == "SHORT"); D = L+S
+    dest = "LONG" if L > S else "SHORT" if S > L else "NONE"; agree = L if L > S else S if S > L else 0
+    return dest, agree, D, L, S, (agree/D*100 if D else 0)
 def calc_score(signals, dest, macro, is_news):
-    _, agree, decided, _, _, _, certainty = decide(signals); base = (certainty / 100) * 1.0; align = 0
-    if dest == "LONG" and macro["NQ_CHG"] > 0 and macro["SPX_CHG"] > 0: align = 0.4
-    if dest == "SHORT" and macro["DXY_CHG"] > 0: align = 0.3
-    return round(base + align + (0.4 if is_news else 0), 2)
-def calc_sl_tp_v1315(price, side):
-    wide_sl = price - CONFIG["WIDE_SL_USD"] if side == "LONG" else price + CONFIG["WIDE_SL_USD"]
-    tp = price + CONFIG["TP_DIST_USD"] if side == "LONG" else price - CONFIG["TP_DIST_USD"]
-    return round(wide_sl, 1), round(tp, 1)
-def calc_hunter_sl_tp(price, side, target):
-    sl = price - CONFIG["HUNTER_SL_USD"] if side == "LONG" else price + CONFIG["HUNTER_SL_USD"]
-    if side == "LONG": tp = target - 200 if target > price else price + 600
-    else: tp = target + 200 if target < price else price - 600
-    return round(sl, 1), round(tp, 1)
-
-def record_close(side, entry, close_price, qty, reason):
-    _, fees, slip, total = calc_dynamic_fees(entry, qty)
-    gross = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty
-    net = gross - total; old_bal = STATE["balance"] if STATE["mode"] == "PAPER" else STATE["real_balance"]
-    if STATE["mode"] == "PAPER": STATE["balance"] += net; STATE["pnl"] += net
-    else: STATE["pnl"] += net
-    STATE["cooldown_until"] = now_utc() + timedelta(minutes=CONFIG["COOLDOWN_MIN"])
-    STATE["revenge_until"] = STATE["cooldown_until"]
-    STATE["last_close_reason"] = reason; STATE["last_close_time"] = now_utc()
-    log(f"SMART RECHECK ON: 1 min re-check after {reason} - check certainties + hunters, if still good re-enter at market, no miss entry")
-    if reason == "TP": STATE["wins"] += 1; log(f"TP HIT +${net:.2f} - Closed {side} at ${close_price:.0f}")
-    elif reason == "TRAILING": STATE["wins"] += 1; log(f"TRAILING PROFIT +${net:.2f} - Closed {side} at ${close_price:.0f}")
-    elif reason == "FLIP": STATE["flips"] += 1; log(f"FLIP CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f}")
-    elif reason in ("HUNT_PROFIT_LOCK", "HUNT_PROFIT_OVER_FEES"): STATE["wins"] += 1; log(f"HUNT PROFIT LOCK +${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
-    elif net > 0: STATE["wins"] += 1; log(f"SMALL WIN +${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
-    elif net < -0.01: STATE["losses"] += 1; STATE["losses_today"] += 1; log(f"WIDE SL LOSS ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
-    else: STATE["breakevens"] += 1; log(f"BE CLOSE ${net:.2f} - Closed {side} at ${close_price:.0f} Reason {reason}")
-    STATE["open_position"] = None; new_bal = refresh_balance(f"AFTER-CLOSE-{reason}"); log(f"BALANCE AFTER TRADE: ${new_bal:.2f}"); return net
-
-def is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
+    _, agree, D, _, _, cert = decide(signals); base = cert/100; align = 0.4 if dest == "LONG" and macro["NQ_CHG"] > 0 and macro["SPX_CHG"] > 0 else 0.3 if dest == "SHORT" and macro["DXY_CHG"] > 0 else 0
+    return round(base+align+(0.4 if is_news else 0), 2)
+def calc_sl_tp(price, side):
+    return (round(price-1200, 1), round(price+1500, 1)) if side == "LONG" else (round(price+1200, 1), round(price-1500, 1))
+def record_close(side, entry, close_p, qty, reason):
+    _, _, _, total = calc_fees(entry, qty); gross = (close_p-entry)*qty if side == "LONG" else (entry-close_p)*qty; net = gross-total
+    if STATE["mode"] == "PAPER": STATE["balance"] += net
+    STATE["pnl"] += net; STATE["cooldown_until"] = now_utc()+timedelta(minutes=CONFIG["COOLDOWN_MIN"])
+    if reason in ("TP", "TRAILING"): STATE["wins"] += 1
+    elif reason == "FLIP": STATE["flips"] += 1
+    elif net > 0: STATE["wins"] += 1
+    elif net < -0.01: STATE["losses"] += 1
+    else: STATE["breakevens"] += 1
+    log(f"CLOSE {reason} {side} ${net:.2f} at ${close_p:.0f} - 1 min Smart Recheck")
+    STATE["open_position"] = None; log(f"BALANCE ${refresh_balance():.2f}"); return net
+def is_flip_confirmed(flip_dest, cert, agree, macro, side):
     if flip_dest == "NONE" or flip_dest == side: return False
-    need_flip = 4 if (flip_certainty >= 100 and flip_agree >= 4) else CONFIG["FLIP_AGREE"]
-    if not (flip_certainty >= CONFIG["FLIP_CERTAINTY"] and flip_agree >= need_flip): return False
-    if flip_dest == "LONG": return macro["DXY_CHG"] < 0.05 or macro["NQ_CHG"] > 0
-    else: return macro["DXY_CHG"] > 0.05 or macro["NQ_CHG"] < 0
-
-def manage_position(price, klines, qty, flip_dest, flip_certainty, flip_agree, macro, long_liq, short_liq, hunt_dir, hunt_target, world):
+    if not (cert >= CONFIG["FLIP_CERTAINTY"] and agree >= CONFIG["FLIP_AGREE"]): return False
+    mb = STATE["macro_brain"]["bias"]
+    if mb != flip_dest: log(f"FLIP BLOCKED Cert {flip_dest} but Macro {mb} - NO FLIP"); return False
+    return True
+def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl):
     if not STATE["open_position"]: return False
-    p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; total_qty = p.get("total_qty", qty)
-    is_hunter = p.get("is_hunter_trade", False)
-    trail_trigger = CONFIG["HUNTER_TRAIL_TRIGGER"] if is_hunter else CONFIG["TRAIL_TRIGGER_MOVE_USD"]
-    trail_dist = CONFIG["HUNTER_TRAIL_DIST"] if is_hunter else CONFIG["TRAIL_DIST_USD"]
-    if side == "LONG": best = max(p.get("best_price", entry), price)
-    else: best = min(p.get("best_price", entry), price)
-    p["best_price"] = best
-    favour_move = abs(best - entry)
-    pnl_points = (price - entry) if side == "LONG" else (entry - price)
-    against_move = abs(price - entry) if ((side == "LONG" and price < entry) or (side == "SHORT" and price > entry)) else 0.0
-    if CONFIG["FLIP_ENABLED"] and is_real_reversal_confirmed(flip_dest, flip_certainty, flip_agree, macro, side):
-        log(f"FLIP {side} -> {flip_dest} CONFIRMED | Cert {flip_certainty:.0f}% Agree {flip_agree}")
-        if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-        record_close(side, entry, price, total_qty, "FLIP"); return True
-    hit_tp = (price >= p["tp"] if side == "LONG" else price <= p["tp"])
-    if hit_tp:
-        if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-        record_close(side, entry, price, total_qty, "TP"); return False
-    if CONFIG["TRAILING_ENABLED"] and favour_move >= trail_trigger:
-        if not p.get("trailing_active"):
-            p["trailing_active"] = True; log(f"TRAILING TRIGGERED 👌 {side}: Favour ${favour_move:.0f} >= ${trail_trigger:.0f} - Trailing don take over BE, SL = Best + $50")
-        trail_price = best - trail_dist if side == "LONG" else best + trail_dist
-        p["trailing_price"] = trail_price
-        if p.get("last_trail_update", 0) != round(trail_price):
-            if side == "LONG" and trail_price > p.get("wide_sl", -1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} (Best - $50)"); update_real_sl(trail_price, side)
-            elif side == "SHORT" and trail_price < p.get("wide_sl", 1e9):
-                p["wide_sl"] = trail_price; p["last_trail_update"] = round(trail_price); log(f"TRAILING {side}: Best ${best:.0f} -> Trailing SL ${trail_price:.0f} (Best + $50)"); update_real_sl(trail_price, side)
-        hit_trailing = (price <= trail_price if side == "LONG" else price >= trail_price)
-        if hit_trailing:
-            log(f"TRAILING HIT - Close WITH PROFIT {side} at ${price:.0f} - Locked profit, 1 min smart recheck then re-enter if still good")
-            if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-            record_close(side, entry, price, total_qty, "TRAILING"); return False
-    else:
-        if favour_move > 0: log(f"TRAILING SLEEP: Favour ${favour_move:.0f} < ${trail_trigger:.0f}, Wide SL ${p.get('wide_sl',0):.0f} dey protect")
-    hunt_against = (hunt_dir == "LONG" and side == "SHORT") or (hunt_dir == "SHORT" and side == "LONG")
-    hunt_with = (hunt_dir == side) and hunt_dir in ("LONG", "SHORT")
-    if hunt_against and pnl_points > CONFIG["PROFIT_LOCK_MIN_USD"]:
-        log(f"💰 HUNT AGAINST US BUT WE DEY PROFIT +${pnl_points:.0f} — TAKE PROFIT NOW, no wait make hunters wick us back to SL")
-        if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-        record_close(side, entry, price, total_qty, "HUNT_PROFIT_LOCK"); return False
-    if hunt_with and pnl_points > 0:
-        log(f"🎉 HUNT WITH US, profit +${pnl_points:.0f} — HOLD, trailing dey follow hunters")
-    if hunt_against and against_move >= CONFIG["EMERGENCY_AGAINST_USD"] and not p.get("trailing_active"):
-        log(f"🚨 HUNTER AGAINST US! Hunters {hunt_dir}, we {side}, Against ${against_move:.0f} — EMERGENCY CLOSE, no wait WideSL $1200 - 1 min recheck then re-enter if hunters don calm")
-        if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-        record_close(side, entry, price, total_qty, "HUNTER_ESCAPE"); return False
-    elif hunt_against and against_move >= 150 and not p.get("trailing_active"):
-        new_sl = entry + 500 if side == "SHORT" else entry - 500
-        if side == "SHORT" and new_sl < p.get("wide_sl", 1e9):
-            log(f"⚠️ HUNTER WARNING: Tightening SL to ${new_sl:.0f} ($500 from entry) because hunters against us")
-            p["wide_sl"] = new_sl; update_real_sl(new_sl, side)
-        elif side == "LONG" and new_sl > p.get("wide_sl", -1e9):
-            log(f"⚠️ HUNTER WARNING: Tightening SL to ${new_sl:.0f} ($500 from entry) because hunters against us")
-            p["wide_sl"] = new_sl; update_real_sl(new_sl, side)
-    if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False) and not hunt_against:
-        if CONFIG["ADDON_WICK_MIN_USD"] <= against_move <= CONFIG["ADDON_WICK_MAX_USD"]:
-            is_hunt_not_flip = (flip_dest == side or flip_dest == "NONE")
-            liq_confirm = (short_liq > long_liq) if side == "SHORT" else (long_liq > short_liq)
-            if is_hunt_not_flip and liq_confirm:
-                try:
-                    bal_now = get_current_balance()
-                    if bal_now <= 0: bal_now = 24.33
-                    total_qty_after = round(total_qty + qty, 3)
-                    need_notional = total_qty_after * price
-                    max_fit_notional = bal_now * CONFIG["LEVERAGE"] * CONFIG["ADDON_BUFFER_PCT"]
-                    if need_notional > max_fit_notional:
-                        log(f"ADD-ON SKIPPED: Balance ${bal_now:.2f} no fit - Need ${need_notional:.0f} > Max ${max_fit_notional:.0f}")
-                    else:
-                        log(f"ADD-ON TRIGGER {side}: Wick ${against_move:.0f}, Bal FIT ${bal_now:.2f} - Adding {qty}")
-                        if STATE["mode"] == "REAL":
-                            ok = place_real_order(side, price, p["wide_sl"], p["tp"], qty, is_addon=True)
-                            if ok: p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1; log(f"ADD-ON PLACED {side} Qty {qty} Total {p['total_qty']}")
-                            else: log(f"ADD-ON REJECTED by Bybit - Skip")
-                        else:
-                            p["addon_done"] = True; p["addon_qty"] = qty; p["total_qty"] = total_qty_after; STATE["addons"] += 1; log(f"ADD-ON PAPER SIM {side} Qty {qty} Total {p['total_qty']}")
-                except Exception as e: log(f"ADD-ON ERROR CAUGHT {e} - Skip")
-    hit_wide = (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"])
-    if hit_wide and not p.get("trailing_active"):
-        log(f"WIDE SL HIT: Price ${price:.0f} past Wide SL ${p['wide_sl']:.0f}")
-        if STATE["mode"] == "REAL": close_real_position(side, total_qty)
-        record_close(side, entry, price, total_qty, "WIDE_SL"); return False
+    p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; tq = p.get("total_qty", qty)
+    best = max(p.get("best_price", entry), price) if side == "LONG" else min(p.get("best_price", entry), price)
+    p["best_price"] = best; favour = abs(best-entry); pnl_pts = (price-entry) if side == "LONG" else (entry-price)
+    against = abs(price-entry) if ((side == "LONG" and price < entry) or (side == "SHORT" and price > entry)) else 0
+    if CONFIG["FLIP_ENABLED"] and is_flip_confirmed(flip_dest, cert, agree, macro, side):
+        log(f"FLIP {side}->{flip_dest} CONFIRMED Macro+Cert BOTH")
+        if STATE["mode"] == "REAL": close_real_position(side, tq)
+        record_close(side, entry, price, tq, "FLIP"); return True
+    if (price >= p["tp"] if side == "LONG" else price <= p["tp"]):
+        if STATE["mode"] == "REAL": close_real_position(side, tq)
+        record_close(side, entry, price, tq, "TP"); return False
+    if CONFIG["TRAILING_ENABLED"] and favour >= 500:
+        if not p.get("trailing_active"): p["trailing_active"] = True; log(f"TRAILING ON {side} Favour ${favour:.0f} SL=Best-$50")
+        tp_price = best-50 if side == "LONG" else best+50; p["trailing_price"] = tp_price
+        if side == "LONG" and tp_price > p["wide_sl"]: p["wide_sl"] = tp_price; update_real_sl(tp_price, side)
+        elif side == "SHORT" and tp_price < p["wide_sl"]: p["wide_sl"] = tp_price; update_real_sl(tp_price, side)
+        if (price <= tp_price if side == "LONG" else price >= tp_price):
+            log(f"TRAILING HIT Close PROFIT {side} ${price:.0f}")
+            if STATE["mode"] == "REAL": close_real_position(side, tq)
+            record_close(side, entry, price, tq, "TRAILING"); return False
+    elif favour > 0: log(f"TRAILING SLEEP Favour ${favour:.0f}<500 WideSL ${p['wide_sl']:.0f}")
+    if pnl_pts > 50 and against > 0: log(f"PROFIT +${pnl_pts:.0f} HOLD Trailing go lock")
+    if against >= 400 and not p.get("trailing_active"):
+        log(f"EMERGENCY AGAINST ${against:.0f} - CLOSE, no wait WideSL")
+        if STATE["mode"] == "REAL": close_real_position(side, tq)
+        record_close(side, entry, price, tq, "EMERGENCY"); return False
+    if CONFIG["ADDON_ENABLED"] and not p.get("addon_done", False) and 500 <= against <= 900:
+        if (flip_dest == side or flip_dest == "NONE") and ((sl > ll) if side == "SHORT" else (ll > sl)):
+            bal = get_current_balance() or 24.33; after = round(tq+qty, 3)
+            if after*price <= bal*50*0.90:
+                if STATE["mode"] == "REAL":
+                    if place_real_order(side, price, p["wide_sl"], p["tp"], qty, True): p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1
+                else: p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; log(f"ADD-ON PAPER {side} {qty} Total {after}")
+    if (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]) and not p.get("trailing_active"):
+        log(f"WIDE SL HIT ${price:.0f} vs ${p['wide_sl']:.0f}")
+        if STATE["mode"] == "REAL": close_real_position(side, tq)
+        record_close(side, entry, price, tq, "WIDE_SL"); return False
     return False
 
 def main():
-    log("BOT V13.15.9 STARTED - MACRO BRAIN + FLIP NO HIDE + PAPER TILL 2AM WAT NOV16 THEN AUTO REAL | Bal $24.33 | WIDE SL $1200 + TRAILING $500/$50 + ADD-ON SAFE + CROSS")
-    log("RESTART FRESH: Logs cleared, fetching everything live, no old fake HOLDING")
-    STATE["paper_start_pnl"] = STATE["pnl"]
-    last_heartbeat = now_utc()
+    log("BOT V13.16.0 SLIM GOLD PICKER STARTED - HUNTER DEAD | Trailing $500/$50 WideSL $1200")
+    last_hb = now_utc()
     while True:
         try:
-            new_mode = get_mode()
-            if new_mode != STATE["mode"]:
-                if new_mode == "REAL":
-                    paper_pnl_now = STATE["pnl"] - STATE["paper_start_pnl"]
-                    log(f"*** PAPER DONE Paper PnL ${paper_pnl_now:.2f} - SWITCHING TO REAL FRESH, NO FAKE LOSS CARRY OVER ***")
-                    STATE["pnl"] = 0.0; STATE["wins"] = 0; STATE["losses"] = 0; STATE["breakevens"] = 0; STATE["flips"] = 0; STATE["addons"] = 0; STATE["trades_today"] = 0; STATE["losses_today"] = 0
-                    STATE["paper_fake_holding"] = 0; STATE["paper_start_pnl"] = 0.0; STATE["open_position"] = None; STATE["pending_hunt"] = None
-                    STATE["hide_until"] = None; STATE["revenge_until"] = None; STATE["cooldown_until"] = None; STATE["last_close_reason"] = None; STATE["last_close_time"] = None
-                    bal = get_real_balance(); STATE["day_start_balance"] = bal
-                    log(f"*** AUTO SWITCH TO REAL 2AM WAT NOV16 *** Real Balance: ${bal:.2f} USDT - Fetching live positions/orders, CROSS ON - FRESH START ***")
+            nm = get_mode()
+            if nm != STATE["mode"]:
+                if nm == "REAL":
+                    STATE["pnl"] = 0; STATE["wins"] = STATE["losses"] = STATE["breakevens"] = STATE["flips"] = STATE["addons"] = STATE["trades_today"] = 0; STATE["open_position"] = None; STATE["hide_until"] = STATE["cooldown_until"] = None
+                    bal = get_real_balance(); log(f"*** AUTO SWITCH REAL *** Bal ${bal:.2f} - Sync Bybit")
                     rp = get_real_position_sync()
-                    log(f"REAL SYNC AT SWITCH: Bybit position = {rp} (must be None before first real trade, if dey, we adopt am)")
-                    if rp is not None:
-                        log(f"REAL POSITION ALREADY DEY {rp} — Adopting am, no new trade till e close")
-                        STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"]=="SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"]=="SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "trailing_price": None, "addon_done": False, "total_qty": rp["size"]}
-                    STATE["mode"] = "REAL"
-                    if STATE.get("pending_hunt"): STATE["pending_hunt"] = None
-                    STATE["cross_margin_set"] = False
-                    STATE["hide_until"] = None; STATE["revenge_until"] = None; STATE["cooldown_until"] = None
-                else:
-                    STATE["mode"] = new_mode
-            mode = STATE["mode"]; set_cross_margin(); refresh_balance("CYCLE-START")
+                    if rp: STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"]}
+                    STATE["mode"] = "REAL"; STATE["cross_margin_set"] = False
+                else: STATE["mode"] = nm
+            mode = STATE["mode"]; set_cross_margin(); refresh_balance()
             if mode == "REAL":
-                real_pos = get_real_position_sync()
-                if real_pos is None and STATE["open_position"] is not None:
-                    log(f"SYNC FIX: Bybit say NO POSITION, but bot diary say HOLDING {STATE['open_position']['side']} — Clearing fake HOLDING ❌")
-                    STATE["open_position"] = None; STATE["pending_hunt"] = None; STATE["paper_fake_holding"] = STATE.get("paper_fake_holding", 0) + 1
-                elif real_pos is not None and STATE["open_position"] is None and not STATE.get("pending_hunt"):
-                    log(f"SYNC FIX: Bybit say REAL POSITION dey {real_pos} — Adopting Bybit position ✅")
-                    STATE["open_position"] = {"side": real_pos["side"], "entry": real_pos["entry"], "wide_sl": float(real_pos["sl"] or 0) or (real_pos["entry"]+1200 if real_pos["side"]=="SHORT" else real_pos["entry"]-1200), "tp": float(real_pos["tp"] or 0) or (real_pos["entry"]-1500 if real_pos["side"]=="SHORT" else real_pos["entry"]+1500), "best_price": real_pos["entry"], "trailing_active": False, "trailing_price": None, "addon_done": False, "total_qty": real_pos["size"]}
-            price, price_src = get_price_live()
-            if price == 0.0: log("NO PRICE - All sources fail, skip cycle"); time.sleep(CONFIG["POLL_SEC"]); continue
-            klines_1m = get_klines_1m(20); klines_15m = get_klines(200); macro = get_macro_live(); world = STATE.get("world", {})
-            # MACRO BRAIN - ADDITIVE ONLY, never blocks old bot if it fails
-            macro_brain = get_macro_brain_live(price, klines_1m, klines_15m, macro)
-            asian_hunt, asia_low, asia_high, long_liq, short_liq, liq_src = get_asian_hunt(price, klines_15m, klines_1m)
-            session_hunt, session_name = get_session_reopen_hunt(price, klines_1m, klines_15m)
-            is_news, _, news_reason = get_news_score()
-            signals = get_signals(price, macro, klines_1m, asian_hunt, session_hunt)
-            dest, agree, decided, longs, shorts, unknowns, certainty = decide(signals)
-            unknown_names = [n for n, v in signals if v == "UNKNOWN"]
-            sig_str = " ".join([f"{n}:{v}" for n, v in signals])
-            score = calc_score(signals, dest, macro, is_news)
-            need_cert = CONFIG["MIN_CERTAINTY_NEWS"] if is_news else CONFIG["MIN_CERTAINTY_NORMAL"]
-            need_agree_base = CONFIG["MIN_AGREE_NEWS"] if is_news else CONFIG["MIN_AGREE_NORMAL"]
-            need_score = CONFIG["MIN_SCORE_NEWS"] if is_news else CONFIG["MIN_SCORE_NORMAL"]
-            need_agree = get_needed_agree(certainty, agree, decided, need_agree_base)
-            is_sure = (certainty >= CONFIG["SURE_CERTAINTY"] and agree >= CONFIG["SURE_AGREE"])
-            qty = get_dynamic_qty(price)
-            hunt_dir, hunt_target, hunt_reason = detect_early_hunt(price, dest, klines_1m, long_liq, short_liq, asia_low, asia_high, world)
-            if hunt_dir in ("LONG", "SHORT"): log(f"🏹 {hunt_reason}")
-            elif hunt_dir == "MISS":
-                log(f"🙈 {hunt_reason} — HIDE MODE ON")
-                STATE["hide_until"] = now_utc() + timedelta(minutes=CONFIG["HIDE_AFTER_MISS_MIN"])
-                hunt_dir = "NONE"
-            is_pre_hunt, pre_reason = is_pre_hunt_window()
-            is_hidden = STATE.get("hide_until") and now_utc() < STATE["hide_until"]
-            is_revenge = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
-            # MACRO PAUSE - only pause new SHORT, never close open, never block old bot long
-            macro_pause_short = macro_brain.get("alert") == "PAUSE_SHORT"
-            if macro_pause_short: log(f"⏸️ MACRO PAUSE: DXY/JPY drop alert - Pause new SHORT 15m, wait confirm. Open position untouched.")
-            # MACRO FLIP - if confirmed, override dest to flip direction
-            macro_flip = macro_brain.get("flip")
-            if macro_flip and not STATE["open_position"]:
-                log(f"🔄 MACRO FLIP TRADE READY: {macro_flip['dir']} Reasons {macro_flip.get('reasons')} Entry {macro_flip['entry_low']}-{macro_flip['entry_high']} SL {macro_flip['sl']} TP1 {macro_flip['tp1']} TP2 {macro_flip['tp2']}")
-                dest = macro_flip["dir"]
-            if is_hidden: log(f"🙈 HIDE MODE till {STATE['hide_until'].strftime('%H:%M:%S')} — No new trade, wait hunt finish, then check certainties")
-            if is_revenge: log(f"⏳ SMART RECHECK till {STATE['cooldown_until'].strftime('%H:%M:%S')} — 1 min check: certainties still go our way? hunters don take over? If yes, re-enter at market immediately")
-            flipped = False
-            if STATE["open_position"]:
-                flipped = manage_position(price, klines_1m, qty, dest, certainty, agree, macro, long_liq, short_liq, hunt_dir, hunt_target, world)
-                if flipped: log(f"FLIP DONE - Next cycle go open new {dest} trade if gates still pass")
-            if STATE.get("pending_hunt") and not STATE["open_position"]:
-                ph = STATE["pending_hunt"]; elapsed_min = (now_utc() - ph["time"]).total_seconds() / 60
-                if mode == "REAL":
-                    rp2 = get_real_position_sync()
-                    if rp2 is not None and rp2["side"] == ph["side"]:
-                        log(f"HUNT MARKET TRIGGER FILLED BY BYBIT {ph['side']} @ ${rp2['entry']:.0f} — Adopting Bybit position ✅")
-                        STATE["pending_hunt"] = None
-                        wide_sl, tp = calc_sl_tp_v1315(rp2["entry"], ph["side"])
-                        if rp2.get("sl"): wide_sl = float(rp2["sl"])
-                        if rp2.get("tp"): tp = float(rp2["tp"])
-                        STATE["open_position"] = {"side": ph["side"], "entry": rp2["entry"], "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": rp2["entry"], "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": rp2["size"]}
-                        STATE["trades_today"] += 1
-                    elif elapsed_min >= CONFIG["HUNT_LIMIT_WAIT_MIN"]:
-                        cancel_hunt_limit(ph.get("orderId"))
-                        wide_sl, tp = calc_sl_tp_v1315(price, ph["side"])
-                        ok = place_real_order(ph["side"], price, wide_sl, tp, ph["qty"])
-                        if not ok: log("MARKET AFTER TIMEOUT REJECTED — No position")
-                        else:
-                            STATE["open_position"] = {"side": ph["side"], "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": ph["qty"]}
-                            STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN VIA MARKET AFTER HUNT TIMEOUT ({mode}) {ph['side']} Entry ${price:.0f}")
-                    else:
-                        log(f"HUNT MARKET TRIGGER WAITING {ph['side']} Trigger @ ${ph['hunt_price']:.0f} Elapsed {elapsed_min:.1f}/2 min — Bybit go trigger at market")
+                rp = get_real_position_sync()
+                if rp is None and STATE["open_position"] is not None: log("SYNC FIX Bybit NO POS - Clear fake HOLDING"); STATE["open_position"] = None
+                elif rp is not None and STATE["open_position"] is None:
+                    log(f"SYNC FIX Adopt Bybit {rp}"); STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"]}
+            price, psrc = get_price_live()
+            if price == 0: log("NO PRICE skip"); time.sleep(5); continue
+            k1 = get_klines("1", 20); k15 = get_klines("15", 200); macro = get_macro_live(); world = STATE.get("world", {})
+            mb = get_macro_brain(price, k1, k15, macro)
+            hunt, a_low, a_high, ll, sl, liq_src = get_sweep(price, k15, k1)
+            is_news, news_r = get_news(); signals = get_signals(price, macro, k1, hunt)
+            dest, agree, decided, L, S, cert = decide(signals); score = calc_score(signals, dest, macro, is_news)
+            need_cert = CONFIG["MIN_CERTAINTY_NEWS"] if is_news else CONFIG["MIN_CERTAINTY_NORMAL"]; need_agree = CONFIG["MIN_AGREE_NEWS"] if is_news else CONFIG["MIN_AGREE_NORMAL"]; need_score = CONFIG["MIN_SCORE_NEWS"] if is_news else CONFIG["MIN_SCORE_NORMAL"]
+            qty = get_dynamic_qty(price); macro_bias = mb.get("bias", "NEUTRAL")
+            high_bypass = (cert >= 85.0 and macro_bias == dest and dest in ("LONG", "SHORT"))
+            if high_bypass: log(f"HIGH CERT BYPASS {cert:.0f}% + Macro {macro_bias} {dest} - ENTER NOW no wait wick")
+            hunt_exp, hunt_reason = is_hunt_expected(dest, ll, sl, macro_bias) if dest in ("LONG", "SHORT") else (False, "No dest")
+            log(f"GOLD PICKER HuntExp {hunt_exp} {hunt_reason} | HighBypass {high_bypass} Macro {macro_bias} Cert {cert:.0f}% Dest {dest}")
+            sweep_wait = False
+            if hunt_exp and not high_bypass and dest in ("LONG", "SHORT"):
+                if STATE.get("sweep_wait") is None: STATE["sweep_wait"] = now_utc(); STATE["sweep_wait_dir"] = dest; log(f"HIDE 2min wait sweep {dest}")
+                el = (now_utc()-STATE["sweep_wait"]).total_seconds()/60
+                if el < 2: sweep_wait = True; log(f"SWEEP WAIT {el:.1f}/2min {dest}")
                 else:
-                    touched = (price >= ph["hunt_price"] if ph["side"] == "SHORT" else price <= ph["hunt_price"])
-                    if touched:
-                        log(f"HUNT MARKET TRIGGER FILLED (PAPER SIM) {ph['side']} Trigger @ ${ph['hunt_price']:.0f} Fill at market ${price:.0f}")
-                        STATE["pending_hunt"] = None
-                        wide_sl, tp = calc_sl_tp_v1315(price, ph["side"])
-                        STATE["open_position"] = {"side": ph["side"], "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": ph["qty"]}
-                        STATE["trades_today"] += 1
-                    elif elapsed_min >= CONFIG["HUNT_LIMIT_WAIT_MIN"]:
-                        cancel_hunt_limit(ph.get("orderId"))
-                        wide_sl, tp = calc_sl_tp_v1315(price, ph["side"])
-                        STATE["open_position"] = {"side": ph["side"], "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": ph["qty"]}
-                        STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN VIA MARKET AFTER HUNT TIMEOUT (PAPER) {ph['side']} Entry ${price:.0f}")
-            gates = []
-            gates.append((f"Agree {agree}/{decided} Need {need_agree} [Dynamic]", agree >= need_agree and decided >= need_agree))
-            gates.append((f"Certainty {certainty:.0f}% Need {need_cert:.0f}%", certainty >= need_cert))
-            gates.append((f"Score {score:.2f} / Thr {need_score:.2f}", score >= need_score))
+                    if is_sweep_done(dest, k1, a_low, a_high): log(f"SWEEP DONE {dest} ENTER NOW"); STATE["sweep_wait"] = None
+                    else: log(f"SWEEP NOT DONE {dest} reset wait no blind"); STATE["sweep_wait"] = now_utc(); sweep_wait = True
+            else: STATE["sweep_wait"] = None
+            pause_short = mb.get("alert") == "PAUSE_SHORT"
+            if pause_short: log("MACRO PAUSE SHORT 15m - no new SHORT")
+            mflip = mb.get("flip")
+            if mflip: log(f"MACRO FLIP READY {mflip['dir']} {mflip.get('reasons')} Need Cert agree too")
+            is_revenge = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
+            flipped = False
+            if STATE["open_position"]: flipped = manage_position(price, qty, dest, cert, agree, macro, ll, sl)
+            gates = [(f"Agree {agree}/{decided} Need {need_agree}", agree >= need_agree and decided >= need_agree), (f"Cert {cert:.0f}% Need {need_cert:.0f}%", cert >= need_cert), (f"Score {score:.2f}/{need_score:.2f}", score >= need_score)]
             all_pass = all(p for _, p in gates); failed = [n for n, p in gates if not p]
             bal_show = STATE["real_balance"] if mode == "REAL" else STATE["balance"]
-            if STATE["open_position"]:
-                p = STATE["open_position"]; wide_sl_show = p["wide_sl"]; tp_show = p["tp"]; trail_show = p.get("trailing_price", 0) or 0
-            elif dest in ("LONG", "SHORT"):
-                wide_sl_show, tp_show = calc_sl_tp_v1315(price, dest); trail_show = 0
-            else: wide_sl_show = tp_show = trail_show = 0
-            # Macro flip bypasses normal gates - it already confirmed 4/5
-            if macro_flip and not STATE["open_position"]:
-                all_pass = True; log("MACRO FLIP BYPASS GATES - 4/5 confirmed, trade it, no hide")
-            log(f"MODE {mode} CROSS Hidden | PriceSrc {price_src} | Long {longs} Short {shorts} UNKNOWN {unknowns} {unknown_names} DEST {dest} Cert {certainty:.0f}% Agree {agree}/{decided} Need {need_agree} {'SURE' if is_sure else 'NEWS' if is_news else 'NORMAL'} MAIN {'Pass True' if all_pass else 'Pass False'} | NEVER_STOP True | MACRO {macro_brain.get('bias')} Score {macro_brain.get('score'):+.1f} Alert {macro_brain.get('alert')} Flip {macro_flip['dir'] if macro_flip else 'None'}")
-            log(f"SIGNALS: {sig_str}")
-            log(f"LIVE MACRO DXY {macro['DXY_CHG']:.2f}% [{macro.get('DXY_CHG_SRC')}] NQ {macro['NQ_CHG']:.2f}% [{macro.get('NQ_CHG_SRC')}] SPX {macro['SPX_CHG']:.2f}% [{macro.get('SPX_CHG_SRC')}] GOLD {macro['GOLD_CHG']:.2f}% [{macro.get('GOLD_CHG_SRC')}] OI {macro['OI_CHG']:.2f}% [{macro.get('OI_CHG_SRC')}]")
-            log(f"WORLD Nikkei {world.get('NIKKEI',0):.2f}% HangSeng {world.get('HANG_SENG',0):.2f}% FTSE {world.get('FTSE',0):.2f}% DAX {world.get('DAX',0):.2f}%")
-            log(f"LIQ MAP LongLiq ${long_liq:,.0f} ShortLiq ${short_liq:,.0f} [{liq_src}] | Asia Low ${asia_low:,.0f} Asia High ${asia_high:,.0f} | Hunt {asian_hunt} EarlyHunt {hunt_dir} Target ${hunt_target:.0f} | Session {session_name} {session_hunt}")
-            log(f"V13.15.9 Trailing $500/$50 + 1Min Smart Recheck + Hunter + World + BybitSync + MARKET TRIGGER + MACRO BRAIN | WideSL $1200 Trailing $500/$50 Hunter $500/$50")
-            log(f"Qty {qty} Bal ${bal_show:.2f} Lev {CONFIG['LEVERAGE']}x CROSS | Price ${price:.0f} WideSL ${wide_sl_show:.0f} Trailing ${trail_show:.0f} TP ${tp_show:.0f}")
-            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f} PaperStartPnL ${STATE['paper_start_pnl']:.2f}")
+            if STATE["open_position"]: p = STATE["open_position"]; wsl, tp_s, trail = p["wide_sl"], p["tp"], p.get("trailing_price", 0) or 0
+            elif dest in ("LONG", "SHORT"): wsl, tp_s = calc_sl_tp(price, dest); trail = 0
+            else: wsl = tp_s = trail = 0
+            log(f"MODE {mode} | Long {L} Short {S} DEST {dest} Cert {cert:.0f}% Agree {agree}/{decided} {'PASS' if all_pass else 'FAIL'} | MACRO {macro_bias} Score {mb.get('score',0):+.1f} Flip {mflip['dir'] if mflip else 'None'}")
+            log(f"SIGNALS {' '.join([f'{n}:{v}' for n,v in signals])}")
+            log(f"LIQ Long ${ll:,.0f} Short ${sl:,.0f} [{liq_src}] Asia Low ${a_low:,.0f} High ${a_high:,.0f} Hunt {hunt} HuntExp {hunt_exp} SweepWait {sweep_wait} HighBypass {high_bypass}")
+            log(f"Qty {qty} Bal ${bal_show:.2f} Lev 50x | Price ${price:.0f} WideSL ${wsl:.0f} Trail ${trail:.0f} TP ${tp_s:.0f}")
+            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
             if STATE["open_position"] and not flipped:
-                p = STATE["open_position"]
-                log(f"HOLDING [MAIN] {p['side']} {'HUNTER' if p.get('is_hunter_trade') else 'NORMAL'} Trailing {'ACTIVE $'+str(round(p.get('trailing_price',0))) if p.get('trailing_active') else 'SLEEP'} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f}")
-            elif not STATE["open_position"] and not STATE.get("pending_hunt"):
-                if is_hidden:
-                    log("BLOCK: HIDE MODE — No trade, wait hunt finish")
-                elif is_revenge:
-                    log("BLOCK: SMART RECHECK 1 MIN — Check certainties + hunters, if still good re-enter at market, no miss entry")
-                elif macro_pause_short and dest == "SHORT":
-                    log("BLOCK: MACRO PAUSE SHORT 15m - Wait confirm, no new SHORT, no hide open position")
-                elif is_pre_hunt and hunt_dir == "NONE" and not macro_flip:
-                    log(f"BLOCK: ⛔ PRE-HUNT LOCK {pre_reason} — 15 min to sweep, NO NEW ORDER, wait hunters show hand")
-                elif hunt_dir in ("LONG", "SHORT"):
-                    h_sl, h_tp = calc_hunter_sl_tp(price, hunt_dir, hunt_target)
-                    log(f"🏹 HUNTER MODE TRADE: Following hunters {hunt_dir} Entry ${price:.0f} Hunt TP ${h_tp:.0f} Hunt SL ${h_sl:.0f} Target ${hunt_target:.0f} — IGNORING Certainties, hunters dey rule")
-                    if mode == "REAL":
-                        ok = place_real_order(hunt_dir, price, h_sl, h_tp, qty)
-                        if not ok: log("HUNTER TRADE REJECTED — No position")
-                        else:
-                            STATE["open_position"] = {"side": hunt_dir, "entry": price, "wide_sl": h_sl, "tp": h_tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty, "is_hunter_trade": True}
-                            STATE["trades_today"] += 1
-                    else:
-                        STATE["open_position"] = {"side": hunt_dir, "entry": price, "wide_sl": h_sl, "tp": h_tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty, "is_hunter_trade": True}
-                        STATE["trades_today"] += 1; log(f"HUNTER TRADE PAPER {hunt_dir} Entry ${price:.0f} TP ${h_tp:.0f} SL ${h_sl:.0f}")
+                p = STATE["open_position"]; log(f"HOLDING [MAIN] {p['side']} NORMAL Trailing {'ACTIVE' if p.get('trailing_active') else 'SLEEP'} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f}")
+            elif not STATE["open_position"]:
+                if sweep_wait: log("BLOCK GOLD PICKER SWEEP WAIT 2 MIN - Hide during wick, enter after sweep")
+                elif is_revenge: log("BLOCK SMART RECHECK 1 MIN")
+                elif pause_short and dest == "SHORT": log("BLOCK MACRO PAUSE SHORT")
                 elif all_pass:
-                    hunt_block = False
-                    if dest == "SHORT" and (asian_hunt == "LONG" or session_hunt == "LONG") and not macro_flip: hunt_block = True; log("⛔ HUNT BLOCK: Cert SHORT but Hunters LONG — BLOCK SHORT, no blind trade")
-                    if dest == "LONG" and (asian_hunt == "SHORT" or session_hunt == "SHORT") and not macro_flip: hunt_block = True; log("⛔ HUNT BLOCK: Cert LONG but Hunters SHORT — BLOCK LONG, no blind trade")
-                    if hunt_block:
-                        log("BLOCKED BY HUNT — Hide, wait hunt finish")
+                    if mflip and mflip["dir"] != dest: log(f"BLOCK Macro Flip {mflip['dir']} vs Cert {dest} - WAIT both")
                     else:
-                        # Macro Flip uses its own SL/TP, not WideSL $1200
-                        if macro_flip:
-                            f_sl = macro_flip["sl"]; f_tp = macro_flip["tp1"]
-                            log(f"MACRO FLIP TRADE - {mode} {dest} Entry ${price:.0f} SL ${f_sl:.0f} TP1 ${f_tp:.0f} TP2 {macro_flip['tp2']}")
+                        if mflip and mflip["dir"] == dest:
+                            f_sl, f_tp = mflip["sl"], mflip["tp1"]; log(f"MACRO FLIP TRADE {mode} {dest} Entry ${price:.0f} SL ${f_sl:.0f} TP1 ${f_tp:.0f} TP2 {mflip['tp2']}")
                             if mode == "REAL":
-                                ok = place_real_order(dest, price, f_sl, f_tp, qty)
-                                if ok:
-                                    STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": f_sl, "tp": f_tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty, "is_hunter_trade": False}
-                                    STATE["trades_today"] += 1
-                            else:
-                                STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": f_sl, "tp": f_tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty, "is_hunter_trade": False}
-                                STATE["trades_today"] += 1; log(f"MACRO FLIP PAPER {dest} Entry ${price:.0f} SL ${f_sl:.0f} TP1 ${f_tp:.0f}")
+                                if place_real_order(dest, price, f_sl, f_tp, qty): STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": f_sl, "tp": f_tp, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty}; STATE["trades_today"] += 1
+                            else: STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": f_sl, "tp": f_tp, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty}; STATE["trades_today"] += 1
                             STATE["macro_brain"]["flip_pending"] = None
-                        elif CONFIG["HUNT_LIMIT_ENABLED"]:
-                            hunt_price = price + CONFIG["HUNT_LIMIT_OFFSET_USD"] if dest == "SHORT" else price - CONFIG["HUNT_LIMIT_OFFSET_USD"]
-                            log(f"TRADE SIGNAL MAIN - {mode} {dest} Entry Hunt MARKET TRIGGER @ ${hunt_price:.0f} Qty {qty} wait 2 min, if no trigger cancel + Market")
-                            if mode == "REAL":
-                                ok, oid = place_hunt_limit(dest, hunt_price, qty)
-                                if ok: STATE["pending_hunt"] = {"side": dest, "hunt_price": hunt_price, "qty": qty, "time": now_utc(), "orderId": oid}
-                                else:
-                                    log("HUNT MARKET TRIGGER FAIL — Try Market directly with check")
-                                    wide_sl, tp = calc_sl_tp_v1315(price, dest)
-                                    ok2 = place_real_order(dest, price, wide_sl, tp, qty)
-                                    if ok2:
-                                        STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty}
-                                        STATE["trades_today"] += 1
-                            else:
-                                STATE["pending_hunt"] = {"side": dest, "hunt_price": hunt_price, "qty": qty, "time": now_utc(), "orderId": None}
                         else:
-                            wide_sl, tp = calc_sl_tp_v1315(price, dest)
+                            wsl2, tp2 = calc_sl_tp(price, dest); tag = "HIGH CERT ENTER NOW" if high_bypass else "SMALL CHOP CERT ENTER" if cert < 85 else "GOLD PICKER AFTER SWEEP"
+                            log(f"TRADE GOLD PICKER {mode} {dest} {tag} Entry ${price:.0f} SL ${wsl2:.0f} TP ${tp2:.0f} Qty {qty}")
                             if mode == "REAL":
-                                ok = place_real_order(dest, price, wide_sl, tp, qty)
-                                if ok:
-                                    STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty}
-                                    STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN ({mode}) {dest} Entry ${price:.0f}")
-                            else:
-                                STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wide_sl, "tp": tp, "certainty": certainty, "best_price": price, "trailing_active": False, "trailing_price": None, "addon_done": False, "addon_qty": 0.0, "total_qty": qty}
-                                STATE["trades_today"] += 1; log(f"ORDER PLACED MAIN (PAPER) {dest} Entry ${price:.0f}")
-                else:
-                    if not all_pass: log(f"BLOCK/WARY MAIN: {'; '.join(failed)} | UNKNOWN: {unknown_names} - Bot still alive, NEVER_STOP")
-            if (now_utc() - last_heartbeat).total_seconds() > CONFIG["HEARTBEAT_MIN"] * 60: log(f"HEARTBEAT OK - MODE {mode} CROSS Hidden - Bal ${bal_show:.2f} PnL ${STATE['pnl']:.2f}"); last_heartbeat = now_utc()
+                                if place_real_order(dest, price, wsl2, tp2, qty): STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty}; STATE["trades_today"] += 1
+                            else: STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty}; STATE["trades_today"] += 1
+                else: log(f"BLOCK SKIP FAKE: {'; '.join(failed)} - NEVER_STOP")
+            if (now_utc()-last_hb).total_seconds() > 600: log(f"HEARTBEAT MODE {mode} Bal ${bal_show:.2f} PnL ${STATE['pnl']:.2f}"); last_hb = now_utc()
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
-
 if __name__ == "__main__": main()
+# END V13.16.0 SLIM
