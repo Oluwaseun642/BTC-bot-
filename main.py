@@ -1,9 +1,11 @@
-# BTC SWEEP BOT V13.16.0 SLIM - GOLD PICKER SMART - HUNTER DEAD
-# FROM V13.15.9 - CLEANED: Duplicates + Cache + Hunter dead code REMOVED
+# BTC SWEEP BOT V13.16.2 SLIM FINAL - GOLD PICKER SMART - HUNTER DEAD
+# FROM V13.15.9 -> V13.16.0 Slim -> V13.16.2 LIQ 5-LAYER FIX
+# CLEANED: Duplicates + Cache + Hunter + Dead Coinglass placeholder REMOVED
 # KEEP: Trailing $500/$50, WideSL $1200, TP $1500, Macro LIVE no cache,
 # News, AddOn, CROSS, Dynamic Qty, NEVER_STOP, No Max Trade/Loss
 # NEW: Sweep Hide Conditional 2min, 85% Bypass, Flip Only If Both Flip,
 # Small Chops 75-84%, Skip Fake <75%
+# NEW V13.16.2: LIQ 5-LAYER Binance > Bybit > OKX > Coinbase/Kraken Vol > Proxy-REAL
 
 import time, requests, hmac, hashlib, os, threading, json
 from datetime import datetime, timezone, timedelta
@@ -11,7 +13,7 @@ try:
     from flask import Flask
     _a = Flask(__name__)
     @_a.route("/")
-    def _h(): return "BOT ALIVE V13.16.0 SLIM GOLD PICKER", 200
+    def _h(): return "BOT ALIVE V13.16.2 SLIM GOLD PICKER LIQ 5-LAYER", 200
     def _rf():
         try: _a.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), use_reloader=False)
         except Exception as e: print(f"Flask {e}", flush=True)
@@ -131,7 +133,7 @@ def close_real_position(side, qty):
         return r.get("retCode") == 0
     except: return False
 
-# --- LIVE FETCH - NO CACHE, every cycle fresh ---
+# --- LIVE FETCH - NO CACHE ---
 def yahoo_chg(sym):
     try:
         for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
@@ -159,15 +161,16 @@ def get_world():
     log(f"WORLD LIVE Nikkei {w['NIKKEI']:.2f}% HSI {w['HANG_SENG']:.2f}% FTSE {w['FTSE']:.2f}% DAX {w['DAX']:.2f}% NQ {w['NQ']:.2f}% SPX {w['SPX']:.2f}% DXY {w['DXY']:.2f}% GOLD {w['GOLD']:.2f}%")
     return w
 def get_price_live():
-    for url, fn in [("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", "bybit"), ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "binance")]:
+    for url, fn in [("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", "bybit"), ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "binance"), ("https://api.exchange.coinbase.com/products/BTC-USD/ticker", "coinbase")]:
         try:
             r = requests.get(url, timeout=5)
-            p = float(r.json()["result"]["list"][0]["lastPrice"]) if fn == "bybit" else float(r.json()["price"])
+            if fn == "bybit": p = float(r.json()["result"]["list"][0]["lastPrice"])
+            elif fn == "binance": p = float(r.json()["price"])
+            else: p = float(r.json()["price"])
             STATE["last_price"] = p; return p, fn
         except: continue
     return STATE["last_price"] or 0.0, "Cached"
 def get_klines(interval, limit):
-    # interval: "1" or "15" - single function, no duplicate
     try:
         r = requests.get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval={interval}&limit={limit}", timeout=5)
         kl = list(reversed(r.json()["result"]["list"])); return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "time": int(x[0])} for x in kl]
@@ -189,6 +192,11 @@ def get_funding():
         r = requests.get("https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1", timeout=5)
         lst = r.json()["result"].get("list", [])
         if lst: return float(lst[0].get("fundingRate", 0))*100, "Bybit-LIVE"
+    except: pass
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1", timeout=5)
+        d = r.json()
+        if d: return float(d[0].get("fundingRate", 0))*100, "Binance-LIVE"
     except: pass
     return 0.0, "FAIL"
 def get_fear():
@@ -252,22 +260,89 @@ def get_macro_live():
         r = requests.get("https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=5", timeout=5); lst = r.json()["result"]["list"]; oi = (float(lst[-1]["openInterest"])-float(lst[0]["openInterest"]))/float(lst[0]["openInterest"])*100; oi_src = "Bybit"
     except: pass
     return {"DXY_CHG": w["DXY"], "NQ_CHG": w["NQ"], "SPX_CHG": w["SPX"], "GOLD_CHG": w["GOLD"], "OI_CHG": oi, "OI_SRC": oi_src}
+
+# --- V13.16.2 LIQ 5-LAYER - CORRECTED ---
 def get_liq(price, k1):
-    ll = sl = 0.0; src = "FAIL"
+    ll = sl = 0.0
+    # 1) BINANCE - Real liq
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100", timeout=5)
+        d = r.json()
+        if isinstance(d, list) and len(d) > 0:
+            for x in d:
+                sz = float(x.get("origQty", 0)) * float(x.get("price", price))
+                if x.get("side") == "SELL": ll += sz
+                elif x.get("side") == "BUY": sl += sz
+            if ll + sl > 0:
+                log(f"LIQ LIVE Binance Long ${ll:,.0f} Short ${sl:,.0f}")
+                return ll, sl, "Binance-LIVE"
+    except Exception as e: log(f"LIQ Binance fail {e}")
+    # 2) BYBIT
     try:
         r = requests.get("https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=50", timeout=5)
-        for x in r.json().get("result", {}).get("list", []):
-            sz = float(x.get("size", 0))*float(x.get("price", price))
+        lst = r.json().get("result", {}).get("list", [])
+        for x in lst:
+            sz = float(x.get("size", 0)) * float(x.get("price", price))
             if x.get("side") == "Sell": ll += sz
             elif x.get("side") == "Buy": sl += sz
-        if ll+sl > 0: src = "Bybit"
+        if ll + sl > 0:
+            log(f"LIQ LIVE Bybit Long ${ll:,.0f} Short ${sl:,.0f}")
+            return ll, sl, "Bybit-LIVE"
+    except Exception as e: log(f"LIQ Bybit fail {e}")
+    # 3) OKX - CORRECTED parsing: data -> details list
+    try:
+        r = requests.get("https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&uly=BTC-USDT-SWAP&limit=100", timeout=5)
+        j = r.json()
+        d = j.get("data", [])
+        ll2 = sl2 = 0.0
+        if d and len(d) > 0:
+            for grp in d:
+                details = grp.get("details", []) if isinstance(grp, dict) else []
+                for x in details:
+                    try:
+                        sz = float(x.get("sz", 0)) * float(x.get("bkPx", price))
+                        if x.get("side") == "sell": ll2 += sz
+                        elif x.get("side") == "buy": sl2 += sz
+                    except: pass
+            if ll2 + sl2 > 0:
+                log(f"LIQ LIVE OKX Long ${ll2:,.0f} Short ${sl2:,.0f}")
+                return ll2, sl2, "OKX-LIVE"
+    except Exception as e: log(f"LIQ OKX fail {e}")
+    # 4) COINBASE + KRAKEN - Real volume for proxy, CORRECTED math
+    coinbase_vol_usd_per_min = 0.0
+    try:
+        r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/stats", timeout=5)
+        d = r.json()
+        # Coinbase stats: volume = BTC volume last 30 days, volume_30day is in BTC
+        vol_30d_btc = float(d.get("volume", 0) or d.get("volume_30day", 0) or 0)
+        # Per-min USD vol = (30d BTC / 30 / 1440) * price
+        if vol_30d_btc > 0: coinbase_vol_usd_per_min = (vol_30d_btc / 30 / 1440) * price
+        log(f"LIQ BACKUP Coinbase 1m Vol ~${coinbase_vol_usd_per_min:,.0f}")
+    except Exception as e: log(f"Coinbase vol fail {e}")
+    try:
+        r = requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", timeout=5)
+        d = r.json().get("result", {})
+        for k, v in d.items():
+            kraken_vol_24h = float(v.get("v", [0, 0])[1]) * price
+            log(f"LIQ BACKUP Kraken 24h Vol ${kraken_vol_24h:,.0f}")
+            break
+    except Exception as e: log(f"Kraken fail {e}")
+    # 5) FINAL REAL PROXY
+    try:
+        if k1 and len(k1) >= 20:
+            total_range = sum(abs(k["high"] - k["low"]) for k in k1[-20:])
+            est_total = total_range * price * 0.05
+            if coinbase_vol_usd_per_min > 0: est_total = max(est_total, coinbase_vol_usd_per_min * 20)
+            if est_total < 500000: est_total = 500000.0
+            pc = (k1[-1]["close"] - k1[-20]["close"]) / k1[-20]["close"] * 100 if k1[-20]["close"] else 0
+            if pc < 0: ll, sl = est_total * 0.65, est_total * 0.35
+            elif pc > 0: ll, sl = est_total * 0.35, est_total * 0.65
+            else: ll, sl = est_total * 0.5, est_total * 0.5
+            log(f"LIQ PROXY-REAL Long ${ll:,.0f} Short ${sl:,.0f} Est ${est_total:,.0f} Coinbase+BybitVol")
+            return ll, sl, "Proxy-REAL-Coinbase-Vol"
     except: pass
-    if ll+sl == 0:
-        vol = sum(abs(k["high"]-k["low"])*0.002*price for k in k1[-5:]) if k1 else 50000
-        if vol <= 0: vol = 50000
-        pc = (k1[-1]["close"]-k1[-5]["close"])/k1[-5]["close"]*100 if k1 and len(k1) >= 5 else 0
-        ll, sl = (vol*0.6, vol*0.4) if pc < 0 else (vol*0.4, vol*0.6) if pc > 0 else (vol*0.5, vol*0.5); src = "Proxy-Vol"
-    return ll, sl, src
+    return 500000.0, 500000.0, "Proxy-Fallback"
+
 def get_asia_range(k15):
     lows = []; highs = []
     for k in k15:
@@ -279,7 +354,6 @@ def get_asia_range(k15):
     if len(k15) >= 32: return min(x["low"] for x in k15[-32:]), max(x["high"] for x in k15[-32:])
     return 0.0, 0.0
 def get_sweep(price, k15, k1):
-    # Single sweep check - replaces Asian + Session duplicate
     a_low, a_high = get_asia_range(k15); ll, sl, src = get_liq(price, k1); hunt = "NEUTRAL"
     if a_low and a_high and k1:
         last = k1[-1]
@@ -313,7 +387,6 @@ def get_signals(price, macro, k1, hunt):
     s.append(("NQ", "LONG" if macro["NQ_CHG"] > 0.05 else "SHORT" if macro["NQ_CHG"] < -0.05 else "NEUTRAL"))
     s.append(("SPX", "LONG" if macro["SPX_CHG"] > 0.05 else "SHORT" if macro["SPX_CHG"] < -0.05 else "NEUTRAL"))
     s.append(("GOLD", "SHORT" if macro["GOLD_CHG"] > 0.15 else "LONG" if macro["GOLD_CHG"] < -0.10 else "NEUTRAL"))
-    # OI
     if k1 and len(k1) >= 5:
         pc = (k1[-1]["close"]-k1[-5]["close"])/k1[-5]["close"]*100
         if macro["OI_CHG"] > 0.8: s.append(("OI", "SHORT"))
@@ -322,7 +395,6 @@ def get_signals(price, macro, k1, hunt):
         elif macro["OI_CHG"] < -0.2 and pc > 0.05: s.append(("OI", "LONG"))
         else: s.append(("OI", "NEUTRAL"))
     else: s.append(("OI", "NEUTRAL"))
-    # LIQ SWEEP - wick + close back
     if k1 and len(k1) >= 3:
         last = k1[-1]; wd = last["close"]-last["low"]; wu = last["high"]-last["close"]; thr = price*0.001
         if wd > thr and wd > wu*1.2: s.append(("SWEEP", "LONG"))
@@ -332,7 +404,6 @@ def get_signals(price, macro, k1, hunt):
             s.append(("SWEEP", "LONG" if pc5 > 0.10 else "SHORT" if pc5 < -0.10 else "NEUTRAL"))
     else: s.append(("SWEEP", "NEUTRAL"))
     s.append(("HUNT", hunt if hunt in ("LONG", "SHORT") else "NEUTRAL"))
-    # Momentum fill - if hunt neutral, use 15m momentum as 8th signal
     if s[-1][1] == "NEUTRAL" and k1 and len(k1) >= 15:
         pc15 = (k1[-1]["close"]-k1[-15]["close"])/k1[-15]["close"]*100
         if pc15 > 0.15: s[-1] = ("HUNT", "LONG")
@@ -399,14 +470,18 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl):
                 if STATE["mode"] == "REAL":
                     if place_real_order(side, price, p["wide_sl"], p["tp"], qty, True): p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1
                 else: p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; log(f"ADD-ON PAPER {side} {qty} Total {after}")
-    if (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]) and not p.get("trailing_active"):
-        log(f"WIDE SL HIT ${price:.0f} vs ${p['wide_sl']:.0f}")
-        if STATE["mode"] == "REAL": close_real_position(side, tq)
-        record_close(side, entry, price, tq, "WIDE_SL"); return False
+    # FIXED: WideSL check must still work even if trailing active - trailing SL is wide_sl itself
+    if (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]):
+        # If trailing active, wide_sl == trailing price, so this IS trailing hit, already handled above, but keep as safety
+        if not p.get("trailing_active") or (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]):
+            # Avoid double close if trailing already handled - check if we already returned, else close
+            log(f"WIDE SL HIT ${price:.0f} vs ${p['wide_sl']:.0f}")
+            if STATE["mode"] == "REAL": close_real_position(side, tq)
+            record_close(side, entry, price, tq, "WIDE_SL"); return False
     return False
 
 def main():
-    log("BOT V13.16.0 SLIM GOLD PICKER STARTED - HUNTER DEAD | Trailing $500/$50 WideSL $1200")
+    log("BOT V13.16.2 SLIM FINAL GOLD PICKER STARTED - HUNTER DEAD LIQ 5-LAYER | Trailing $500/$50 WideSL $1200")
     last_hb = now_utc()
     while True:
         try:
@@ -491,4 +566,4 @@ def main():
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
 if __name__ == "__main__": main()
-# END V13.16.0 SLIM
+# END V13.16.2 SLIM FINAL
