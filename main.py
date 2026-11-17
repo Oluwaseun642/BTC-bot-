@@ -1,6 +1,8 @@
-# BTC SWEEP BOT V13.16.4.5 SLIM FINAL - GOLD PICKER SMART - HUNTER DEAD
-# FIX V13.16.4.5: DYNAMIC TRAILING PROTOCOL - Trail Trigger = (Fees*1.2 + $1.50 Target Net)/Qty, Floor $300, Round $50, Dist 0, Wide TP $1500 still stand, Re-entry $20 Gap + Fresh Trigger per entry
-# KEEP: Macro -1.5/+1.5, HuntExp Session-Only + REAL Liq Only, HighBypass Allow NEUTRAL, Sweep Wait 6min Timeout No Reset, WideSL $1200, Dynamic Lev 15x/20x/25x/50x, Dynamic Qty Min 0.001, CROSS, NEVER_STOP, AddOn, 3-Cycle Confirm, Emergency Hunt Cert 90%
+# BTC SWEEP BOT V13.16.4.6 REAL-FIXED - GOLD PICKER SMART
+# FIX V13.16.4.6: REAL CLOSE with reduceOnly, STATE PERSISTENCE bot_state.json, STRONG SYNC
+# KEEP: Macro -1.5/+1.5, HuntExp Session-Only + REAL Liq Only, HighBypass Allow NEUTRAL, Sweep Wait 6min, WideSL $1200, Dynamic Lev 15x/20x/25x/50x, Dynamic Qty Min 0.001, CROSS, AddOn, 3-Cycle Confirm, Emergency Hunt Cert 90%
+# KEEP: AUTO_SWITCH 2026-11-16 01:00 UTC -> REAL (as owner requested)
+# DYNAMIC TRAILING: Trigger = (Fees*1.2 + $1.50)/Qty, Floor $300, Round $50, Dist 0, Wide TP $1500, Re-entry $20 Gap
 
 import time, requests, hmac, hashlib, os, threading, json, math
 from datetime import datetime, timezone, timedelta
@@ -8,7 +10,7 @@ try:
     from flask import Flask
     _a = Flask(__name__)
     @_a.route("/")
-    def _h(): return "BOT ALIVE V13.16.4.5 DYNAMIC-TRAILING-300-550", 200
+    def _h(): return "BOT ALIVE V13.16.4.6 REAL-FIXED", 200
     def _rf():
         try: _a.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), use_reloader=False)
         except Exception as e: print(f"Flask {e}", flush=True)
@@ -20,21 +22,17 @@ CONFIG = {
     "AUTO_SWITCH_UTC": datetime(2026, 11, 16, 1, 0, tzinfo=timezone.utc),
     "QTY_BASE": 0.010, "QTY_STEP": 0.005, "QTY_MIN": 0.001, "REAL_MAX_QTY": 0.100,
     "MIN_CERTAINTY_NORMAL": 75.0, "MIN_AGREE_NORMAL": 4, "MIN_SCORE_NORMAL": 0.60,
-    "SURE_CERTAINTY": 95.0, "SURE_AGREE": 6,
     "NEWS_ENABLED": True, "MIN_CERTAINTY_NEWS": 75.0, "MIN_AGREE_NEWS": 4, "MIN_SCORE_NEWS": 0.60,
     "WIDE_SL_USD": 1200.0, "TP_DIST_USD": 1500.0,
-    # --- DYNAMIC TRAILING PROTOCOL V13.16.4.5 ---
     "TRAILING_ENABLED": True,
-    "TRAIL_DIST_USD": 0.0,  # NO $50 buffer, SL = Best price exactly
-    "TRAIL_TARGET_NET": 1.50,  # Target net profit after fees
-    "TRAIL_SAFETY": 1.2,  # 20% extra for slippage spike
-    "TRAIL_FLOOR_USD": 300.0,  # Never below $300
+    "TRAIL_TARGET_NET": 1.50,
+    "TRAIL_SAFETY": 1.2,
+    "TRAIL_FLOOR_USD": 300.0,
     "TRAIL_ROUND_USD": 50.0,
-    "REENTRY_GAP_USD": 20.0,  # Protection we agreed: re-enter only if price moved $20 beyond exit
+    "REENTRY_GAP_USD": 20.0,
     "FEE_RATE": 0.0006, "SLIPPAGE_PCT": 0.0005,
     "FLIP_ENABLED": True, "FLIP_CERTAINTY": 75.0, "FLIP_AGREE": 4,
-    "NEVER_STOP": True, "ADDON_ENABLED": True, "ADDON_WICK_MIN_USD": 500.0, "ADDON_WICK_MAX_USD": 900.0, "ADDON_BUFFER_PCT": 0.90,
-    "GOLD_PICKER_ENABLED": True,
+    "ADDON_ENABLED": True, "ADDON_BUFFER_PCT": 0.90,
     "HIGH_CERT_BYPASS": 85.0, "SWEEP_WAIT_MIN": 2, "SWEEP_TIMEOUT_MIN": 6, "HUNT_MIN_LIQ_USD": 2000000.0,
     "POLL_SEC": 5, "BYBIT_BASE": "https://api.bybit.com",
     "COOLDOWN_MIN": 1,
@@ -52,7 +50,6 @@ STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "pnl": 0.0, "wi
     "hunt_confirm_count": 0, "hunt_confirm_dest": None,
     "flip_confirm_count": 0, "flip_confirm_dest": None,
     "emergency_block_until": None, "emergency_block_side": None,
-    # DYNAMIC TRAILING re-entry memory
     "last_trail_exit_price": None, "last_trail_exit_side": None, "last_trail_exit_time": None}
 
 def now_utc(): return datetime.now(timezone.utc)
@@ -62,6 +59,60 @@ def get_mode():
     if rm == "true": return "REAL"
     if rm == "false": return "PAPER"
     return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
+
+# --- FIX 3: STATE PERSISTENCE ---
+STATE_FILE = "bot_state.json"
+def save_state():
+    try:
+        data = {}
+        for k, v in STATE.items():
+            if isinstance(v, datetime):
+                data[k] = v.isoformat()
+            elif isinstance(v, dict):
+                nd = {}
+                for kk, vv in v.items():
+                    nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
+                data[k] = nd
+            elif k == "open_position" and v is not None:
+                # save open_position too, but sync will verify with Bybit
+                nd = {}
+                for kk, vv in v.items():
+                    nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
+                data[k] = nd
+            else:
+                data[k] = v
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log(f"SAVE STATE FAIL {e}")
+
+def load_state():
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            if k in ("cooldown_until", "emergency_block_until", "last_trail_exit_time", "sweep_wait"):
+                if v:
+                    try: STATE[k] = datetime.fromisoformat(v)
+                    except: STATE[k] = None
+                else: STATE[k] = None
+            elif k == "macro_brain" and isinstance(v, dict):
+                for kk, vv in v.items():
+                    if kk == "alert_time" and vv:
+                        try: STATE["macro_brain"][kk] = datetime.fromisoformat(vv)
+                        except: pass
+                    else: STATE["macro_brain"][kk] = vv
+            elif k == "open_position" and isinstance(v, dict):
+                STATE[k] = v
+            elif k in STATE:
+                STATE[k] = v
+        log(f"STATE RESTORED Wins {STATE.get('wins')} PnL ${STATE.get('pnl',0):.2f} LastTrailExit {STATE.get('last_trail_exit_price')} OpenPos {STATE.get('open_position') is not None}")
+    except Exception as e:
+        log(f"LOAD STATE FAIL {e} - start fresh but sync Bybit")
+
+load_state()
 
 def _sign(ts, rw, body):
     return hmac.new(API_SECRET.encode(), f"{ts}{API_KEY}{rw}{body}".encode(), hashlib.sha256).hexdigest()
@@ -122,12 +173,11 @@ def set_cross_margin():
 def calc_fees(price, qty):
     pos = qty*price; return pos, pos*CONFIG["FEE_RATE"]*2, pos*CONFIG["SLIPPAGE_PCT"]*2, pos*CONFIG["FEE_RATE"]*2 + pos*CONFIG["SLIPPAGE_PCT"]*2
 
-# --- DYNAMIC TRAILING PROTOCOL ---
 def get_dynamic_trigger(entry_price, qty=None):
     if qty is None: qty = CONFIG["QTY_BASE"]
     if not qty or qty <= 0: qty = CONFIG["QTY_BASE"]
     pos = qty * entry_price
-    fees = pos * (CONFIG["FEE_RATE"]*2 + CONFIG["SLIPPAGE_PCT"]*2)  # 0.22%
+    fees = pos * (CONFIG["FEE_RATE"]*2 + CONFIG["SLIPPAGE_PCT"]*2)
     need_gross = fees * CONFIG["TRAIL_SAFETY"] + CONFIG["TRAIL_TARGET_NET"]
     raw = need_gross / qty
     trigger = math.ceil(raw / CONFIG["TRAIL_ROUND_USD"]) * CONFIG["TRAIL_ROUND_USD"]
@@ -153,6 +203,7 @@ def get_dynamic_qty(price, lev=None):
     liq_dist = price / lev
     log(f"DYN LEV {lev}x QTY Bal ${bal:.2f} Base {base_qty} MaxAfford {max_affordable:.4f} -> Qty {qty} Margin ${qty*price/lev:.2f} LiqDist ~${liq_dist:.0f} (WideSL $1200 {'SAFE' if liq_dist > 1200 else 'TIGHT'})")
     return qty
+
 def place_real_order(side, price, sl, tp, qty, is_addon=False):
     if not API_KEY: log("REAL BLOCKED No API"); return False
     if not qty or qty < CONFIG["QTY_MIN"]: log(f"REAL BLOCK Qty {qty} < Min"); return False
@@ -164,18 +215,28 @@ def place_real_order(side, price, sl, tp, qty, is_addon=False):
         log(f"REAL ORDER {'OK' if r.get('retCode')==0 else 'REJECTED '+str(r.get('retMsg'))} {side} Qty {qty} Lev {lev}x Entry ${price:.0f} SL ${sl:.0f} TP ${tp:.0f}")
         return r.get("retCode") == 0
     except Exception as e: log(f"REAL ORDER ERR {e}"); return False
+
 def update_real_sl(sl, side):
     if STATE["mode"] != "REAL" or not API_KEY: return True
     try:
         r = bybit_post("/v5/position/trading-stop", {"category": "linear", "symbol": CONFIG["SYMBOL"], "stopLoss": str(round(sl, 1)), "slTriggerBy": "LastPrice", "positionIdx": 0})
         return r.get("retCode") == 0
     except: return False
+
+# --- FIX 1: REAL CLOSE WEY DEY REALLY CLOSE ---
 def close_real_position(side, qty):
-    if STATE["mode"] == "REAL": return True
+    if STATE["mode"] != "REAL":
+        return True
+    if not API_KEY:
+        log("REAL CLOSE BLOCKED No API"); return False
     try:
-        r = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": "Sell" if side == "LONG" else "Buy", "orderType": "Market", "qty": str(qty), "timeInForce": "GTC", "positionIdx": 0})
-        return r.get("retCode") == 0
-    except: return False
+        close_side = "Sell" if side == "LONG" else "Buy"
+        r = bybit_post("/v5/order/create", {"category": "linear", "symbol": CONFIG["SYMBOL"], "side": close_side, "orderType": "Market", "qty": str(qty), "timeInForce": "GTC", "positionIdx": 0, "reduceOnly": True})
+        ok = r.get("retCode") == 0
+        log(f"REAL CLOSE {'OK' if ok else 'FAILED '+str(r.get('retMsg'))} {side} Qty {qty}")
+        return ok
+    except Exception as e:
+        log(f"REAL CLOSE ERR {e}"); return False
 
 def yahoo_chg(sym):
     try:
@@ -442,8 +503,7 @@ def record_close(side, entry, close_p, qty, reason):
     if STATE["mode"] == "PAPER": STATE["balance"] += net
     STATE["pnl"] += net
     if reason in ("TP", "TRAILING"):
-        STATE["cooldown_until"] = now_utc()  # No cooldown, enter back immediately (with $20 gap check)
-        # Save trailing exit for re-entry gap logic
+        STATE["cooldown_until"] = now_utc()
         if reason == "TRAILING":
             STATE["last_trail_exit_price"] = close_p; STATE["last_trail_exit_side"] = side; STATE["last_trail_exit_time"] = now_utc()
     else: STATE["cooldown_until"] = now_utc()+timedelta(minutes=CONFIG["COOLDOWN_MIN"])
@@ -452,8 +512,10 @@ def record_close(side, entry, close_p, qty, reason):
     elif net > 0: STATE["wins"] += 1
     elif net < -0.01: STATE["losses"] += 1
     else: STATE["breakevens"] += 1
-    log(f"CLOSE {reason} {side} ${net:.2f} at ${close_p:.0f} - {'No cooldown, enter back immediately' if reason in ('TP','TRAILING') else '1 min Smart Recheck'}")
-    STATE["open_position"] = None; log(f"BALANCE ${refresh_balance():.2f}"); return net
+    log(f"CLOSE {reason} {side} ${net:.2f} at ${close_p:.0f}")
+    STATE["open_position"] = None
+    save_state()
+    log(f"BALANCE ${refresh_balance():.2f}"); return net
 def calc_hunt_cert(side, dest, cert, agree, macro, world, ll, sl, liq_src, price, a_low, a_high):
     hunt_cert = 0.0; reasons = []
     if dest != "NONE" and dest != side and cert >= 90 and agree >= 6:
@@ -486,7 +548,7 @@ def is_flip_confirmed(flip_dest, cert, agree, macro, side, world=None, ll=0, sl=
         return True, f"HIGH VITALITY FLIP IMMEDIATE Cert {cert:.0f}% Agree {agree} Macro {macro_score} News {is_news}"
     if STATE.get("flip_confirm_dest") != flip_dest:
         STATE["flip_confirm_dest"] = flip_dest; STATE["flip_confirm_count"] = 1
-        return False, f"FLIP CHECK 1/3 {flip_dest} Cert {cert:.0f}% Agree {agree} - wait 3 cycles, no sudden flip"
+        return False, f"FLIP CHECK 1/3 {flip_dest} Cert {cert:.0f}% Agree {agree} - wait 3 cycles"
     STATE["flip_confirm_count"] += 1
     if STATE["flip_confirm_count"] < CONFIG["CONFIRM_CYCLES"]:
         return False, f"FLIP CHECK {STATE['flip_confirm_count']}/3 {flip_dest} - wait 3 cycles"
@@ -495,11 +557,10 @@ def is_flip_confirmed(flip_dest, cert, agree, macro, side, world=None, ll=0, sl=
     if STATE["macro_brain"].get("bias") != flip_dest:
         STATE["flip_confirm_count"] = 0; return False, f"FLIP BLOCKED Macro {STATE['macro_brain'].get('bias')} != {flip_dest}"
     STATE["flip_confirm_count"] = 0; STATE["flip_confirm_dest"] = None
-    return True, f"FLIP CONFIRMED 3 CYCLES Thorough {flip_dest} Cert {cert:.0f}% Agree {agree} Macro {flip_dest}"
+    return True, f"FLIP CONFIRMED 3 CYCLES {flip_dest} Cert {cert:.0f}% Agree {agree} Macro {flip_dest}"
 def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=None, is_news=False, macro_score=0, liq_src="", a_low=0, a_high=0, k1=None):
     if not STATE["open_position"]: return False
     p = STATE["open_position"]; entry = float(p["entry"]); side = p["side"]; tq = p.get("total_qty", qty)
-    # Dynamic trigger per entry - if old position has no trigger, calc it now
     if "trail_trigger" not in p or not p.get("trail_trigger"):
         p["trail_trigger"] = get_dynamic_trigger(entry, tq)
     trail_trigger = p["trail_trigger"]
@@ -518,10 +579,9 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=Non
     if (price >= p["tp"] if side == "LONG" else price <= p["tp"]):
         if STATE["mode"] == "REAL": close_real_position(side, tq)
         record_close(side, entry, price, tq, "TP"); return False
-    # --- DYNAMIC TRAILING: Trigger dynamic, Dist 0 ---
     if CONFIG["TRAILING_ENABLED"] and favour >= trail_trigger:
-        if not p.get("trailing_active"): p["trailing_active"] = True; log(f"TRAILING ON {side} Favour ${favour:.0f} Trigger ${trail_trigger:.0f} SL=Best-$0 (No buffer)")
-        tp_price = best  # Dist 0 - SL = Best exactly
+        if not p.get("trailing_active"): p["trailing_active"] = True; log(f"TRAILING ON {side} Favour ${favour:.0f} Trigger ${trail_trigger:.0f} SL=Best-$0")
+        tp_price = best
         p["trailing_price"] = tp_price
         if side == "LONG" and tp_price > p["wide_sl"]: p["wide_sl"] = tp_price; update_real_sl(tp_price, side)
         elif side == "SHORT" and tp_price < p["wide_sl"]: p["wide_sl"] = tp_price; update_real_sl(tp_price, side)
@@ -538,16 +598,16 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=Non
             else: STATE["hunt_confirm_count"] += 1
             log(f"EMERGENCY HUNT CHECK {STATE['hunt_confirm_count']}/3 HuntCert {hunt_cert:.0f}% {hunt_reasons} Against ${against:.0f}")
             if STATE["hunt_confirm_count"] >= CONFIG["CONFIRM_CYCLES"]:
-                log(f"EMERGENCY HUNT CONFIRMED 3 CYCLES HuntCert {hunt_cert:.0f}% - CLOSE, big hunt coming")
+                log(f"EMERGENCY HUNT CONFIRMED 3 CYCLES HuntCert {hunt_cert:.0f}% - CLOSE")
                 STATE["hunt_confirm_count"] = 0; STATE["hunt_confirm_dest"] = None
                 STATE["emergency_block_until"] = now_utc() + timedelta(minutes=CONFIG["EMERGENCY_BLOCK_MIN"])
                 STATE["emergency_block_side"] = side
                 if STATE["mode"] == "REAL": close_real_position(side, tq)
                 record_close(side, entry, price, tq, "EMERGENCY"); return False
-            else: log(f"EMERGENCY WAIT {STATE['hunt_confirm_count']}/3 cycles to confirm, no FOMO close - HOLD")
+            else: log(f"EMERGENCY WAIT {STATE['hunt_confirm_count']}/3 cycles")
         else:
             STATE["hunt_confirm_count"] = 0; STATE["hunt_confirm_dest"] = None
-            log(f"EMERGENCY HOLD Small wick Against ${against:.0f} HuntCert {hunt_cert:.0f}% <90% {hunt_reasons} - HOLD, fit come back, no FOMO close")
+            log(f"EMERGENCY HOLD Against ${against:.0f} HuntCert {hunt_cert:.0f}% <90% - HOLD")
             if against >= 1200:
                 log(f"EMERGENCY HARD WideSL $1200 reached - CLOSE")
                 if STATE["mode"] == "REAL": close_real_position(side, tq)
@@ -557,37 +617,49 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=Non
             bal = get_current_balance() or 24.33; lev = STATE.get("leverage", 50); after = round(tq+qty, 3)
             if after*price <= bal*lev*0.90:
                 if STATE["mode"] == "REAL":
-                    if place_real_order(side, price, p["wide_sl"], p["tp"], qty, True): p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1
-                else: p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; log(f"ADD-ON PAPER {side} {qty} Total {after}")
+                    if place_real_order(side, price, p["wide_sl"], p["tp"], qty, True): p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; save_state()
+                else: p["addon_done"] = True; p["total_qty"] = after; STATE["addons"] += 1; log(f"ADD-ON PAPER {side} {qty} Total {after}"); save_state()
     if (price <= p["wide_sl"] if side == "LONG" else price >= p["wide_sl"]):
         log(f"WIDE SL HIT ${price:.0f} vs ${p['wide_sl']:.0f}")
         if STATE["mode"] == "REAL": close_real_position(side, tq)
         record_close(side, entry, price, tq, "WIDE_SL"); return False
     return False
+
+def sync_real_position():
+    # STRONG SYNC: Bybit na truth, STATE na copy
+    rp = get_real_position_sync()
+    if rp is None:
+        if STATE["open_position"] is not None:
+            log("SYNC FIX Bybit NO POS - Clear fake HOLDING"); STATE["open_position"] = None; save_state()
+        return
+    # Bybit get position
+    if STATE["open_position"] is None:
+        log(f"SYNC FIX Adopt Bybit {rp}")
+        trig = get_dynamic_trigger(rp["entry"], rp["size"])
+        STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"], "trail_trigger": trig}
+        save_state()
+    else:
+        # Keep our trailing/addon memory, only update size
+        STATE["open_position"]["total_qty"] = rp["size"]
+
 def main():
-    log("BOT V13.16.4.5 SLIM FINAL GOLD PICKER STARTED - DYNAMIC TRAILING $300-550 Dist 0 WideSL $1200 TP $1500 ALL-LIVE")
+    log("BOT V13.16.4.6 REAL-FIXED STARTED - DYNAMIC TRAILING $300-550 Dist 0 WideSL $1200 TP $1500 ALL-LIVE")
     while True:
         try:
             nm = get_mode()
             if nm != STATE["mode"]:
                 if nm == "REAL":
-                    STATE["pnl"] = 0; STATE["wins"] = STATE["losses"] = STATE["breakevens"] = STATE["flips"] = STATE["addons"] = STATE["trades_today"] = 0; STATE["open_position"] = None; STATE["cooldown_until"] = None
+                    # NOTE: Do NOT wipe pnl/wins on auto-switch if we restored from file - keep history
+                    STATE["open_position"] = None; STATE["cooldown_until"] = None
                     bal = get_real_balance(); log(f"*** AUTO SWITCH REAL *** Bal ${bal:.2f} - Sync Bybit")
-                    rp = get_real_position_sync()
-                    if rp:
-                        trig = get_dynamic_trigger(rp["entry"], rp["size"])
-                        STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"], "trail_trigger": trig}
                     STATE["mode"] = "REAL"; STATE["cross_margin_set"] = False
-                else: STATE["mode"] = nm
+                    save_state()
+                else: STATE["mode"] = nm; save_state()
             mode = STATE["mode"]; set_cross_margin(); refresh_balance()
             if mode == "REAL":
-                rp = get_real_position_sync()
-                if rp is None and STATE["open_position"] is not None: log("SYNC FIX Bybit NO POS - Clear fake HOLDING"); STATE["open_position"] = None
-                elif rp is not None and STATE["open_position"] is None:
-                    log(f"SYNC FIX Adopt Bybit {rp}"); trig = get_dynamic_trigger(rp["entry"], rp["size"])
-                    STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"], "trail_trigger": trig}
+                sync_real_position()
             price, psrc = get_price_live()
-            if price == 0: log("NO PRICE LIVE-FAIL skip, no trade on cached price"); time.sleep(5); continue
+            if price == 0: log("NO PRICE LIVE-FAIL skip"); time.sleep(5); continue
             k1 = get_klines("1", 20); k15 = get_klines("15", 200); macro = get_macro_live(); world = STATE.get("world", {})
             mb = get_macro_brain(price, k1, k15, macro)
             hunt, a_low, a_high, ll, sl, liq_src = get_sweep(price, k15, k1)
@@ -596,43 +668,39 @@ def main():
             need_cert = CONFIG["MIN_CERTAINTY_NEWS"] if is_news else CONFIG["MIN_CERTAINTY_NORMAL"]; need_agree = CONFIG["MIN_AGREE_NEWS"] if is_news else CONFIG["MIN_AGREE_NORMAL"]; need_score = CONFIG["MIN_SCORE_NEWS"] if is_news else CONFIG["MIN_SCORE_NORMAL"]
             lev = get_dynamic_leverage(); qty = get_dynamic_qty(price, lev); macro_bias = mb.get("bias", "NEUTRAL")
             high_bypass = (cert >= CONFIG["HIGH_CERT_BYPASS"] and dest in ("LONG", "SHORT") and (macro_bias == dest or macro_bias == "NEUTRAL"))
-            if high_bypass: log(f"HIGH CERT BYPASS {cert:.0f}% + Macro {macro_bias} {dest} - ENTER NOW no wait wick")
+            if high_bypass: log(f"HIGH CERT BYPASS {cert:.0f}% + Macro {macro_bias} {dest} - ENTER NOW")
             hunt_exp, hunt_reason = is_hunt_expected(dest, ll, sl, macro_bias, liq_src) if dest in ("LONG", "SHORT") else (False, "No dest")
             log(f"GOLD PICKER HuntExp {hunt_exp} {hunt_reason} | HighBypass {high_bypass} Macro {macro_bias} Cert {cert:.0f}% Dest {dest}")
             sweep_wait = False
             if hunt_exp and not high_bypass and dest in ("LONG", "SHORT"):
-                if STATE.get("sweep_wait") is None: STATE["sweep_wait"] = now_utc(); STATE["sweep_wait_dir"] = dest; log(f"HIDE 2min wait sweep {dest} - session dey come")
+                if STATE.get("sweep_wait") is None: STATE["sweep_wait"] = now_utc(); STATE["sweep_wait_dir"] = dest; log(f"HIDE 2min wait sweep {dest}")
                 el = (now_utc()-STATE["sweep_wait"]).total_seconds()/60
                 if el < CONFIG["SWEEP_WAIT_MIN"]:
                     sweep_wait = True; log(f"SWEEP WAIT {el:.1f}/{CONFIG['SWEEP_WAIT_MIN']}min {dest}")
                 elif is_sweep_done(dest, k1, a_low, a_high):
                     log(f"SWEEP DONE {dest} ENTER NOW"); STATE["sweep_wait"] = None
                 elif el >= CONFIG["SWEEP_TIMEOUT_MIN"]:
-                    log(f"SWEEP TIMEOUT {CONFIG['SWEEP_TIMEOUT_MIN']}min {dest} no sweep, ENTER NOW on gates"); STATE["sweep_wait"] = None
+                    log(f"SWEEP TIMEOUT {CONFIG['SWEEP_TIMEOUT_MIN']}min {dest} no sweep, ENTER NOW"); STATE["sweep_wait"] = None
                 else:
                     sweep_wait = True; log(f"SWEEP NOT DONE {dest} wait till {CONFIG['SWEEP_TIMEOUT_MIN']}min timeout {el:.1f}/{CONFIG['SWEEP_TIMEOUT_MIN']}min")
             else: STATE["sweep_wait"] = None
             pause_short = mb.get("alert") == "PAUSE_SHORT"
             if pause_short: log("MACRO PAUSE SHORT 15m - no new SHORT")
             mflip = mb.get("flip")
-            if mflip: log(f"MACRO FLIP READY {mflip['dir']} {mflip.get('reasons')} Need Cert agree too")
+            if mflip: log(f"MACRO FLIP READY {mflip['dir']} {mflip.get('reasons')}")
             cooldown_active = STATE.get("cooldown_until") and now_utc() < STATE["cooldown_until"]
             emb = STATE.get("emergency_block_until")
             emergency_block_active = emb and now_utc() < emb and STATE.get("emergency_block_side") == dest
-            if emergency_block_active: log(f"BLOCK EMERGENCY 5 MIN Hide till hunters done, no re-enter {dest} - wait, then enter after sweep to certain dest")
-            # --- RE-ENTRY GAP CHECK after trailing wick-out ---
+            if emergency_block_active: log(f"BLOCK EMERGENCY 5 MIN Hide {dest}")
             reentry_blocked = False
             if STATE.get("last_trail_exit_price") is not None and STATE.get("last_trail_exit_side") == dest:
                 gap = CONFIG["REENTRY_GAP_USD"]
-                if dest == "LONG":
-                    moved = price - STATE["last_trail_exit_price"]
-                else:
-                    moved = STATE["last_trail_exit_price"] - price
+                moved = price - STATE["last_trail_exit_price"] if dest == "LONG" else STATE["last_trail_exit_price"] - price
                 if moved < gap:
-                    reentry_blocked = True; log(f"BLOCK RE-ENTRY GAP {dest} moved ${moved:.0f} < ${gap:.0f} from trail exit ${STATE['last_trail_exit_price']:.0f} - wait for continuation, no churn")
+                    reentry_blocked = True; log(f"BLOCK RE-ENTRY GAP {dest} moved ${moved:.0f} < ${gap:.0f} from trail exit ${STATE['last_trail_exit_price']:.0f}")
                 else:
-                    log(f"RE-ENTRY GAP PASS {dest} moved ${moved:.0f} >= ${gap:.0f} - fresh trigger go recalc")
-                    STATE["last_trail_exit_price"] = None; STATE["last_trail_exit_side"] = None
+                    log(f"RE-ENTRY GAP PASS {dest} moved ${moved:.0f} >= ${gap:.0f}")
+                    STATE["last_trail_exit_price"] = None; STATE["last_trail_exit_side"] = None; save_state()
             flipped = False
             if STATE["open_position"]: flipped = manage_position(price, qty, dest, cert, agree, macro, ll, sl, world, is_news, mb.get("score", 0), liq_src, a_low, a_high, k1)
             gates = [(f"Agree {agree}/{decided} Need {need_agree}", agree >= need_agree and decided >= need_agree), (f"Cert {cert:.0f}% Need {need_cert:.0f}%", cert >= need_cert), (f"Score {score:.2f}/{need_score:.2f}", score >= need_score)]
@@ -645,15 +713,16 @@ def main():
             log(f"SIGNALS {' '.join([f'{n}:{v}' for n,v in signals])}")
             log(f"LIQ Long ${ll:,.0f} Short ${sl:,.0f} [{liq_src}] Asia Low ${a_low:,.0f} High ${a_high:,.0f} Hunt {hunt} HuntExp {hunt_exp} SweepWait {sweep_wait} HighBypass {high_bypass} EmergencyBlock {emergency_block_active} ReentryBlock {reentry_blocked}")
             log(f"Qty {qty} Lev {lev}x Bal ${bal_show:.2f} | Price ${price:.0f} WideSL ${wsl:.0f} Trail ${trail:.0f} TP ${tp_s:.0f} DynTrailTrigger {get_dynamic_trigger(price, qty) if qty else 300:.0f}")
-            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} NEVER_STOP True | PnL ${STATE['pnl']:.2f}")
+            log(f"W{STATE['wins']} L{STATE['losses']} BE{STATE['breakevens']} FLIP{STATE['flips']} ADDON{STATE['addons']} Trades {STATE['trades_today']} | PnL ${STATE['pnl']:.2f}")
             if STATE["open_position"] and not flipped:
-                p = STATE["open_position"]; log(f"HOLDING [MAIN] {p['side']} NORMAL Trailing {'ACTIVE' if p.get('trailing_active') else 'SLEEP'} Trigger ${p.get('trail_trigger',0):.0f} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f}")
+                p = STATE["open_position"]; log(f"HOLDING [MAIN] {p['side']} Trailing {'ACTIVE' if p.get('trailing_active') else 'SLEEP'} Trigger ${p.get('trail_trigger',0):.0f} AddOn {'YES' if p.get('addon_done') else 'NO'} TotalQty {p.get('total_qty', qty)} Best ${p.get('best_price', p['entry']):.0f}")
+                save_state()
             elif not STATE["open_position"]:
-                if qty == 0: log("BLOCK QTY TOO SMALL Balance no fit even 0.001 - wait deposit, no fake order")
-                elif sweep_wait: log("BLOCK GOLD PICKER SWEEP WAIT - Hide during wick, enter after sweep / timeout")
-                elif emergency_block_active: log("BLOCK EMERGENCY 5 MIN Hide till hunters done")
-                elif cooldown_active: log("BLOCK SMART RECHECK 1 MIN - TP/Trailing has no cooldown, this is only for Flip/Emergency")
-                elif reentry_blocked: log("BLOCK RE-ENTRY GAP $20 - Wait continuation, no churn")
+                if qty == 0: log("BLOCK QTY TOO SMALL")
+                elif sweep_wait: log("BLOCK GOLD PICKER SWEEP WAIT")
+                elif emergency_block_active: log("BLOCK EMERGENCY 5 MIN")
+                elif cooldown_active: log("BLOCK SMART RECHECK 1 MIN")
+                elif reentry_blocked: log("BLOCK RE-ENTRY GAP $20")
                 elif pause_short and dest == "SHORT": log("BLOCK MACRO PAUSE SHORT")
                 elif all_pass:
                     if mflip and mflip["dir"] != dest: log(f"BLOCK Macro Flip {mflip['dir']} vs Cert {dest} - WAIT both")
@@ -662,11 +731,13 @@ def main():
                         trig = get_dynamic_trigger(price, qty)
                         log(f"TRADE GOLD PICKER {mode} {dest} {tag} Entry ${price:.0f} SL ${wsl2:.0f} TP ${tp2:.0f} Qty {qty} Lev {lev}x DynTrailTrigger ${trig:.0f}")
                         if mode == "REAL":
-                            if place_real_order(dest, price, wsl2, tp2, qty): STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty, "trail_trigger": trig}; STATE["trades_today"] += 1
-                        else: STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty, "trail_trigger": trig}; STATE["trades_today"] += 1
+                            if place_real_order(dest, price, wsl2, tp2, qty):
+                                STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty, "trail_trigger": trig}; STATE["trades_today"] += 1; save_state()
+                        else:
+                            STATE["open_position"] = {"side": dest, "entry": price, "wide_sl": wsl2, "tp": tp2, "best_price": price, "trailing_active": False, "addon_done": False, "total_qty": qty, "trail_trigger": trig}; STATE["trades_today"] += 1; save_state()
                         STATE["macro_brain"]["flip_pending"] = None
-                else: log(f"BLOCK SKIP FAKE: {'; '.join(failed)} - NEVER_STOP")
+                else: log(f"BLOCK SKIP FAKE: {'; '.join(failed)}")
             time.sleep(CONFIG["POLL_SEC"])
         except Exception as e: log(f"ERROR {e}"); time.sleep(10)
 if __name__ == "__main__": main()
-# END V13.16.4.5 SLIM FINAL
+# END V13.16.4.6 REAL-FIXED
