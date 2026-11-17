@@ -3,6 +3,7 @@
 # KEEP: Macro -1.5/+1.5, HuntExp Session-Only + REAL Liq Only, HighBypass Allow NEUTRAL, Sweep Wait 6min, WideSL $1200, Dynamic Lev 15x/20x/25x/50x, Dynamic Qty Min 0.001, CROSS, AddOn, 3-Cycle Confirm, Emergency Hunt Cert 90%
 # KEEP: AUTO_SWITCH 2026-11-16 01:00 UTC -> REAL (as owner requested)
 # DYNAMIC TRAILING: Trigger = (Fees*1.2 + $1.50)/Qty, Floor $300, Round $50, Dist 0, Wide TP $1500, Re-entry $20 Gap
+# PATCH V13.16.4.7: JSONBIN PERSISTENCE - save/load to JSONBin first, file as fallback. No trading logic changed.
 
 import time, requests, hmac, hashlib, os, threading, json, math
 from datetime import datetime, timezone, timedelta
@@ -42,6 +43,9 @@ CONFIG = {
     "MACRO_THRESHOLD": 1.5,
 }
 API_KEY = os.getenv("BYBIT_API_KEY", ""); API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+# --- JSONBIN CONFIG ---
+JSONBIN_BIN_ID = os.getenv("JSONBIN_BIN_ID", "").strip()
+JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY", "").strip()
 STATE = {"mode": "PAPER", "balance": 24.33, "real_balance": 0.0, "pnl": 0.0, "wins": 0, "losses": 0, "breakevens": 0, "flips": 0, "addons": 0, "trades_today": 0,
     "open_position": None, "last_price": 0.0, "cross_margin_set": False, "leverage": 50,
     "cooldown_until": None, "world": {},
@@ -60,55 +64,102 @@ def get_mode():
     if rm == "false": return "PAPER"
     return "REAL" if now_utc() >= CONFIG["AUTO_SWITCH_UTC"] else "PAPER"
 
-# --- FIX 3: STATE PERSISTENCE ---
+# --- FIX 3: STATE PERSISTENCE - JSONBIN FIRST, FILE AS FALLBACK ---
 STATE_FILE = "bot_state.json"
+
+def _state_to_jsonable():
+    data = {}
+    for k, v in STATE.items():
+        if isinstance(v, datetime):
+            data[k] = v.isoformat()
+        elif isinstance(v, dict):
+            nd = {}
+            for kk, vv in v.items():
+                nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
+            data[k] = nd
+        elif k == "open_position" and v is not None:
+            nd = {}
+            for kk, vv in v.items():
+                nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
+            data[k] = nd
+        else:
+            data[k] = v
+    return data
+
+def _apply_state_data(data):
+    if not isinstance(data, dict):
+        return
+    for k, v in data.items():
+        if k in ("cooldown_until", "emergency_block_until", "last_trail_exit_time", "sweep_wait"):
+            if v:
+                try: STATE[k] = datetime.fromisoformat(v)
+                except: STATE[k] = None
+            else: STATE[k] = None
+        elif k == "macro_brain" and isinstance(v, dict):
+            for kk, vv in v.items():
+                if kk == "alert_time" and vv:
+                    try: STATE["macro_brain"][kk] = datetime.fromisoformat(vv)
+                    except: pass
+                else: STATE["macro_brain"][kk] = vv
+        elif k == "open_position" and isinstance(v, dict):
+            STATE[k] = v
+        elif k in STATE:
+            STATE[k] = v
+
 def save_state():
-    try:
-        data = {}
-        for k, v in STATE.items():
-            if isinstance(v, datetime):
-                data[k] = v.isoformat()
-            elif isinstance(v, dict):
-                nd = {}
-                for kk, vv in v.items():
-                    nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
-                data[k] = nd
-            elif k == "open_position" and v is not None:
-                # save open_position too, but sync will verify with Bybit
-                nd = {}
-                for kk, vv in v.items():
-                    nd[kk] = vv.isoformat() if isinstance(vv, datetime) else vv
-                data[k] = nd
+    data = _state_to_jsonable()
+    # 1) Try JSONBin
+    if JSONBIN_BIN_ID and JSONBIN_API_KEY:
+        try:
+            r = requests.put(
+                f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}",
+                headers={"Content-Type": "application/json", "X-Master-Key": JSONBIN_API_KEY},
+                data=json.dumps(data),
+                timeout=5
+            )
+            if r.status_code in (200, 201):
+                return
             else:
-                data[k] = v
+                log(f"SAVE STATE JSONBIN FAIL {r.status_code} {r.text[:120]} - fallback to file")
+        except Exception as e:
+            log(f"SAVE STATE JSONBIN FAIL {e} - fallback to file")
+    # 2) Fallback to file
+    try:
         with open(STATE_FILE, "w") as f:
             json.dump(data, f)
     except Exception as e:
         log(f"SAVE STATE FAIL {e}")
 
 def load_state():
+    # 1) Try JSONBin
+    if JSONBIN_BIN_ID and JSONBIN_API_KEY:
+        try:
+            r = requests.get(
+                f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest",
+                headers={"X-Master-Key": JSONBIN_API_KEY},
+                timeout=5
+            )
+            if r.status_code == 200:
+                j = r.json()
+                record = j.get("record", {}) if isinstance(j, dict) else {}
+                if record:
+                    _apply_state_data(record)
+                    log(f"STATE RESTORED [JSONBin] Wins {STATE.get('wins')} PnL ${STATE.get('pnl',0):.2f} LastTrailExit {STATE.get('last_trail_exit_price')} OpenPos {STATE.get('open_position') is not None}")
+                    return
+                else:
+                    log("STATE JSONBin empty - try file")
+            else:
+                log(f"LOAD STATE JSONBin {r.status_code} - try file")
+        except Exception as e:
+            log(f"LOAD STATE JSONBin FAIL {e} - try file")
+    # 2) Fallback to file
     try:
         if not os.path.exists(STATE_FILE):
             return
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
-        for k, v in data.items():
-            if k in ("cooldown_until", "emergency_block_until", "last_trail_exit_time", "sweep_wait"):
-                if v:
-                    try: STATE[k] = datetime.fromisoformat(v)
-                    except: STATE[k] = None
-                else: STATE[k] = None
-            elif k == "macro_brain" and isinstance(v, dict):
-                for kk, vv in v.items():
-                    if kk == "alert_time" and vv:
-                        try: STATE["macro_brain"][kk] = datetime.fromisoformat(vv)
-                        except: pass
-                    else: STATE["macro_brain"][kk] = vv
-            elif k == "open_position" and isinstance(v, dict):
-                STATE[k] = v
-            elif k in STATE:
-                STATE[k] = v
-        log(f"STATE RESTORED Wins {STATE.get('wins')} PnL ${STATE.get('pnl',0):.2f} LastTrailExit {STATE.get('last_trail_exit_price')} OpenPos {STATE.get('open_position') is not None}")
+        _apply_state_data(data)
+        log(f"STATE RESTORED [FILE] Wins {STATE.get('wins')} PnL ${STATE.get('pnl',0):.2f} LastTrailExit {STATE.get('last_trail_exit_price')} OpenPos {STATE.get('open_position') is not None}")
     except Exception as e:
         log(f"LOAD STATE FAIL {e} - start fresh but sync Bybit")
 
@@ -626,20 +677,17 @@ def manage_position(price, qty, flip_dest, cert, agree, macro, ll, sl, world=Non
     return False
 
 def sync_real_position():
-    # STRONG SYNC: Bybit na truth, STATE na copy
     rp = get_real_position_sync()
     if rp is None:
         if STATE["open_position"] is not None:
             log("SYNC FIX Bybit NO POS - Clear fake HOLDING"); STATE["open_position"] = None; save_state()
         return
-    # Bybit get position
     if STATE["open_position"] is None:
         log(f"SYNC FIX Adopt Bybit {rp}")
         trig = get_dynamic_trigger(rp["entry"], rp["size"])
         STATE["open_position"] = {"side": rp["side"], "entry": rp["entry"], "wide_sl": float(rp["sl"] or 0) or (rp["entry"]+1200 if rp["side"] == "SHORT" else rp["entry"]-1200), "tp": float(rp["tp"] or 0) or (rp["entry"]-1500 if rp["side"] == "SHORT" else rp["entry"]+1500), "best_price": rp["entry"], "trailing_active": False, "addon_done": False, "total_qty": rp["size"], "trail_trigger": trig}
         save_state()
     else:
-        # Keep our trailing/addon memory, only update size
         STATE["open_position"]["total_qty"] = rp["size"]
 
 def main():
@@ -649,7 +697,6 @@ def main():
             nm = get_mode()
             if nm != STATE["mode"]:
                 if nm == "REAL":
-                    # NOTE: Do NOT wipe pnl/wins on auto-switch if we restored from file - keep history
                     STATE["open_position"] = None; STATE["cooldown_until"] = None
                     bal = get_real_balance(); log(f"*** AUTO SWITCH REAL *** Bal ${bal:.2f} - Sync Bybit")
                     STATE["mode"] = "REAL"; STATE["cross_margin_set"] = False
