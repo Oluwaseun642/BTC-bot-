@@ -1,9 +1,11 @@
 # ============================================================
-# DATA ENGINE V14.0.0 - SEPARATED
-# ONLY FETCH DATA. NO TRADING. NO STRATEGY. NO ORDERS.
+# DATA ENGINE V15.0.0 - BRAIN + JSON RECORD KEEPER
+# ONLY FETCH DATA + VOTE + SAVE RECORDS. NO ORDERS. NO TRADING.
+# main.py go call get_signal() -> data_engine go answer cert/direction/hunt/news
+# main.py go call save_trade() -> data_engine go write trades.json + daily.json
 # If one source fails, it returns LIVE-FAIL / 0, it never crashes.
 # ============================================================
-import requests, time
+import requests, time, json, os
 from datetime import datetime, timezone
 
 def _now():
@@ -26,11 +28,83 @@ def _safe_get_text(url, timeout=5):
         return ""
 
 # ------------------------------------------------------------
+# 0. JSON RECORD KEEPER - DATA ENGINE OWNS THIS NOW
+# main.py NO go touch json again. E go call DE.save_trade()
+# ------------------------------------------------------------
+TRADES_FILE = "trades.json"
+DAILY_FILE = "daily.json"
+
+def save_trade(trade):
+    """
+    trade = {"time":..., "side":..., "entry":..., "exit":..., "move":...,
+             "qty":..., "net_pnl":..., "result":..., "balance_after":...,
+             "cert":..., "atr":..., "be_trigger":...}
+    Called by main.py after every close (BE_TP / SL / TP / FLIP)
+    Returns daily summary dict.
+    """
+    try:
+        try:
+            with open(TRADES_FILE, "r") as f:
+                all_trades = json.load(f)
+        except:
+            all_trades = []
+        all_trades.append(trade)
+        with open(TRADES_FILE, "w") as f:
+            json.dump(all_trades, f, indent=2)
+
+        day = str(trade.get("time", _now().strftime("%Y-%m-%d %H:%M:%S")))[:10]
+        try:
+            with open(DAILY_FILE, "r") as f:
+                daily = json.load(f)
+        except:
+            daily = {}
+        if day not in daily:
+            daily[day] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "be_tp_hits": 0, "sl_hits": 0, "tp_hits": 0}
+        d = daily[day]
+        d["trades"] += 1
+        d["total_pnl"] = round(d["total_pnl"] + float(trade.get("net_pnl", 0)), 2)
+        if float(trade.get("net_pnl", 0)) > 0:
+            d["wins"] += 1
+        else:
+            d["losses"] += 1
+        res = str(trade.get("result", "")).upper()
+        if res == "BE_TP":
+            d["be_tp_hits"] += 1
+        elif res in ("SL", "STOP_LOSS"):
+            d["sl_hits"] += 1
+        elif res == "TP":
+            d["tp_hits"] += 1
+        with open(DAILY_FILE, "w") as f:
+            json.dump(daily, f, indent=2)
+        print(f"[{_now().strftime('%H:%M:%S')}] 💾 Saved to trades.json | {day} PNL ${d['total_pnl']:.2f} | Trades {d['trades']}", flush=True)
+        return daily
+    except Exception as e:
+        print(f"JSON Save Error: {e}", flush=True)
+        return {}
+
+def get_daily_summary(day=None):
+    """main.py / you fit call this to see today summary"""
+    if day is None:
+        day = _now().strftime("%Y-%m-%d")
+    try:
+        with open(DAILY_FILE, "r") as f:
+            daily = json.load(f)
+        return daily.get(day, {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "be_tp_hits": 0, "sl_hits": 0, "tp_hits": 0})
+    except:
+        return {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "be_tp_hits": 0, "sl_hits": 0, "tp_hits": 0}
+
+def get_all_trades():
+    try:
+        with open(TRADES_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
+
+# ------------------------------------------------------------
 # 1. PRICE - BTCUSDT LIVE
 # ------------------------------------------------------------
 def get_price_live():
     """Returns (price, source) - tries Bybit -> Binance -> Coinbase"""
-    # Bybit
     try:
         j = _safe_get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT")
         if j:
@@ -38,7 +112,6 @@ def get_price_live():
             if p > 0:
                 return p, "Bybit-LIVE"
     except: pass
-    # Binance
     try:
         j = _safe_get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
         if j:
@@ -46,7 +119,6 @@ def get_price_live():
             if p > 0:
                 return p, "Binance-LIVE"
     except: pass
-    # Coinbase
     try:
         j = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
         if j:
@@ -67,7 +139,6 @@ def get_klines(interval="1", limit=100):
             kl = list(reversed(j["result"]["list"]))
             return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]), "time": int(x[0])} for x in kl]
     except: pass
-    # Fallback Binance
     try:
         bi = {"1":"1m","5":"5m","15":"15m","60":"1h"}.get(interval, "1m")
         j = _safe_get(f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={bi}&limit={limit}")
@@ -89,6 +160,15 @@ def calc_rsi(klines, period=14):
     if al == 0:
         return 100.0
     return round(100 - (100/(1+ag/al)), 1)
+
+def calc_atr_from_klines(klines, period=14):
+    if not klines or len(klines) < period+1:
+        return 200.0
+    trs = []
+    for i in range(1, len(klines)):
+        c, p = klines[i], klines[i-1]
+        trs.append(max(c["high"]-c["low"], abs(c["high"]-p["close"]), abs(c["low"]-p["close"])))
+    return sum(trs[-period:]) / period
 
 # ------------------------------------------------------------
 # 3. YAHOO - Worldwide Markets
@@ -131,9 +211,7 @@ def get_world():
     return w
 
 def get_session():
-    """Which session are we in? Hunt only happens at session opens"""
     h = _now().hour
-    # UTC: Asia 0-8, London 7-16, NY 13-21 (overlap)
     if 0 <= h < 7:
         return "ASIA"
     elif 7 <= h < 13:
@@ -142,9 +220,10 @@ def get_session():
         return "NEW_YORK"
     else:
         return "LATE_NY"
+
 def get_minutes_to_next_session():
     mins = _now().hour*60 + _now().minute
-    opens = [0, 420, 810]  # 00:00, 07:00, 13:30 UTC
+    opens = [0, 420, 810]
     return min([(o - mins) % 1440 for o in opens])
 
 # ------------------------------------------------------------
@@ -172,7 +251,6 @@ def get_fear():
     return 50, "Neutral", "LIVE-FAIL"
 
 def get_dominance():
-    """BTC Dominance + USDT Dominance - where is money flowing?"""
     try:
         j = _safe_get("https://api.coingecko.com/api/v3/global")
         if j:
@@ -202,15 +280,12 @@ def get_open_interest():
     return {"oi": 0.0, "chg_5m": 0.0, "src": "LIVE-FAIL"}
 
 def get_long_short_ratio():
-    """Crowd position - if too many longs, market fit hunt them"""
-    # Bybit
     try:
         j = _safe_get("https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=5min&limit=1")
         if j and j["result"].get("list"):
             d = j["result"]["list"][0]
             return {"buy_ratio": float(d.get("buyRatio", 0))*100, "sell_ratio": float(d.get("sellRatio", 0))*100, "src": "Bybit-LIVE"}
     except: pass
-    # Binance
     try:
         j = _safe_get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1")
         if j:
@@ -219,7 +294,6 @@ def get_long_short_ratio():
     return {"buy_ratio": 50.0, "sell_ratio": 50.0, "src": "LIVE-FAIL"}
 
 def get_orderbook():
-    """Bid/Ask walls - where is big money waiting?"""
     try:
         j = _safe_get("https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=25")
         if j:
@@ -235,15 +309,13 @@ def get_orderbook():
     return {"bid_vol": 0, "ask_vol": 0, "buy_pressure": 50.0, "spread": 0, "best_bid": 0, "best_ask": 0, "src": "LIVE-FAIL"}
 
 def get_cvd(k1):
-    """Aggressive buyers vs sellers from last candles - simple CVD proxy"""
     if not k1 or len(k1) < 10:
         return {"cvd": 0.0, "aggressive": "NEUTRAL", "src": "LIVE-FAIL"}
-    # If close near high = buyers aggressive, close near low = sellers aggressive
     score = 0.0
     for k in k1[-10:]:
         rng = k["high"] - k["low"]
         if rng > 0:
-            pos = (k["close"] - k["low"]) / rng  # 0 = low, 1 = high
+            pos = (k["close"] - k["low"]) / rng
             score += (pos - 0.5) * k["volume"]
     agg = "BUY" if score > 0 else "SELL" if score < 0 else "NEUTRAL"
     return {"cvd": round(score, 2), "aggressive": agg, "src": "Kline-Proxy"}
@@ -253,7 +325,6 @@ def get_cvd(k1):
 # ------------------------------------------------------------
 def get_liq(price, k1):
     ll, sl = 0.0, 0.0
-    # Binance force orders
     try:
         j = _safe_get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100")
         if isinstance(j, list) and len(j) > 0:
@@ -264,7 +335,6 @@ def get_liq(price, k1):
             if ll + sl > 0:
                 return ll, sl, "Binance-LIVE"
     except: pass
-    # Bybit liquidation
     try:
         j = _safe_get("https://api.bybit.com/v5/market/liquidation?category=linear&symbol=BTCUSDT&limit=50")
         if j:
@@ -276,7 +346,6 @@ def get_liq(price, k1):
             if ll + sl > 0:
                 return ll, sl, "Bybit-LIVE"
     except: pass
-    # OKX
     try:
         j = _safe_get("https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&uly=BTC-USDT-SWAP&limit=100")
         if j:
@@ -292,7 +361,6 @@ def get_liq(price, k1):
             if ll2 + sl2 > 0:
                 return ll2, sl2, "OKX-LIVE"
     except: pass
-    # Proxy fallback - NEVER use to block trade, only for info
     try:
         if k1 and len(k1) >= 20:
             total_range = sum(abs(k["high"]-k["low"]) for k in k1[-20:])
@@ -355,7 +423,6 @@ def get_news(k1=None):
     return False, ""
 
 def get_macro_brain(price, k1, k15):
-    """Returns dict: score, bias, alert, flip - pure calculation, no trading"""
     try:
         dxy_p, dxy_d, dxy_1h = yahoo_price_1h("DX-Y.NYB")
         jpy_p, jpy_d, jpy_1h = yahoo_price_1h("USDJPY=X")
@@ -401,7 +468,6 @@ def get_macro_live(world):
 # 9. MASTER - ONE CALL FOR BOT CORE
 # ------------------------------------------------------------
 def get_all_data():
-    """Bot Core go call this ONE function. It returns everything."""
     price, psrc = get_price_live()
     k1 = get_klines("1", 20)
     k15 = get_klines("15", 200)
@@ -419,7 +485,6 @@ def get_all_data():
     cvd = get_cvd(k1)
     session = get_session()
     mins_to_session = get_minutes_to_next_session()
-
     return {
         "price": price, "price_src": psrc,
         "k1": k1, "k15": k15,
@@ -437,6 +502,226 @@ def get_all_data():
         "timestamp": _now().isoformat(),
     }
 
+# ------------------------------------------------------------
+# 10. V15 BRIDGE - main.py CALLS THIS EVERY LOOP
+# get_signal(price, atr, candles) -> cert / direction / hunt / news
+# This na the ONLY function main.py need. E dey vote with 8 voters.
+# ------------------------------------------------------------
+# Cache to avoid hammering Yahoo every 2 seconds - main.py calls every 2-5s
+_last_signal = {"time": 0, "data": None}
+
+def get_signal(price, atr=None, candles=None):
+    """
+    Called by main.py: get_votes(price, atr, candles) -> DE.get_signal(price, atr, candles)
+    Returns normalized dict main.py understands:
+    {cert, direction, agree, hunt_soon, hunt_cert, cvd_buy_pct, news_critical, news_wait, pause_long, pause_short}
+    """
+    global _last_signal
+    # Use cache for 10s - Yahoo / Bybit no need fetch every 2s
+    if _last_signal["data"] is not None and (time.time() - _last_signal["time"]) < 10:
+        cached = _last_signal["data"]
+        # Still update price for freshness
+        cached = dict(cached)
+        cached["price"] = price
+        return cached
+
+    try:
+        # Use price passed by main.py if valid, else fetch fresh
+        if not price or price == 0:
+            price, _ = get_price_live()
+            if price == 0:
+                return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False, "price": 0}
+
+        # Get klines - use candles passed by main.py for k1 if available, else fetch
+        k1 = candles if candles and len(candles) >= 5 else get_klines("1", 20)
+        # Normalize candles from main.py (main.py candles no get volume/time) -> add defaults
+        k1_norm = []
+        for k in k1:
+            k1_norm.append({"open": float(k.get("open", 0)), "high": float(k.get("high", 0)), "low": float(k.get("low", 0)), "close": float(k.get("close", 0)), "volume": float(k.get("volume", 1)), "time": int(k.get("time", 0))})
+        k15 = get_klines("15", 200)
+        world = get_world()
+        macro_brain = get_macro_brain(price, k1_norm, k15)
+        hunt, a_low, a_high, ll, sl, liq_src = get_sweep(price, k15, k1_norm)
+        is_news, news_reason = get_news(k1_norm)
+        funding, _ = get_funding()
+        oi = get_open_interest()
+        ls = get_long_short_ratio()
+        ob = get_orderbook()
+        cvd = get_cvd(k1_norm)
+
+        # --- VOTING: 8 VOTERS - DXY, NQ, SPX, GOLD, OI, SWEEP/HUNT, CVD, ORDERBOOK ---
+        long_votes = 0
+        short_votes = 0
+        total_voters = 8
+        reasons = []
+
+        # 1. DXY - DXY up = BTC down, DXY down = BTC up
+        dxy = world.get("DXY", 0)
+        if dxy < -0.05:
+            long_votes += 1; reasons.append("DXY down LONG")
+        elif dxy > 0.05:
+            short_votes += 1; reasons.append("DXY up SHORT")
+
+        # 2. NQ
+        nq = world.get("NQ", 0)
+        if nq > 0.05:
+            long_votes += 1; reasons.append("NQ up LONG")
+        elif nq < -0.05:
+            short_votes += 1; reasons.append("NQ down SHORT")
+
+        # 3. SPX
+        spx = world.get("SPX", 0)
+        if spx > 0.05:
+            long_votes += 1; reasons.append("SPX up LONG")
+        elif spx < -0.05:
+            short_votes += 1; reasons.append("SPX down SHORT")
+
+        # 4. GOLD - GOLD up = risk-off sometimes, but for our system GOLD up + BTC up = risk-on
+        gold = world.get("GOLD", 0)
+        if gold > 0.05:
+            long_votes += 1; reasons.append("GOLD up LONG")
+        elif gold < -0.05:
+            short_votes += 1; reasons.append("GOLD down SHORT")
+
+        # 5. OI - OI rising + price falling = new shorts = bounce LONG, OI rising + price rising = new longs = trend LONG
+        oi_chg = oi.get("chg_5m", 0)
+        price_chg_5 = 0
+        if len(k1_norm) >= 6:
+            price_chg_5 = (k1_norm[-1]["close"] - k1_norm[-6]["close"]) / k1_norm[-6]["close"] * 100 if k1_norm[-6]["close"] else 0
+        if oi_chg > 0.1 and price_chg_5 < 0:
+            long_votes += 1; reasons.append("OI up + price down = shorts crowded LONG")
+        elif oi_chg > 0.1 and price_chg_5 > 0:
+            long_votes += 1; reasons.append("OI up + price up LONG")
+        elif oi_chg < -0.1 and price_chg_5 < 0:
+            short_votes += 1; reasons.append("OI down + price down SHORT")
+        else:
+            # Neutral OI - give to macro bias
+            if macro_brain.get("bias") == "LONG":
+                long_votes += 1
+            elif macro_brain.get("bias") == "SHORT":
+                short_votes += 1
+
+        # 6. SWEEP / HUNT - sweep of asia low + reclaim = LONG, sweep of asia high + reject = SHORT
+        if hunt == "LONG":
+            long_votes += 1; reasons.append("Sweep LONG")
+        elif hunt == "SHORT":
+            short_votes += 1; reasons.append("Sweep SHORT")
+        else:
+            if macro_brain.get("bias") == "LONG":
+                long_votes += 1
+            elif macro_brain.get("bias") == "SHORT":
+                short_votes += 1
+
+        # 7. CVD - aggressive buyers = LONG
+        cvd_agg = cvd.get("aggressive", "NEUTRAL")
+        cvd_buy_pct = 50.0
+        if cvd_agg == "BUY":
+            long_votes += 1; reasons.append("CVD BUY LONG")
+            cvd_buy_pct = 65.0
+        elif cvd_agg == "SELL":
+            short_votes += 1; reasons.append("CVD SELL SHORT")
+            cvd_buy_pct = 35.0
+        else:
+            # Use orderbook as tie-breaker
+            if ob.get("buy_pressure", 50) > 55:
+                long_votes += 1
+            elif ob.get("buy_pressure", 50) < 45:
+                short_votes += 1
+
+        # 8. ORDERBOOK - bid walls = LONG
+        if ob.get("buy_pressure", 50) > 55:
+            long_votes += 1; reasons.append("Orderbook bids LONG")
+        elif ob.get("buy_pressure", 50) < 45:
+            short_votes += 1; reasons.append("Orderbook asks SHORT")
+
+        # Decide direction + cert
+        if long_votes > short_votes:
+            direction = "LONG"
+            agree = long_votes
+        elif short_votes > long_votes:
+            direction = "SHORT"
+            agree = short_votes
+        else:
+            direction = "NONE"
+            agree = long_votes
+
+        cert = round((agree / total_voters) * 100, 1) if total_voters else 0
+
+        # Macro brain can boost cert if e agree
+        if macro_brain.get("bias") == direction and direction != "NONE":
+            cert = min(100, cert + 5)
+
+        # --- HUNT SOON? - liq pool > $2M + session near = hunt soon ---
+        total_liq = ll + sl
+        mins_to_session = get_minutes_to_next_session()
+        hunt_soon = False
+        hunt_cert = 0
+        if total_liq > 2000000 and mins_to_session < 30:
+            hunt_soon = True
+            hunt_cert = 75
+        elif total_liq > 5000000:
+            hunt_soon = True
+            hunt_cert = 85
+
+        # --- NEWS: Critical = vol spike >=0.8% in 15m + all agree ---
+        # Critical if: vol spike + cert >=90 + all voters agree (agree >=7)
+        news_critical = False
+        news_wait = 0
+        if is_news:
+            if cert >= 90 and agree >= 7:
+                news_critical = True
+            else:
+                # Not critical - wait 5 mins confirm (300s)
+                news_wait = 300
+
+        # --- PAUSE: GOLD extreme + macro alert ---
+        pause_long = False
+        pause_short = False
+        if macro_brain.get("alert") == "PAUSE_SHORT":
+            pause_short = True
+        # GOLD +/-0.12 rule: if GOLD move too fast, pause both
+        if abs(gold) > 0.12 and cert < 85:
+            pause_long = True
+            pause_short = True
+
+        result = {
+            "cert": cert,
+            "direction": direction,
+            "agree": agree,
+            "hunt_soon": hunt_soon,
+            "hunt_cert": hunt_cert,
+            "cvd_buy_pct": cvd_buy_pct,
+            "news_critical": news_critical,
+            "news_wait": news_wait,
+            "pause_long": pause_long,
+            "pause_short": pause_short,
+            "price": price,
+            "reasons": reasons,
+            "news_reason": news_reason,
+            "macro_bias": macro_brain.get("bias"),
+            "session": get_session(),
+            "liq_long": ll,
+            "liq_short": sl,
+        }
+        _last_signal = {"time": time.time(), "data": result}
+        return result
+    except Exception as e:
+        print(f"get_signal Error: {e}", flush=True)
+        return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False, "price": price}
+
+# Aliases so main.py fit call any name - no crash
+def get_votes(price, atr=None, candles=None):
+    return get_signal(price, atr, candles)
+
+def analyze(price, atr=None, candles=None):
+    return get_signal(price, atr, candles)
+
+def check_market(price, atr=None, candles=None):
+    return get_signal(price, atr, candles)
+
+def get_decision(price, atr=None, candles=None):
+    return get_signal(price, atr, candles)
+
 if __name__ == "__main__":
     d = get_all_data()
     print(f"Price ${d['price']:.0f} [{d['price_src']}] Session {d['session']} Hunt {d['hunt']}")
@@ -444,3 +729,7 @@ if __name__ == "__main__":
     print(f"Liq Long ${d['liq_long']:,.0f} Short ${d['liq_short']:,.0f} [{d['liq_src']}]")
     print(f"OI {d['oi']} LS {d['long_short']} OB BuyPressure {d['orderbook']['buy_pressure']}%")
     print(f"Fear {d['fear']} Funding {d['funding']:.4f}% Dom BTC {d['dominance']['btc']}%")
+    # Test get_signal + JSON
+    sig = get_signal(d['price'], 200, d['k1'])
+    print(f"Signal: {sig['direction']} Cert {sig['cert']}% Agree {sig['agree']} HuntSoon {sig['hunt_soon']} NewsCritical {sig['news_critical']}")
+    print(f"Today summary: {get_daily_summary()}")
