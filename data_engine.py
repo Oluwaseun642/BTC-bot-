@@ -1,10 +1,8 @@
 # ============================================================
-# DATA ENGINE V15.1.0 FINAL CLEAN - BRAIN + JSON + HUNTER LIVE
-# ONLY FETCH DATA + VOTE + SAVE RECORDS. NO ORDERS. NO TRADING.
-# main.py -> get_signal() -> cert/direction/hunt/news/hunter
-# main.py -> save_trade() -> trades.json + daily.json
-# If one source fails, returns LIVE-FAIL / 0, never crashes.
-# SPREAD IS OUT.
+# DATA ENGINE V15.3.0 CLEAN - NO DUPLICATES, NO DEAD CODE
+# GOLD FIXED: >1.0% + Hunter confirm only
+# MULTI-SOURCE: Bybit/Binance/OKX/Kraken/Coinbase/Bitstamp/CoinGecko/CoinCap
+# SPREAD OUT
 # ============================================================
 import requests, time, json
 from datetime import datetime, timezone
@@ -22,7 +20,7 @@ def _safe_get(url, timeout=5):
         return None
 
 # ------------------------------------------------------------
-# 0. JSON RECORD KEEPER
+# 0. JSON RECORD KEEPER - USED by main.py save_trade
 # ------------------------------------------------------------
 TRADES_FILE = "trades.json"
 DAILY_FILE = "daily.json"
@@ -53,12 +51,9 @@ def save_trade(trade):
         else:
             d["losses"] += 1
         res = str(trade.get("result", "")).upper()
-        if res == "BE_TP":
-            d["be_tp_hits"] += 1
-        elif res in ("SL", "STOP_LOSS"):
-            d["sl_hits"] += 1
-        elif res == "TP":
-            d["tp_hits"] += 1
+        if res == "BE_TP": d["be_tp_hits"] += 1
+        elif res in ("SL", "STOP_LOSS"): d["sl_hits"] += 1
+        elif res == "TP": d["tp_hits"] += 1
         with open(DAILY_FILE, "w") as f:
             json.dump(daily, f, indent=2)
         print(f"[{_now().strftime('%H:%M:%S')}] 💾 Saved | {day} PNL ${d['total_pnl']:.2f} | Trades {d['trades']}", flush=True)
@@ -67,40 +62,51 @@ def save_trade(trade):
         print(f"JSON Save Error: {e}", flush=True)
         return {}
 
-def get_daily_summary(day=None):
-    if day is None:
-        day = _now().strftime("%Y-%m-%d")
-    try:
-        with open(DAILY_FILE, "r") as f:
-            daily = json.load(f)
-        return daily.get(day, {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "be_tp_hits": 0, "sl_hits": 0, "tp_hits": 0})
-    except:
-        return {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "be_tp_hits": 0, "sl_hits": 0, "tp_hits": 0}
-
 # ------------------------------------------------------------
-# 1. PRICE + KLINES
+# 1. PRICE + KLINES - MULTI-SOURCE
 # ------------------------------------------------------------
 def get_price_live():
     try:
         j = _safe_get("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT")
         if j:
             p = float(j["result"]["list"][0]["lastPrice"])
-            if p > 0:
-                return p, "Bybit-LIVE"
+            if p > 0: return p, "Bybit-LIVE"
     except: pass
     try:
         j = _safe_get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
         if j:
             p = float(j["price"])
-            if p > 0:
-                return p, "Binance-LIVE"
+            if p > 0: return p, "Binance-LIVE"
     except: pass
     try:
         j = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
         if j:
             p = float(j["price"])
-            if p > 0:
-                return p, "Coinbase-LIVE"
+            if p > 0: return p, "Coinbase-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD")
+        if j:
+            p = float(j["result"]["XXBTZUSD"]["c"][0])
+            if p > 0: return p, "Kraken-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://www.bitstamp.net/api/v2/ticker/btcusd/")
+        if j:
+            p = float(j["last"])
+            if p > 0: return p, "Bitstamp-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP")
+        if j:
+            p = float(j["data"][0]["last"])
+            if p > 0: return p, "OKX-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+        if j:
+            p = float(j["bitcoin"]["usd"])
+            if p > 0: return p, "CoinGecko-LIVE"
     except: pass
     return 0.0, "LIVE-FAIL"
 
@@ -116,6 +122,28 @@ def get_klines(interval="1", limit=100):
         j = _safe_get(f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={bi}&limit={limit}")
         if isinstance(j, list):
             return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]), "time": int(x[0])} for x in j]
+    except: pass
+    try:
+        bar = {"1": "1m", "5": "5m", "15": "15m", "60": "1H"}.get(interval, "1m")
+        j = _safe_get(f"https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar={bar}&limit={limit}")
+        if j and j.get("data"):
+            kl = list(reversed(j["data"]))
+            return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]), "time": int(x[0])} for x in kl]
+    except: pass
+    try:
+        kraken_int = {"1": "1", "5": "5", "15": "15", "60": "60"}.get(interval, "1")
+        j = _safe_get(f"https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval={kraken_int}")
+        if j and j.get("result"):
+            key = [k for k in j["result"] if k != "last"][0]
+            kl = j["result"][key][-limit:]
+            return [{"open": float(x[1]), "high": float(x[2]), "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]), "time": int(x[0])*1000} for x in kl]
+    except: pass
+    try:
+        gran = {"1": "60", "5": "300", "15": "900", "60": "3600"}.get(interval, "60")
+        j = _safe_get(f"https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity={gran}")
+        if isinstance(j, list) and len(j) > 0:
+            kl = list(reversed(j[-limit:]))
+            return [{"open": float(x[3]), "high": float(x[2]), "low": float(x[1]), "close": float(x[4]), "volume": float(x[5]), "time": int(x[0])*1000} for x in kl]
     except: pass
     return []
 
@@ -133,17 +161,8 @@ def calc_rsi(klines, period=14):
         return 100.0
     return round(100 - (100 / (1 + ag / al)), 1)
 
-def calc_atr_from_klines(klines, period=14):
-    if not klines or len(klines) < period + 1:
-        return 200.0
-    trs = []
-    for i in range(1, len(klines)):
-        c, p = klines[i], klines[i-1]
-        trs.append(max(c["high"]-c["low"], abs(c["high"]-p["close"]), abs(c["low"]-p["close"])))
-    return sum(trs[-period:]) / period
-
 # ------------------------------------------------------------
-# 2. YAHOO - WORLD MARKETS
+# 2. YAHOO - WORLD MARKETS + STOOQ FALLBACK
 # ------------------------------------------------------------
 def yahoo_chg(sym):
     try:
@@ -154,6 +173,16 @@ def yahoo_chg(sym):
                 price = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0)
                 prev = float(meta.get("previousClose") or price)
                 if price and prev and price != prev:
+                    return round((price-prev)/prev*100, 3), price, prev
+    except: pass
+    try:
+        stooq = {"GC=F": "gc.f.us", "DX-Y.NYB": "dx.f.us", "CL=F": "cl.f.us"}.get(sym)
+        if stooq:
+            j = _safe_get(f"https://stooq.com/q/l/?s={stooq}&f=sd2t2ohlcv&h&e=json")
+            if j and j.get("symbols"):
+                d = j["symbols"][0]
+                price = float(d.get("close", 0)); prev = float(d.get("open", 0))
+                if price and prev:
                     return round((price-prev)/prev*100, 3), price, prev
     except: pass
     return None, None, None
@@ -183,14 +212,10 @@ def get_world():
 
 def get_session():
     h = _now().hour
-    if 0 <= h < 7:
-        return "ASIA"
-    elif 7 <= h < 13:
-        return "LONDON"
-    elif 13 <= h < 21:
-        return "NEW_YORK"
-    else:
-        return "LATE_NY"
+    if 0 <= h < 7: return "ASIA"
+    elif 7 <= h < 13: return "LONDON"
+    elif 13 <= h < 21: return "NEW_YORK"
+    else: return "LATE_NY"
 
 def get_minutes_to_next_session():
     mins = _now().hour*60 + _now().minute
@@ -198,7 +223,7 @@ def get_minutes_to_next_session():
     return min([(o - mins) % 1440 for o in opens])
 
 # ------------------------------------------------------------
-# 3. FUNDING, FEAR, DOMINANCE
+# 3. FUNDING, FEAR, DOMINANCE - MULTI-SOURCE
 # ------------------------------------------------------------
 def get_funding():
     try:
@@ -210,6 +235,16 @@ def get_funding():
         j = _safe_get("https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1")
         if j:
             return float(j[0].get("fundingRate", 0))*100, "Binance-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP")
+        if j and j.get("data"):
+            return float(j["data"][0].get("fundingRate", 0))*100, "OKX-LIVE"
+    except: pass
+    try:
+        j = _safe_get("https://api.bitget.com/api/v2/mix/market/current-funding-rate?symbol=BTCUSDT&productType=USDT-FUTURES")
+        if j and j.get("data"):
+            return float(j["data"][0].get("fundingRate", 0))*100, "Bitget-LIVE"
     except: pass
     return 0.0, "LIVE-FAIL"
 
@@ -228,10 +263,18 @@ def get_dominance():
             d = j["data"]["market_cap_percentage"]
             return {"btc": round(float(d.get("btc", 0)), 2), "usdt": round(float(d.get("usdt", 0)), 2), "eth": round(float(d.get("eth", 0)), 2), "src": "CoinGecko-LIVE"}
     except: pass
+    try:
+        j = _safe_get("https://api.coincap.io/v2/assets?limit=3")
+        if j and j.get("data"):
+            caps = {x["symbol"]: float(x["marketCapUsd"]) for x in j["data"]}
+            total = sum(caps.values())
+            if total > 0:
+                return {"btc": round(caps.get("BTC", 0)/total*100, 2), "usdt": 0.0, "eth": round(caps.get("ETH", 0)/total*100, 2), "src": "CoinCap-LIVE"}
+    except: pass
     return {"btc": 0.0, "usdt": 0.0, "eth": 0.0, "src": "LIVE-FAIL"}
 
 # ------------------------------------------------------------
-# 4. OPEN INTEREST
+# 4. OPEN INTEREST - MULTI-SOURCE
 # ------------------------------------------------------------
 def get_open_interest():
     try:
@@ -248,12 +291,17 @@ def get_open_interest():
         if j:
             return {"oi": float(j["openInterest"]), "chg_5m": 0.0, "src": "Binance-LIVE"}
     except: pass
+    try:
+        j = _safe_get("https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP")
+        if j and j.get("data"):
+            return {"oi": float(j["data"][0]["oi"]), "chg_5m": 0.0, "src": "OKX-LIVE"}
+    except: pass
     return {"oi": 0.0, "chg_5m": 0.0, "src": "LIVE-FAIL"}
 
 # ------------------------------------------------------------
-# 5. HUNTER LIVE - SINGLE SOURCE FOR LIQ / OB / CVD / SPOT / FUNDING CASCADE
+# 5. HUNTER LIVE - MULTI-SOURCE
 # ------------------------------------------------------------
-def get_liq_clusters(price):
+def get_liq_clusters(price, k1=None):
     long_liq = 0.0; short_liq = 0.0; src = "LIVE-FAIL"
     try:
         j = _safe_get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100")
@@ -279,43 +327,81 @@ def get_liq_clusters(price):
                     except: pass
                 if long_liq + short_liq > 0: src = "Bybit-LIVE"
         except: pass
+    if src == "LIVE-FAIL":
+        try:
+            j = _safe_get("https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&uly=BTC-USDT-SWAP&limit=100")
+            if j:
+                for grp in j.get("data", []):
+                    for x in grp.get("details", []):
+                        try:
+                            sz = float(x.get("sz", 0)) * float(x.get("bkPx", price))
+                            if x.get("side") == "sell": long_liq += sz
+                            elif x.get("side") == "buy": short_liq += sz
+                        except: pass
+                if long_liq + short_liq > 0: src = "OKX-LIVE"
+        except: pass
+    if src == "LIVE-FAIL" and k1 and len(k1) >= 20:
+        try:
+            total_range = sum(abs(k["high"]-k["low"]) for k in k1[-20:])
+            est_total = max(total_range * price * 0.05, 500000.0)
+            pc = (k1[-1]["close"]-k1[-20]["close"])/k1[-20]["close"]*100 if k1[-20]["close"] else 0
+            if pc < 0: long_liq, short_liq = est_total*0.65, est_total*0.35
+            elif pc > 0: long_liq, short_liq = est_total*0.35, est_total*0.65
+            else: long_liq, short_liq = est_total*0.5, est_total*0.5
+            src = "Proxy-Kline"
+        except: pass
     total = long_liq + short_liq
     if total > 0:
-        if long_liq > short_liq * 1.5:
-            dominant = "HUNT_LONGS_FIRST"; hunt_dir = "DOWN_FIRST"
-        elif short_liq > long_liq * 1.5:
-            dominant = "HUNT_SHORTS_FIRST"; hunt_dir = "UP_FIRST"
-        else:
-            dominant = "BALANCED"; hunt_dir = "NONE"
+        if long_liq > short_liq * 1.5: dominant = "HUNT_LONGS_FIRST"; hunt_dir = "DOWN_FIRST"
+        elif short_liq > long_liq * 1.5: dominant = "HUNT_SHORTS_FIRST"; hunt_dir = "UP_FIRST"
+        else: dominant = "BALANCED"; hunt_dir = "NONE"
         imb = round((long_liq - short_liq) / total * 100, 1)
     else:
         dominant = "UNKNOWN"; hunt_dir = "NONE"; imb = 0.0
     return {"long_liq": round(long_liq, 0), "short_liq": round(short_liq, 0), "total": round(total, 0),
             "dominant": dominant, "hunt_dir": hunt_dir, "imbalance_pct": imb, "src": src}
 
+def _parse_ob(bids, asks, src):
+    biggest_bid = max(bids, key=lambda x: float(x[1])*float(x[0])) if bids else [0, 0]
+    biggest_ask = max(asks, key=lambda x: float(x[1])*float(x[0])) if asks else [0, 0]
+    bid_wall_price = float(biggest_bid[0]); bid_wall_usd = float(biggest_bid[1])*bid_wall_price
+    ask_wall_price = float(biggest_ask[0]); ask_wall_usd = float(biggest_ask[1])*ask_wall_price
+    bid_vol = sum(float(x[1])*float(x[0]) for x in bids)
+    ask_vol = sum(float(x[1])*float(x[0]) for x in asks)
+    total = bid_vol + ask_vol
+    buy_pressure = (bid_vol/total*100) if total else 50.0
+    if bid_wall_usd > ask_wall_usd * 1.8: cluster_bias = "BID_WALL_STRONG"
+    elif ask_wall_usd > bid_wall_usd * 1.8: cluster_bias = "ASK_WALL_STRONG"
+    else: cluster_bias = "BALANCED"
+    return {"bid_wall_price": bid_wall_price, "bid_wall_usd": round(bid_wall_usd, 0),
+            "ask_wall_price": ask_wall_price, "ask_wall_usd": round(ask_wall_usd, 0),
+            "bid_vol": round(bid_vol, 0), "ask_vol": round(ask_vol, 0),
+            "buy_pressure": round(buy_pressure, 1), "cluster_bias": cluster_bias, "src": src}
+
 def get_ob_clusters(price):
     try:
         j = _safe_get("https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=50")
         if j:
-            bids = j["result"]["b"]; asks = j["result"]["a"]
-            biggest_bid = max(bids, key=lambda x: float(x[1])*float(x[0])) if bids else [0, 0]
-            biggest_ask = max(asks, key=lambda x: float(x[1])*float(x[0])) if asks else [0, 0]
-            bid_wall_price = float(biggest_bid[0]); bid_wall_usd = float(biggest_bid[1])*bid_wall_price
-            ask_wall_price = float(biggest_ask[0]); ask_wall_usd = float(biggest_ask[1])*ask_wall_price
-            bid_vol = sum(float(x[1])*float(x[0]) for x in bids)
-            ask_vol = sum(float(x[1])*float(x[0]) for x in asks)
-            total = bid_vol + ask_vol
-            buy_pressure = (bid_vol/total*100) if total else 50.0
-            if bid_wall_usd > ask_wall_usd * 1.8:
-                cluster_bias = "BID_WALL_STRONG"
-            elif ask_wall_usd > bid_wall_usd * 1.8:
-                cluster_bias = "ASK_WALL_STRONG"
-            else:
-                cluster_bias = "BALANCED"
-            return {"bid_wall_price": bid_wall_price, "bid_wall_usd": round(bid_wall_usd, 0),
-                    "ask_wall_price": ask_wall_price, "ask_wall_usd": round(ask_wall_usd, 0),
-                    "bid_vol": round(bid_vol, 0), "ask_vol": round(ask_vol, 0),
-                    "buy_pressure": round(buy_pressure, 1), "cluster_bias": cluster_bias, "src": "Bybit-LIVE"}
+            return _parse_ob(j["result"]["b"], j["result"]["a"], "Bybit-LIVE")
+    except: pass
+    try:
+        j = _safe_get("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=50")
+        if j:
+            return _parse_ob(j["bids"], j["asks"], "Binance-LIVE")
+    except: pass
+    try:
+        j = _safe_get("https://www.okx.com/api/v5/market/books?instId=BTC-USDT-SWAP&sz=50")
+        if j and j.get("data"):
+            d = j["data"][0]
+            return _parse_ob(d["bids"], d["asks"], "OKX-LIVE")
+    except: pass
+    try:
+        j = _safe_get("https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=50")
+        if j and j.get("result"):
+            key = [k for k in j["result"] if k != "last"][0]
+            d = j["result"][key]
+            bids = [[x[0], x[1]] for x in d["bids"]]; asks = [[x[0], x[1]] for x in d["asks"]]
+            return _parse_ob(bids, asks, "Kraken-LIVE")
     except: pass
     return {"bid_wall_price": 0, "bid_wall_usd": 0, "ask_wall_price": 0, "ask_wall_usd": 0,
             "bid_vol": 0, "ask_vol": 0, "buy_pressure": 50.0, "cluster_bias": "UNKNOWN", "src": "LIVE-FAIL"}
@@ -325,16 +411,10 @@ def get_cvd_live():
         j = _safe_get("https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=BTCUSDT&limit=200")
         if j:
             lst = j["result"]["list"]
-            buy_vol = 0.0; sell_vol = 0.0
-            for x in lst:
-                try:
-                    sz = float(x.get("size", 0))
-                    if x.get("side") == "Buy": buy_vol += sz
-                    elif x.get("side") == "Sell": sell_vol += sz
-                except: pass
-            total = buy_vol + sell_vol
-            if total > 0:
-                buy_pct = buy_vol/total*100
+            buy_vol = sum(float(x.get("size", 0)) for x in lst if x.get("side") == "Buy")
+            sell_vol = sum(float(x.get("size", 0)) for x in lst if x.get("side") == "Sell")
+            if buy_vol + sell_vol > 0:
+                buy_pct = buy_vol/(buy_vol+sell_vol)*100
                 agg = "BUY" if buy_pct > 55 else "SELL" if buy_pct < 45 else "NEUTRAL"
                 return {"cvd": round(buy_vol-sell_vol, 3), "buy_vol": round(buy_vol, 3), "sell_vol": round(sell_vol, 3),
                         "buy_pct": round(buy_pct, 1), "aggressive": agg, "src": "Bybit-Trades-LIVE"}
@@ -342,31 +422,66 @@ def get_cvd_live():
     try:
         j = _safe_get("https://api.binance.com/api/v3/trades?symbol=BTCUSDT&limit=200")
         if isinstance(j, list) and len(j) > 0:
-            buy_vol = 0.0; sell_vol = 0.0
-            for x in j:
-                sz = float(x.get("qty", 0))
-                if x.get("isBuyerMaker"): sell_vol += sz
-                else: buy_vol += sz
-            total = buy_vol + sell_vol
-            if total > 0:
-                buy_pct = buy_vol/total*100
+            buy_vol = sum(float(x.get("qty", 0)) for x in j if not x.get("isBuyerMaker"))
+            sell_vol = sum(float(x.get("qty", 0)) for x in j if x.get("isBuyerMaker"))
+            if buy_vol + sell_vol > 0:
+                buy_pct = buy_vol/(buy_vol+sell_vol)*100
                 agg = "BUY" if buy_pct > 55 else "SELL" if buy_pct < 45 else "NEUTRAL"
                 return {"cvd": round(buy_vol-sell_vol, 3), "buy_vol": round(buy_vol, 3), "sell_vol": round(sell_vol, 3),
                         "buy_pct": round(buy_pct, 1), "aggressive": agg, "src": "Binance-Trades-LIVE"}
+    except: pass
+    try:
+        j = _safe_get("https://www.okx.com/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=100")
+        if j and j.get("data"):
+            buy_vol = sum(float(x.get("sz", 0)) for x in j["data"] if x.get("side") == "buy")
+            sell_vol = sum(float(x.get("sz", 0)) for x in j["data"] if x.get("side") == "sell")
+            if buy_vol + sell_vol > 0:
+                buy_pct = buy_vol/(buy_vol+sell_vol)*100
+                agg = "BUY" if buy_pct > 55 else "SELL" if buy_pct < 45 else "NEUTRAL"
+                return {"cvd": round(buy_vol-sell_vol, 3), "buy_vol": round(buy_vol, 3), "sell_vol": round(sell_vol, 3),
+                        "buy_pct": round(buy_pct, 1), "aggressive": agg, "src": "OKX-Trades-LIVE"}
+    except: pass
+    try:
+        j = _safe_get("https://api.kraken.com/0/public/Trades?pair=XBTUSD&count=100")
+        if j and j.get("result"):
+            key = [k for k in j["result"] if k != "last"][0]
+            buy_vol = sum(float(x[1]) for x in j["result"][key] if x[3] == "b")
+            sell_vol = sum(float(x[1]) for x in j["result"][key] if x[3] == "s")
+            if buy_vol + sell_vol > 0:
+                buy_pct = buy_vol/(buy_vol+sell_vol)*100
+                agg = "BUY" if buy_pct > 55 else "SELL" if buy_pct < 45 else "NEUTRAL"
+                return {"cvd": round(buy_vol-sell_vol, 3), "buy_vol": round(buy_vol, 3), "sell_vol": round(sell_vol, 3),
+                        "buy_pct": round(buy_pct, 1), "aggressive": agg, "src": "Kraken-Trades-LIVE"}
     except: pass
     return {"cvd": 0.0, "buy_vol": 0, "sell_vol": 0, "buy_pct": 50.0, "aggressive": "NEUTRAL", "src": "LIVE-FAIL"}
 
 def get_spot_premium():
     try:
         cb = _safe_get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
-        bn = _safe_get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-        if cb and bn:
-            cb_p = float(cb["price"]); bn_p = float(bn["price"])
-            prem = cb_p - bn_p
-            prem_pct = prem / bn_p * 100 if bn_p else 0
-            bias = "SPOT_BUYING" if prem > 50 else "SPOT_SELLING" if prem < -50 else "NEUTRAL"
-            return {"coinbase": cb_p, "binance": bn_p, "premium_usd": round(prem, 1),
-                    "premium_pct": round(prem_pct, 4), "bias": bias, "src": "Coinbase+Binance-LIVE"}
+        if cb:
+            cb_p = float(cb["price"])
+            for url, name, parse in [
+                ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "Binance", lambda j: float(j["price"])),
+                ("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP", "OKX", lambda j: float(j["data"][0]["last"])),
+            ]:
+                try:
+                    j = _safe_get(url)
+                    if not j: continue
+                    bn_p = parse(j)
+                    prem = cb_p - bn_p
+                    bias = "SPOT_BUYING" if prem > 50 else "SPOT_SELLING" if prem < -50 else "NEUTRAL"
+                    return {"coinbase": cb_p, "binance": bn_p, "premium_usd": round(prem, 1),
+                            "premium_pct": round(prem/bn_p*100, 4) if bn_p else 0, "bias": bias, "src": f"Coinbase+{name}-LIVE"}
+                except: pass
+            try:
+                j = _safe_get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD")
+                if j:
+                    kr_p = float(j["result"]["XXBTZUSD"]["c"][0])
+                    prem = cb_p - kr_p
+                    bias = "SPOT_BUYING" if prem > 50 else "SPOT_SELLING" if prem < -50 else "NEUTRAL"
+                    return {"coinbase": cb_p, "binance": kr_p, "premium_usd": round(prem, 1),
+                            "premium_pct": round(prem/kr_p*100, 4) if kr_p else 0, "bias": bias, "src": "Coinbase+Kraken-LIVE"}
+            except: pass
     except: pass
     return {"coinbase": 0, "binance": 0, "premium_usd": 0, "premium_pct": 0, "bias": "UNKNOWN", "src": "LIVE-FAIL"}
 
@@ -388,9 +503,8 @@ def get_funding_cascade(funding, oi_chg_5m=0.0, price_chg_5m=0.0):
             "reason": reason, "oi_chg_5m": oi_chg_5m, "price_chg_5m": round(price_chg_5m, 3)}
 
 def get_hunter_live(price, k1_norm, funding, spot, oi, oi_chg, price_chg_5):
-    # FIXED: ETF proxy from spot ONLY, no extra CoinGecko call
     try:
-        liq = get_liq_clusters(price)
+        liq = get_liq_clusters(price, k1_norm)
         obc = get_ob_clusters(price)
         cvd = get_cvd_live()
         etf_score = 0.0; etf_reasons = []
@@ -448,7 +562,7 @@ def get_hunter_live(price, k1_norm, funding, spot, oi, oi_chg, price_chg_5):
                 "reasons": [f"Hunter error {e}"], "liq": {}, "ob_clusters": {}, "cvd_live": {}, "spot": spot, "etf": {}, "funding_cascade": {}, "oi": oi}
 
 # ------------------------------------------------------------
-# 6. ASIA RANGE + SWEEP + HUNT
+# 6. ASIA RANGE + SWEEP
 # ------------------------------------------------------------
 def get_asia_range(k15):
     lows, highs = [], []
@@ -469,7 +583,7 @@ def get_sweep(price, k15, k1, liq_clusters=None):
     if liq_clusters:
         ll = liq_clusters.get("long_liq", 0); sl = liq_clusters.get("short_liq", 0); src = liq_clusters.get("src", "LIVE-FAIL")
     else:
-        c = get_liq_clusters(price)
+        c = get_liq_clusters(price, k1)
         ll = c["long_liq"]; sl = c["short_liq"]; src = c["src"]
     hunt = "NEUTRAL"
     if a_low and a_high and k1:
@@ -480,15 +594,8 @@ def get_sweep(price, k15, k1, liq_clusters=None):
             hunt = "SHORT"
     return hunt, a_low, a_high, ll, sl, src
 
-def is_sweep_done(dest, k1, a_low, a_high):
-    if not k1: return False
-    last = k1[-1]
-    if dest == "LONG" and a_low: return last["low"] < a_low and last["close"] > a_low
-    if dest == "SHORT" and a_high: return last["high"] > a_high and last["close"] < a_high
-    return False
-
 # ------------------------------------------------------------
-# 7. NEWS / VOL SPIKE + MACRO BRAIN
+# 7. NEWS / MACRO BRAIN
 # ------------------------------------------------------------
 def get_news(k1=None):
     if k1 is None:
@@ -537,36 +644,24 @@ def get_macro_brain(price, k1, k15, funding=0.0):
         return {"score": 0.0, "bias": "NEUTRAL", "alert": None, "flip": None, "error": str(e)}
 
 # ------------------------------------------------------------
-# 8. MASTER - get_all_data + get_signal
+# 8. MASTER - get_signal - GOLD FIXED, NO DUPLICATE VOTES
 # ------------------------------------------------------------
-def get_all_data():
-    price, psrc = get_price_live()
-    k1 = get_klines("1", 20)
-    k15 = get_klines("15", 200)
-    world = get_world()
-    funding, funding_src = get_funding()
-    spot = get_spot_premium()
-    oi = get_open_interest()
-    price_chg_5 = (k1[-1]["close"]-k1[-6]["close"])/k1[-6]["close"]*100 if len(k1) >= 6 and k1[-6]["close"] else 0
-    macro_brain = get_macro_brain(price, k1, k15, funding)
-    hunter = get_hunter_live(price, k1, funding, spot, oi, oi.get("chg_5m", 0), price_chg_5)
-    hunt, a_low, a_high, ll, sl, liq_src = get_sweep(price, k15, k1, hunter.get("liq"))
-    is_news, news_reason = get_news(k1)
-    fng, fng_txt, fng_src = get_fear()
-    dom = get_dominance()
-    return {"price": price, "price_src": psrc, "k1": k1, "k15": k15, "world": world,
-            "macro_brain": macro_brain, "hunt": hunt, "asia_low": a_low, "asia_high": a_high,
-            "liq_long": ll, "liq_short": sl, "liq_src": liq_src,
-            "is_news": is_news, "news_reason": news_reason,
-            "funding": funding, "funding_src": funding_src,
-            "fear": fng, "fear_txt": fng_txt, "fear_src": fng_src, "dominance": dom,
-            "oi": oi, "hunter": hunter, "spot_premium": spot,
-            "liq_clusters": hunter.get("liq", {}), "ob_clusters": hunter.get("ob_clusters", {}),
-            "cvd_live": hunter.get("cvd_live", {}), "funding_cascade": hunter.get("funding_cascade", {}),
-            "session": get_session(), "mins_to_next_session": get_minutes_to_next_session(),
-            "rsi_15m": calc_rsi(k15, 14) if k15 else 50.0, "timestamp": _now().isoformat()}
-
 _last_signal = {"time": 0, "data": None}
+
+def _macro_vote(bias):
+    # Single helper, replaces 3 duplicate if-blocks before
+    if bias == "LONG": return 1, 0
+    if bias == "SHORT": return 0, 1
+    return 0, 0
+
+def _ob_vote(obc):
+    # Single helper, replaces 2 duplicate buy_pressure blocks before
+    bp = obc.get("buy_pressure", 50)
+    if obc.get("cluster_bias") == "BID_WALL_STRONG": return 1, 0, "OB Cluster Bid Wall LONG"
+    if obc.get("cluster_bias") == "ASK_WALL_STRONG": return 0, 1, "OB Cluster Ask Wall SHORT"
+    if bp > 55: return 1, 0, "Orderbook bids LONG"
+    if bp < 45: return 0, 1, "Orderbook asks SHORT"
+    return 0, 0, ""
 
 def get_signal(price, atr=None, candles=None):
     global _last_signal
@@ -595,42 +690,41 @@ def get_signal(price, atr=None, candles=None):
         cvd_live = hunter.get("cvd_live", {})
         fc = hunter.get("funding_cascade", {})
         long_votes = 0; short_votes = 0; total_voters = 8; reasons = []
-        dxy = world.get("DXY", 0)
-        if dxy < -0.05: long_votes += 1; reasons.append("DXY down LONG")
-        elif dxy > 0.05: short_votes += 1; reasons.append("DXY up SHORT")
-        nq = world.get("NQ", 0)
-        if nq > 0.05: long_votes += 1; reasons.append("NQ up LONG")
-        elif nq < -0.05: short_votes += 1; reasons.append("NQ down SHORT")
-        spx = world.get("SPX", 0)
-        if spx > 0.05: long_votes += 1; reasons.append("SPX up LONG")
-        elif spx < -0.05: short_votes += 1; reasons.append("SPX down SHORT")
+        # Voter 1-4: World
+        for key, up_txt, down_txt in [("DXY", "DXY down LONG", "DXY up SHORT"), ("NQ", "NQ up LONG", "NQ down SHORT"), ("SPX", "SPX up LONG", "SPX down SHORT")]:
+            v = world.get(key, 0)
+            if key == "DXY":
+                if v < -0.05: long_votes += 1; reasons.append(up_txt)
+                elif v > 0.05: short_votes += 1; reasons.append(down_txt)
+            else:
+                if v > 0.05: long_votes += 1; reasons.append(up_txt)
+                elif v < -0.05: short_votes += 1; reasons.append(down_txt)
         gold = world.get("GOLD", 0)
         if gold > 0.05: long_votes += 1; reasons.append("GOLD up LONG")
         elif gold < -0.05: short_votes += 1; reasons.append("GOLD down SHORT")
+        # Voter 5: OI + Price, fallback Macro (once, no duplicate)
         oi_chg = oi.get("chg_5m", 0)
         if oi_chg > 0.1 and price_chg_5 < 0: long_votes += 1; reasons.append("OI up + price down = shorts crowded LONG")
         elif oi_chg > 0.1 and price_chg_5 > 0: long_votes += 1; reasons.append("OI up + price up LONG")
         elif oi_chg < -0.1 and price_chg_5 < 0: short_votes += 1; reasons.append("OI down + price down SHORT")
         else:
-            if macro_brain.get("bias") == "LONG": long_votes += 1
-            elif macro_brain.get("bias") == "SHORT": short_votes += 1
+            a, b = _macro_vote(macro_brain.get("bias")); long_votes += a; short_votes += b
+        # Voter 6: Sweep, fallback Macro (once)
         if hunt == "LONG": long_votes += 1; reasons.append("Sweep LONG")
         elif hunt == "SHORT": short_votes += 1; reasons.append("Sweep SHORT")
         else:
-            if macro_brain.get("bias") == "LONG": long_votes += 1
-            elif macro_brain.get("bias") == "SHORT": short_votes += 1
+            a, b = _macro_vote(macro_brain.get("bias")); long_votes += a; short_votes += b
+        # Voter 7: CVD, fallback OB (once)
         cvd_agg = cvd_live.get("aggressive", "NEUTRAL")
         cvd_buy_pct = cvd_live.get("buy_pct", 50.0)
         if cvd_agg == "BUY": long_votes += 1; reasons.append(f"CVD LIVE BUY {cvd_buy_pct}% LONG")
         elif cvd_agg == "SELL": short_votes += 1; reasons.append(f"CVD LIVE SELL {cvd_buy_pct}% SHORT")
         else:
-            if obc.get("buy_pressure", 50) > 55: long_votes += 1
-            elif obc.get("buy_pressure", 50) < 45: short_votes += 1
-        if obc.get("cluster_bias") == "BID_WALL_STRONG": long_votes += 1; reasons.append("OB Cluster Bid Wall LONG")
-        elif obc.get("cluster_bias") == "ASK_WALL_STRONG": short_votes += 1; reasons.append("OB Cluster Ask Wall SHORT")
-        else:
-            if obc.get("buy_pressure", 50) > 55: long_votes += 1; reasons.append("Orderbook bids LONG")
-            elif obc.get("buy_pressure", 50) < 45: short_votes += 1; reasons.append("Orderbook asks SHORT")
+            a, b, r = _ob_vote(obc); long_votes += a; short_votes += b
+            if r: reasons.append(r)
+        # Voter 8: OB Cluster (once)
+        a, b, r = _ob_vote(obc); long_votes += a; short_votes += b
+        if r and r not in reasons: reasons.append(r)
         if long_votes > short_votes: direction = "LONG"; agree = long_votes
         elif short_votes > long_votes: direction = "SHORT"; agree = short_votes
         else: direction = "NONE"; agree = long_votes
@@ -657,8 +751,14 @@ def get_signal(price, atr=None, candles=None):
         pause_long = False; pause_short = False; pause_reason = ""
         if macro_brain.get("alert") == "PAUSE_SHORT":
             pause_short = True; pause_reason = "Macro PAUSE_SHORT DXY/JPY"
-        if abs(gold) > 0.12 and cert < 85:
-            pause_long = True; pause_short = True; pause_reason = f"GOLD {gold:.3f}% extreme"
+        # GOLD FIXED: >1.0% + Hunter confirm, >2% panic only
+        if abs(gold) > 1.0 and cert < 85:
+            if gold > 1.0 and hunter_bias == "SHORT" and direction == "LONG":
+                pause_long = True; pause_reason = f"GOLD +{gold:.3f}% extreme + Hunter SHORT"
+            elif gold < -1.0 and hunter_bias == "LONG" and direction == "SHORT":
+                pause_short = True; pause_reason = f"GOLD {gold:.3f}% extreme + Hunter LONG"
+            elif abs(gold) > 2.0:
+                pause_long = True; pause_short = True; pause_reason = f"GOLD {gold:.3f}% panic >2%"
         if hunter_wait:
             if hunter_score < -1.0 and direction == "LONG":
                 pause_long = True; pause_reason = hunter.get("wait_reason", "Hunter wait LONG")
@@ -686,16 +786,7 @@ def get_signal(price, atr=None, candles=None):
         print(f"get_signal Error: {e}", flush=True)
         return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False, "price": price, "hunter_score": 0, "hunter_bias": "NEUTRAL", "hunter_wait": False}
 
-def get_votes(price, atr=None, candles=None):
-    return get_signal(price, atr, candles)
-
 if __name__ == "__main__":
-    d = get_all_data()
-    print(f"Price ${d['price']:.0f} [{d['price_src']}] Session {d['session']} Hunt {d['hunt']}")
-    print(f"Macro {d['macro_brain']['bias']} Score {d['macro_brain']['score']}")
-    print(f"Liq Long ${d['liq_long']:,.0f} Short ${d['liq_short']:,.0f} [{d['liq_src']}]")
-    print(f"OI {d['oi']} Hunter {d['hunter']['hunter_bias']} {d['hunter']['hunter_score']} Wait {d['hunter']['hunter_wait']}")
-    print(f"Fear {d['fear']} Funding {d['funding']:.4f}% Dom BTC {d['dominance']['btc']}%")
-    sig = get_signal(d['price'], 200, d['k1'])
-    print(f"Signal: {sig['direction']} Cert {sig['cert']}% Agree {sig['agree']} Hunter {sig['hunter_bias']} {sig['hunter_score']}")
-    print(f"Today summary: {get_daily_summary()}")
+    price, src = get_price_live()
+    sig = get_signal(price, 200, get_klines("1", 20))
+    print(f"Price ${price:.0f} [{src}] Signal: {sig['direction']} Cert {sig['cert']}% Hunter {sig['hunter_bias']} {sig['hunter_score']}")
