@@ -1,399 +1,450 @@
-# V15 FINAL - ATR Wide SL + $500 BE + Instant Re-Entry + Fees + Smart News + Cross Margin
-# LONG = SHORT Equal | No Add-On | No Hardcoded Balance/Price
-# main.py = HAND ONLY. data_engine.py = BRAIN. main.py must call data_engine every loop.
-
-import os, time, math, hmac, hashlib, json, requests
+# ============================================================
+# MAIN.PY V15.1.0 - TRADING BRAIN
+# CROSS | ATR SL | $500 BE TRIGGER | JSON via DATA ENGINE
+# + FAKE PORT for Render Free Web Service (No open ports fix)
+# ============================================================
+import os, time, threading, hmac, hashlib, json
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import requests
 
-API_KEY = os.getenv("BYBIT_API_KEY", "")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-BASE = "https://api.bybit.com"
+# ------------------------------------------------------------
+# 0. FAKE PORT - FOR RENDER FREE WEB SERVICE
+# Render Web Service dey expect port. Bot no be website, so we open
+# small fake port make Render see "open port" and no kill am.
+# This must be FIRST, before anything else.
+# ------------------------------------------------------------
+def _keep_port():
+    try:
+        port = int(os.environ.get("PORT", 10000))
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b"BTC-BOT V15 RUNNING")
+            def log_message(self, *a): pass
+        HTTPServer(("0.0.0.0", port), H).serve_forever()
+    except Exception as e:
+        print(f"Port keep-alive error: {e}", flush=True)
+threading.Thread(target=_keep_port, daemon=True).start()
+
+# ------------------------------------------------------------
+# 1. IMPORT DATA ENGINE
+# ------------------------------------------------------------
+try:
+    import data_engine as DE
+    print("✅ Data Engine Connected", flush=True)
+    HAS_DE = True
+except Exception as e:
+    DE = None
+    HAS_DE = False
+    print(f"❌ Data Engine NOT Found: {e}", flush=True)
+
+# ------------------------------------------------------------
+# 2. CONFIG - FROM RENDER ENV VARS
+# ------------------------------------------------------------
+BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "")
+BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 SYMBOL = "BTCUSDT"
 CATEGORY = "linear"
+BASE_URL = "https://api.bybit.com"
 
-# === V15 CONFIG - YOUR RULES ===
-USE_ATR_SL = True  # If you no like ATR SL, change to False -> go back to your fixed SL
-ATR_PERIOD = 14
-ATR_SL_MULT = 5.0
-ATR_TP_MULT = 6.5
-ATR_BE_TRIGGER_MULT = 2.0
-ATR_BE_BUFFER_MULT = 0.5
-WICK_BUFFER_PCT = 0.0015  # 0.15% of price
-FEE_RATE_TOTAL = 0.0022  # 0.06%*2 fee + 0.05%*2 slippage = 0.22%
-BE_MIN_TRIGGER = 500.0  # YOUR RULE: Minimum $500 wicks
-BE_MIN_BASE_PRICE = 65000.0  # $500 at $65k, grows with price
-BE_SAFETY = 50.0  # $50 safety above fees in buffer
-CRITICAL_CERT = 90.0
-NORMAL_CERT = 75.0
-FLIP_CERT = 85.0
-COOLDOWN_SEC = 60
-REENTRY_GAP_MULT = 0.5
-MAX_QTY = 0.100
+# Risk / Strategy - V15 Rules
+BE_TRIGGER = 500.0      # $500 move -> move SL to BE + lock small profit
+BE_LOCK = 20.0          # Lock $20 when BE hits
+RISK_PCT = 0.02         # 2% risk per trade
+MAX_DAILY_LOSS = 50.0   # Stop for day if -$50
+CERT_MIN = 75.0         # Minimum cert to enter
+CERT_HUNT = 85.0        # Hunt needs higher cert
 
-# State
-position = None  # {'side':'Buy'/'Sell','entry':float,'qty':float,'best':float,'sl':float,'tp':float}
-last_trade_time = 0
-last_close_price = 0
-pause_long = False
-pause_short = False
-balance_cache = 0
-news_critical = False
-news_not_critical_wait_until = 0
-instant_reentry_allowed = False
+balance = 0.0
+in_position = False
+side = None
+entry = 0.0
+qty = 0.0
+sl_price = 0.0
+be_done = False
+be_trigger = 0.0
+daily_pnl = 0.0
+daily_trades = 0
+votes = {"cert": 0, "direction": "NONE", "agree": 0}
 
+# ------------------------------------------------------------
+# 3. HELPERS - LOG + TELEGRAM + BYBIT SIGN
+# ------------------------------------------------------------
 def log(msg):
     print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def tg(msg):
-    if not TG_TOKEN or not TG_CHAT: return
     try:
-        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                      json={"chat_id": TG_CHAT, "text": msg}, timeout=5)
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=5
+        )
     except: pass
 
-def sign(params):
-    qs = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    return hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+def _sign(params):
+    qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    return hmac.new(BYBIT_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
 
-def api(method, path, params=None):
-    params = params or {}
-    params["api_key"] = API_KEY
-    params["timestamp"] = str(int(time.time()*1000))
-    params["recv_window"] = "5000"
-    params["sign"] = sign(params)
+def bybit_get(path, params):
     try:
-        if method == "GET":
-            r = requests.get(BASE+path, params=params, timeout=10)
-        else:
-            r = requests.post(BASE+path, json=params, timeout=10)
+        ts = str(int(time.time() * 1000))
+        params["api_key"] = BYBIT_API_KEY
+        params["timestamp"] = ts
+        params["recv_window"] = "5000"
+        params["sign"] = _sign(params)
+        r = requests.get(BASE_URL + path, params=params, timeout=10)
         return r.json()
     except Exception as e:
-        log(f"API ERR {e}")
+        log(f"Bybit GET error {e}")
         return {}
 
-# === MARKET DATA ===
-def get_price():
+def bybit_post(path, params):
     try:
-        r = requests.get(f"{BASE}/v5/market/tickers", params={"category": CATEGORY, "symbol": SYMBOL}, timeout=5).json()
-        return float(r["result"]["list"][0]["lastPrice"])
-    except: return 0
+        ts = str(int(time.time() * 1000))
+        params["api_key"] = BYBIT_API_KEY
+        params["timestamp"] = ts
+        params["recv_window"] = "5000"
+        params["sign"] = _sign(params)
+        r = requests.post(BASE_URL + path, data=params, timeout=10)
+        return r.json()
+    except Exception as e:
+        log(f"Bybit POST error {e}")
+        return {}
 
-def get_candles(limit=20):
+# ------------------------------------------------------------
+# 4. BYBIT - BALANCE / POSITION / ORDER
+# ------------------------------------------------------------
+def get_balance():
+    global balance
     try:
-        r = requests.get(f"{BASE}/v5/market/kline", params={"category": CATEGORY, "symbol": SYMBOL, "interval": "1", "limit": limit}, timeout=5).json()
-        out = []
-        for c in r["result"]["list"][::-1]:
-            out.append({"open": float(c[1]), "high": float(c[2]), "low": float(c[3]), "close": float(c[4])})
-        return out
-    except: return []
+        j = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+        lst = j.get("result", {}).get("list", [])
+        if lst:
+            for coin in lst[0].get("coin", []):
+                if coin.get("coin") == "USDT":
+                    balance = float(coin.get("walletBalance", 0))
+                    return balance
+    except: pass
+    return balance
+
+def get_position():
+    try:
+        j = bybit_get("/v5/position/list", {"category": CATEGORY, "symbol": SYMBOL})
+        lst = j.get("result", {}).get("list", [])
+        if lst and float(lst[0].get("size", 0)) > 0:
+            return lst[0]
+    except: pass
+    return None
+
+def set_leverage():
+    try:
+        bybit_post("/v5/position/set-leverage", {"category": CATEGORY, "symbol": SYMBOL, "buyLeverage": "10", "sellLeverage": "10"})
+        log("Leverage set 10x")
+    except: pass
+
+def set_margin_cross():
+    try:
+        # 0 = CROSS, 1 = ISOLATED for Bybit v5
+        r = bybit_post("/v5/position/switch-isolated", {"category": CATEGORY, "symbol": SYMBOL, "tradeMode": 0, "buyLeverage": "10", "sellLeverage": "10"})
+        log(f"Margin set to CROSS | {r.get('retMsg', '')}")
+    except Exception as e:
+        log(f"Margin CROSS error {e}")
+
+def place_order(order_side, qty_, sl=None, tp=None):
+    try:
+        p = {"category": CATEGORY, "symbol": SYMBOL, "side": order_side, "orderType": "Market", "qty": str(qty_)}
+        if sl: p["stopLoss"] = str(round(sl, 1))
+        if tp: p["takeProfit"] = str(round(tp, 1))
+        r = bybit_post("/v5/order/create", p)
+        log(f"Order {order_side} {qty_} -> {r.get('retMsg', '')}")
+        return r
+    except Exception as e:
+        log(f"Order error {e}")
+        return {}
+
+def close_position():
+    try:
+        pos = get_position()
+        if not pos:
+            return True
+        sz = float(pos.get("size", 0))
+        s = pos.get("side", "")
+        close_side = "Sell" if s == "Buy" else "Buy"
+        r = bybit_post("/v5/order/create", {"category": CATEGORY, "symbol": SYMBOL, "side": close_side, "orderType": "Market", "qty": str(sz), "reduceOnly": True})
+        log(f"Close {close_side} {sz} -> {r.get('retMsg', '')}")
+        return True
+    except Exception as e:
+        log(f"Close error {e}")
+        return False
+
+def set_sl_to_be():
+    global be_done
+    try:
+        pos = get_position()
+        if not pos:
+            return
+        # Move SL to entry + $20 lock (for LONG) or entry - $20 (for SHORT)
+        if side == "LONG":
+            new_sl = entry + BE_LOCK
+        else:
+            new_sl = entry - BE_LOCK
+        # Bybit: set trading stop
+        bybit_post("/v5/position/trading-stop", {"category": CATEGORY, "symbol": SYMBOL, "stopLoss": str(round(new_sl, 1))})
+        be_done = True
+        log(f"🔒 BE DONE | SL moved to {new_sl:.1f} (Lock +${BE_LOCK})")
+        tg(f"🔒 <b>BE TRIGGERED</b>\nSL moved to {new_sl:.1f}\nLocked +${BE_LOCK}")
+    except Exception as e:
+        log(f"BE SL error {e}")
+
+# ------------------------------------------------------------
+# 5. DATA ENGINE BRIDGE - get_votes
+# ------------------------------------------------------------
+def get_votes(price, atr, candles):
+    global votes
+    if not HAS_DE or DE is None:
+        log("DATA ENGINE MISSING - NO TRADE")
+        return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+    try:
+        # DE V15 has get_signal. V14 no get am, so check all names
+        fn = None
+        for name in ["get_signal", "get_votes", "analyze", "check_market", "get_decision"]:
+            if hasattr(DE, name):
+                fn = getattr(DE, name)
+                break
+        if fn is None:
+            log(f"Data Engine functions: {[x for x in dir(DE) if not x.startswith('_')]} - NO KNOWN FUNCTION")
+            return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+        res = fn(price, atr, candles)
+        if isinstance(res, dict):
+            votes = res
+            return res
+    except Exception as e:
+        log(f"get_votes error {e}")
+    return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+
+def get_price_and_candles():
+    # Use DE for price + klines if available, else direct Bybit
+    if HAS_DE:
+        try:
+            price, _ = DE.get_price_live()
+            k1 = DE.get_klines("1", 20)
+            # Normalize to main.py format
+            candles = [{"open": k["open"], "high": k["high"], "low": k["low"], "close": k["close"]} for k in k1]
+            return price, candles, k1
+        except: pass
+    # Fallback direct
+    try:
+        r = requests.get(f"{BASE_URL}/v5/market/tickers?category=linear&symbol={SYMBOL}", timeout=5).json()
+        price = float(r["result"]["list"][0]["lastPrice"])
+        return price, [], []
+    except:
+        return 0.0, [], []
 
 def calc_atr(candles):
-    if len(candles) < 15: return 200.0
+    if not candles or len(candles) < 15:
+        return 200.0
     trs = []
     for i in range(1, len(candles)):
         c, p = candles[i], candles[i-1]
         trs.append(max(c["high"]-c["low"], abs(c["high"]-p["close"]), abs(c["low"]-p["close"])))
-    return sum(trs[-ATR_PERIOD:]) / ATR_PERIOD
+    return sum(trs[-14:]) / len(trs[-14:]) if trs else 200.0
 
-def longest_wick(candles):
-    if not candles: return 0
-    m = 0
-    for c in candles[-5:]:
-        body = abs(c["close"]-c["open"])
-        wick = (c["high"]-c["low"]) - body
-        m = max(m, wick)
-    return m
-
-def fees_in_price(price):
-    # Fees in price distance = price * 0.0022 (scales with BTC price)
-    return price * FEE_RATE_TOTAL
-
-# === BALANCE & QTY - DYNAMIC, NO HARDCODE ===
-def get_balance():
-    global balance_cache
-    res = api("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+# ------------------------------------------------------------
+# 6. SAVE TRADE - VIA DATA ENGINE JSON KEEPER
+# main.py NO touch json again. DE.save_trade() dey handle trades.json + daily.json
+# ------------------------------------------------------------
+def save_trade_to_de(trade_dict):
     try:
-        bal = float(res["result"]["list"][0]["coin"][0]["walletBalance"])
-        balance_cache = bal
-        return bal
-    except:
-        log("BALANCE FAIL — NO TRADE")
-        return None
-
-def get_leverage(balance):
-    if balance >= 20: return 50
-    if balance >= 10: return 25
-    if balance >= 5: return 20
-    return 15
-
-def calc_qty(balance, price, lev):
-    base = 0.010 + max(0, (balance - 20) / 8) * 0.005
-    max_aff = balance * 0.90 * lev / price if price > 0 else 0
-    return min(base, max_aff, MAX_QTY)
-
-# === PATCHED: CALL DATA ENGINE FROM SAME REPO - NO STUB ===
-# main.py NO BE BRAIN. data_engine.py NA BRAIN.
-# Your data_engine.py must dey same folder / same GitHub repo as main.py
-try:
-    import data_engine as DE
-    log("✅ Data Engine Connected")
-except Exception as e:
-    log(f"❌ Data Engine NOT Found: {e}")
-    DE = None
-
-def _normalize_votes(raw):
-    # Data engine fit return different keys - normalize am to wetin main.py need
-    if not isinstance(raw, dict):
-        return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0, "cvd_buy_pct": 50, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
-    direction = str(raw.get("direction") or raw.get("side") or raw.get("signal") or "NONE").upper()
-    if direction not in ("LONG", "SHORT"):
-        # Allow Buy/Sell style from data_engine
-        if direction == "BUY": direction = "LONG"
-        elif direction == "SELL": direction = "SHORT"
-        else: direction = "NONE"
-    return {
-        "cert": float(raw.get("cert", raw.get("certainty", raw.get("confidence", 0))) or 0),
-        "direction": direction,
-        "agree": int(raw.get("agree", raw.get("agree_count", raw.get("votes", 0))) or 0),
-        "hunt_soon": bool(raw.get("hunt_soon", raw.get("hunt", False))),
-        "hunt_cert": float(raw.get("hunt_cert", raw.get("hunt_certainty", 0)) or 0),
-        "cvd_buy_pct": float(raw.get("cvd_buy_pct", raw.get("cvd_buy", 50)) or 50),
-        "news_critical": bool(raw.get("news_critical", raw.get("critical_news", raw.get("is_critical", False)))),
-        "news_wait": int(raw.get("news_wait", raw.get("news_wait_sec", 0)) or 0),
-        "pause_long": bool(raw.get("pause_long", raw.get("PAUSE_LONG", False))),
-        "pause_short": bool(raw.get("pause_short", raw.get("PAUSE_SHORT", False))),
-    }
-
-def get_votes(price, atr, candles):
-    """
-    ONLY bridge between main.py and data_engine.py.
-    main.py go ask data_engine every loop: 'Wetin market dey talk now?'
-    """
-    if DE is None:
-        log("DATA ENGINE MISSING - NO TRADE")
-        return _normalize_votes({})
-    try:
-        # Try common function names in order - whichever dey for your repo, e go pick am
-        if hasattr(DE, "get_signal"):
-            return _normalize_votes(DE.get_signal(price, atr, candles))
-        if hasattr(DE, "analyze"):
-            return _normalize_votes(DE.analyze(price, atr, candles))
-        if hasattr(DE, "get_votes"):
-            return _normalize_votes(DE.get_votes(price, atr, candles))
-        if hasattr(DE, "check_market"):
-            return _normalize_votes(DE.check_market(price))
-        if hasattr(DE, "get_decision"):
-            return _normalize_votes(DE.get_decision(price, atr, candles))
-        log(f"Data Engine functions: {[x for x in dir(DE) if not x.startswith('_')]} - NO KNOWN FUNCTION")
-        return _normalize_votes({})
+        if HAS_DE and hasattr(DE, "save_trade"):
+            DE.save_trade(trade_dict)
+            log(f"💾 Saved to trades.json via DE | PNL ${trade_dict.get('net_pnl', 0):.2f}")
+        else:
+            log("DE.save_trade not found - trade NOT saved to JSON")
     except Exception as e:
-        log(f"Data Engine Error: {e}")
-        return _normalize_votes({})
+        log(f"Save trade error {e}")
 
-def is_hunt_soon(votes):
-    return votes.get("hunt_soon", False)
-
-# === ORDERS ===
-def set_cross_margin():
-    # Bybit: tradeMode 0 = Cross, 1 = Isolated
-    api("POST", "/v5/position/switch-isolated", {"category": CATEGORY, "symbol": SYMBOL, "tradeMode": 0, "buyLeverage": "50", "sellLeverage": "50"})
-    log("Margin set to CROSS")
-
-def place_order(side, qty, price, sl, tp):
-    # side: Buy / Sell
-    res = api("POST", "/v5/order/create", {
-        "category": CATEGORY, "symbol": SYMBOL, "side": side, "orderType": "Market",
-        "qty": str(qty), "takeProfit": str(round(tp, 1)), "stopLoss": str(round(sl, 1)),
-        "tpslMode": "Full", "positionIdx": 0
-    })
-    log(f"ORDER {side} qty={qty} sl={sl:.1f} tp={tp:.1f} -> {res.get('retMsg')}")
-    return res
-
-def close_position(side, qty):
-    # close by opposite market order
-    opp = "Sell" if side == "Buy" else "Buy"
-    res = api("POST", "/v5/order/create", {
-        "category": CATEGORY, "symbol": SYMBOL, "side": opp, "orderType": "Market",
-        "qty": str(qty), "positionIdx": 0, "reduceOnly": True
-    })
-    log(f"CLOSE {side} qty={qty}")
-    return res
-
-def sync_position_from_exchange():
-    # If Bybit SL/TP close am, our local position must clear - no ghost position
-    try:
-        res = api("GET", "/v5/position/list", {"category": CATEGORY, "symbol": SYMBOL})
-        lst = res.get("result", {}).get("list", [])
-        for p in lst:
-            sz = float(p.get("size", 0) or 0)
-            if sz > 0:
-                return {"side": p.get("side"), "entry": float(p.get("avgPrice", 0) or 0), "qty": sz, "best": float(p.get("avgPrice", 0) or 0)}
-        return None
-    except:
-        return None
-
-# === V15 CORE MATH ===
-def calc_levels(entry, direction, atr, candles, price):
-    fees = fees_in_price(price)
-    wick_shield = longest_wick(candles) + price * WICK_BUFFER_PCT
-    if USE_ATR_SL:
-        sl_dist = atr * ATR_SL_MULT + wick_shield + fees
-    else:
-        # YOUR OLD FIXED STYLE - fallback if you turn ATR off
-        sl_dist = 1200 + fees
-    tp_dist = atr * ATR_TP_MULT
-    # BE Trigger - YOUR $500 MIN RULE
-    price_scaled_be = BE_MIN_TRIGGER * (price / BE_MIN_BASE_PRICE)
-    be_trigger = max(BE_MIN_TRIGGER, atr * ATR_BE_TRIGGER_MULT, price_scaled_be)
-    # BE Buffer - must cover fees + safety
-    be_buffer = max(fees + BE_SAFETY, atr * ATR_BE_BUFFER_MULT, 50 * (price / BE_MIN_BASE_PRICE))
-    if direction == "LONG":
-        sl = entry - sl_dist
-        tp = entry + tp_dist
-    else:
-        sl = entry + sl_dist
-        tp = entry - tp_dist
-    return {"sl": sl, "tp": tp, "sl_dist": sl_dist, "tp_dist": tp_dist, "be_trigger": be_trigger, "be_buffer": be_buffer, "fees": fees}
-
-# === MAIN LOOP ===
+# ------------------------------------------------------------
+# 7. MAIN LOOP
+# ------------------------------------------------------------
 def main():
-    global position, last_trade_time, last_close_price, news_not_critical_wait_until, news_critical, pause_long, pause_short, instant_reentry_allowed
-    log("V15 STARTED | CROSS | ATR SL | $500 BE | Instant Re-Entry | Fees Inside | Data Engine Connected")
-    tg("🤖 V15 STARTED\nCROSS | ATR SL x5 | $500 BE Min | Fees Inside | LONG=SHORT | Data Engine Connected")
-    set_cross_margin()
+    global in_position, side, entry, qty, sl_price, be_done, be_trigger, daily_pnl, daily_trades, balance
+
+    log("V15 STARTED | CROSS | ATR SL | $500 BE")
+    tg("🤖 <b>BTC Bot V15 STARTED</b>\nCROSS | ATR SL | $500 BE Trigger\nData Engine: " + ("✅ Connected" if HAS_DE else "❌ Missing"))
+    set_leverage()
+    set_margin_cross()
+    get_balance()
+    log(f"Balance ${balance:.2f}")
+
+    last_vote_time = 0
+
     while True:
         try:
-            price = get_price()
+            time.sleep(2)
+
+            price, candles, k1_raw = get_price_and_candles()
             if price == 0:
-                time.sleep(5); continue
-            candles = get_candles(20)
-            atr = calc_atr(candles)
-            balance = get_balance()
-            if balance is None:
-                time.sleep(5); continue
-            if balance < 5:
-                log("Balance too small - warning")
-            lev = get_leverage(balance)
-            # PATCHED: main.py calls data_engine every loop
-            votes = get_votes(price, atr, candles)
-            news_critical = votes.get("news_critical", False)
-            pause_long = votes.get("pause_long", False)
-            pause_short = votes.get("pause_short", False)
+                log("Price 0 - retry")
+                continue
 
-            # === NEWS BRAIN - from data_engine ===
-            # If data_engine say news NOT critical but need confirm, wait 5 mins (300s)
-            if votes.get("news_wait", 0) > 0 and news_not_critical_wait_until == 0:
-                news_not_critical_wait_until = time.time() + votes["news_wait"]
-            if news_not_critical_wait_until > time.time():
-                log(f"News wait {int(news_not_critical_wait_until-time.time())}s")
-                time.sleep(2); continue
-            else:
-                news_not_critical_wait_until = 0
+            atr = calc_atr(candles) if candles else 200.0
 
-            # === SYNC: If exchange don close position (SL/TP hit), clear local ===
-            if position:
-                live = sync_position_from_exchange()
-                if live is None:
-                    log("Exchange shows no position - SL/TP must don hit, clearing local")
-                    last_close_price = price
-                    last_trade_time = time.time()
-                    position = None
-                    instant_reentry_allowed = False
-                    time.sleep(2); continue
+            # --- IF IN POSITION: CHECK BE + SL ---
+            if in_position:
+                profit_move = (price - entry) if side == "LONG" else (entry - price)
+                # BE Trigger: $500 move and not yet done
+                if not be_done and profit_move >= BE_TRIGGER:
+                    log(f"🎯 BE TRIGGER | Move ${profit_move:.1f} >= ${BE_TRIGGER}")
+                    set_sl_to_be()
+                    # Save BE hit to JSON via DE (partial - we save full on close, but log BE)
+                    be_trigger = profit_move
 
-            # === MANAGE OPEN POSITION ===
-            if position:
-                side = position["side"]
-                entry = position["entry"]
-                qty = position["qty"]
-                # Update best price
-                if side == "Buy":
-                    profit_move = price - entry
-                    position["best"] = max(position["best"], price)
-                else:
-                    profit_move = entry - price
-                    position["best"] = min(position["best"], price)
-
-                levels = calc_levels(entry, "LONG" if side == "Buy" else "SHORT", atr, candles, price)
-                be_trigger = levels["be_trigger"]
-                be_buffer = levels["be_buffer"]
-
-                # --- YOUR $500 BE = TP + Instant Re-Entry ---
-                if profit_move >= be_trigger:
-                    # Close immediately as TP, lock profit
-                    close_position(side, qty)
-                    net = (profit_move * qty) - (price * qty * FEE_RATE_TOTAL)
-                    log(f"✅ BE TP HIT! Move ${profit_move:.0f} | Net ${net:.2f} | ATR {atr:.0f}")
-                    tg(f"✅ BE TP +${net:.2f}\nMove ${profit_move:.0f} | Price {price:.0f}")
-                    last_close_price = price
-                    last_trade_time = time.time()
-                    position = None
-
-                    # Instant Re-Entry Check - same second, no 1-min cooldown - PATCHED: call data_engine again
-                    v2 = get_votes(price, atr, candles)
-                    same_dir = (v2["direction"] == "LONG" and side == "Buy") or (v2["direction"] == "SHORT" and side == "Sell")
-                    if same_dir and v2["cert"] >= NORMAL_CERT and not is_hunt_soon(v2):
-                        log("🔁 Instant Re-Entry - cert still same + no hunt soon")
-                        instant_reentry_allowed = True
-                        votes = v2  # Use fresh votes for entry below, no need fetch again
-                        # Fall through to entry logic below immediately - do NOT continue
-                    elif same_dir and is_hunt_soon(v2):
-                        log("⏳ Hunt soon - WAIT for sweep, no instant re-entry")
-                        instant_reentry_allowed = False
-                        time.sleep(5); continue
+                # Check SL hit (approx - Bybit go close am, we detect no position)
+                pos = get_position()
+                if pos is None:
+                    # Position closed by SL/TP on exchange - calculate
+                    # We estimate exit = sl_price if be_done else sl_price, else price
+                    exit_price = price
+                    net = 0
+                    result = "SL"
+                    if be_done:
+                        # BE - small win
+                        net = BE_LOCK * qty - (qty * price * 0.0006)  # minus fees approx
+                        result = "BE_TP"
                     else:
-                        log("No re-entry - cert changed")
-                        instant_reentry_allowed = False
-                        time.sleep(2); continue
-                else:
-                    # Normal SL/TP check (Bybit TP/SL already set, but we also watch)
-                    # If SL hit by price, Bybit will close - we sync by checking position
-                    time.sleep(2 if news_critical else 5)
+                        # SL loss
+                        loss_move = abs(exit_price - entry)
+                        net = -(loss_move * qty) - (qty * price * 0.0006)
+                        result = "SL"
+                    daily_pnl += net
+                    daily_trades += 1
+                    log(f"🔴 CLOSED {result} | Exit {exit_price:.1f} | Net ${net:.2f} | Daily ${daily_pnl:.2f}")
+                    tg(f"🔴 <b>CLOSED {result}</b>\nExit {exit_price:.1f}\nNet ${net:.2f}\nDaily PNL ${daily_pnl:.2f}\nBalance ${balance:.2f}")
+                    save_trade_to_de({
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        "side": side,
+                        "entry": entry,
+                        "exit": exit_price,
+                        "move": round(profit_move if 'profit_move' in locals() else 0, 1),
+                        "qty": qty,
+                        "net_pnl": round(net, 2),
+                        "result": result,
+                        "balance_after": round(balance, 2),
+                        "cert": votes.get("cert", 0),
+                        "atr": round(atr, 1),
+                        "be_trigger": round(be_trigger, 1),
+                    })
+                    in_position = False
+                    side = None
+                    entry = 0.0
+                    qty = 0.0
+                    be_done = False
+                    be_trigger = 0.0
+                    get_balance()
+                    continue
+                continue
+
+            # --- NOT IN POSITION: CHECK FOR ENTRY ---
+            # Only vote every 5s to avoid hammering
+            if time.time() - last_vote_time < 5:
+                continue
+            last_vote_time = time.time()
+
+            v = get_votes(price, atr, candles)
+            cert = v.get("cert", 0)
+            direction = v.get("direction", "NONE")
+            agree = v.get("agree", 0)
+            hunt_soon = v.get("hunt_soon", False)
+            news_critical = v.get("news_critical", False)
+            news_wait = v.get("news_wait", 0)
+            pause_long = v.get("pause_long", False)
+            pause_short = v.get("pause_short", False)
+
+            log(f"Price ${price:.0f} | ATR {atr:.0f} | {direction} Cert {cert}% Agree {agree}/8 | HuntSoon {hunt_soon} | NewsCrit {news_critical} | Bal ${balance:.2f}")
+
+            # Daily loss stop
+            if daily_pnl <= -MAX_DAILY_LOSS:
+                log(f"🛑 DAILY LOSS LIMIT ${daily_pnl:.2f} - NO MORE TRADES TODAY")
+                time.sleep(60)
+                continue
+
+            # News critical = only trade if cert very high
+            if news_critical and cert < 90:
+                log(f"📰 NEWS CRITICAL - Skip, Cert {cert}% < 90%")
+                continue
+            if news_wait > 0:
+                log(f"📰 NEWS WAIT {news_wait}s - Skip")
+                continue
+
+            # Pause checks
+            if direction == "LONG" and pause_long:
+                log("⏸️ PAUSE LONG - Macro says pause")
+                continue
+            if direction == "SHORT" and pause_short:
+                log("⏸️ PAUSE SHORT - Macro says pause")
+                continue
+
+            # Hunt soon - wait for hunt, no enter normal
+            if hunt_soon:
+                log(f"👀 HUNT SOON - Waiting for sweep, Cert {cert}%")
+                # Only enter hunt if cert high
+                if cert < CERT_HUNT:
                     continue
 
-            # === ENTRY LOGIC ===
-            # PATCHED: Cooldown now REAL - only instant BE re-entry fit skip am
-            if not instant_reentry_allowed and position is None and last_close_price != 0:
-                if time.time() - last_trade_time < COOLDOWN_SEC:
-                    log(f"Cooldown {int(COOLDOWN_SEC - (time.time()-last_trade_time))}s")
-                    time.sleep(2); continue
-            # Reset flag after one use
-            instant_reentry_allowed = False
+            # Entry rule
+            if direction in ("LONG", "SHORT") and cert >= CERT_MIN:
+                # Calc qty: risk 2% / ATR distance
+                get_balance()
+                risk_usd = balance * RISK_PCT
+                if risk_usd < 1:
+                    risk_usd = 1
+                sl_dist = atr * 1.5  # ATR SL
+                if sl_dist <= 0:
+                    sl_dist = 200
+                qty_calc = risk_usd / sl_dist
+                # Bybit min 0.001, max based on balance
+                qty_calc = max(0.001, round(qty_calc, 3))
+                # Cap to not use too much margin (10x lev, max 20% balance)
+                max_qty = (balance * 0.20 * 10) / price
+                qty_calc = min(qty_calc, max_qty)
+                if qty_calc < 0.001:
+                    log("Qty too small - skip")
+                    continue
 
-            # Pause checks - LONG = SHORT equal - from data_engine
-            if pause_long and votes["direction"] == "LONG":
-                log("PAUSE_LONG active"); time.sleep(5); continue
-            if pause_short and votes["direction"] == "SHORT":
-                log("PAUSE_SHORT active"); time.sleep(5); continue
-
-            # Critical news = enter now, Not critical = need 75%+
-            need_cert = CRITICAL_CERT if news_critical else NORMAL_CERT
-            if votes["cert"] >= need_cert and votes["direction"] in ("LONG", "SHORT"):
-                # Re-entry gap - ATR based, not fixed $20 - skip gap for instant BE re-entry
-                if last_close_price != 0 and abs(price - last_close_price) < atr * REENTRY_GAP_MULT:
-                    # If we just did BE TP and cert still strong, gap na new entry point, no block am
-                    # Only block if price never move at all
-                    if abs(price - last_close_price) < 5:
-                        log(f"Re-entry gap too small {abs(price-last_close_price):.0f} < {atr*REENTRY_GAP_MULT:.0f}")
-                        time.sleep(2); continue
-                qty = calc_qty(balance, price, lev)
-                if qty < 0.001:
-                    log(f"Qty too small {qty} - balance {balance}"); time.sleep(5); continue
-                levels = calc_levels(price, votes["direction"], atr, candles, price)
-                side = "Buy" if votes["direction"] == "LONG" else "Sell"
-                res = place_order(side, qty, price, levels["sl"], levels["tp"])
-                if res.get("retCode") == 0:
-                    position = {"side": side, "entry": price, "qty": qty, "best": price, "sl": levels["sl"], "tp": levels["tp"]}
-                    log(f"🚀 ENTER {side} {price:.0f} qty={qty} SL {levels['sl']:.0f} TP {levels['tp']:.0f} BE Trig ${levels['be_trigger']:.0f} Buffer ${levels['be_buffer']:.0f} ATR {atr:.0f} Fees ${levels['fees']:.0f}")
-                    tg(f"🚀 ENTER {side} @{price:.0f}\nQty {qty} | SL {levels['sl']:.0f} | TP {levels['tp']:.0f}\nBE ${levels['be_trigger']:.0f} | ATR {atr:.0f}")
-                    last_trade_time = time.time()
+                order_side = "Buy" if direction == "LONG" else "Sell"
+                if direction == "LONG":
+                    sl = price - sl_dist
+                    tp = price + (sl_dist * 3)
                 else:
-                    log(f"Order failed {res}")
-            time.sleep(2 if news_critical else 5)
+                    sl = price + sl_dist
+                    tp = price - (sl_dist * 3)
+
+                log(f"🚀 ENTER {direction} | Price ${price:.0f} | Qty {qty_calc} | SL {sl:.0f} | TP {tp:.0f} | Cert {cert}% Agree {agree}")
+                tg(f"🚀 <b>ENTER {direction}</b>\nPrice ${price:.0f}\nQty {qty_calc}\nSL {sl:.0f}\nTP {tp:.0f}\nCert {cert}% Agree {agree}/8\nATR {atr:.0f}\nBalance ${balance:.2f}")
+
+                r = place_order(order_side, qty_calc, sl=sl, tp=tp)
+                if r.get("retCode", 1) == 0 or r.get("retMsg") == "OK":
+                    in_position = True
+                    side = direction
+                    entry = price
+                    qty = qty_calc
+                    sl_price = sl
+                    be_done = False
+                    be_trigger = 0.0
+                else:
+                    log(f"Order failed: {r}")
+            else:
+                if direction != "NONE":
+                    log(f"⏳ Cert {cert}% < {CERT_MIN}% - No trade")
+
         except Exception as e:
-            log(f"LOOP ERR {e}")
+            log(f"MAIN LOOP ERROR: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
