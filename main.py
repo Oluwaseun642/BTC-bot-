@@ -1,8 +1,8 @@
 # ============================================================
-# MAIN.PY V15.2.1 - CLEAN
+# MAIN.PY V15.2.2 - CLEAN + HUNTER WIRED
 # ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20
 # DYNAMIC LEV/QTY FROM V13 | NO ATR SL | NO ADDON | NO DOUBLE TRADE
-# NO DEAD CODE - every function below is used
+# HUNTER LIVE: hunter_wait / hunter_bias / funding_cascade / spot_premium / pause_reason
 # ============================================================
 import os, time, threading, hmac, hashlib
 from datetime import datetime, timezone
@@ -37,7 +37,7 @@ def _keep_port():
 threading.Thread(target=_keep_port, daemon=True).start()
 
 # ------------------------------------------------------------
-# 1. DATA ENGINE - USED for votes + price + save_trade
+# 1. DATA ENGINE
 # ------------------------------------------------------------
 try:
     import data_engine as DE
@@ -206,26 +206,35 @@ def set_sl_to_be():
         log(f"BE SL error {e}")
 
 # ------------------------------------------------------------
-# 5. DATA ENGINE BRIDGE - ALL USED
+# 5. DATA ENGINE BRIDGE - HUNTER WIRED
 # ------------------------------------------------------------
 def get_votes(price, atr, candles):
     global votes
+    default = {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "hunt_cert": 0,
+               "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False,
+               "pause_reason": "", "hunter_score": 0, "hunter_bias": "NEUTRAL", "hunter_wait": False,
+               "hunter_wait_reason": "", "hunter_reasons": [], "spot_premium_usd": 0,
+               "funding_cascade": {}, "liq_clusters": {}, "ob_clusters": {}, "cvd_live": {}}
     if not HAS_DE or DE is None:
-        return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+        return default
     try:
-        fn = next((getattr(DE, n) for n in ["get_signal", "get_votes", "analyze", "check_market", "get_decision"] if hasattr(DE, n)), None)
-        if fn is None: return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+        fn = next((getattr(DE, n) for n in ["get_signal", "get_votes"] if hasattr(DE, n)), None)
+        if fn is None: return default
         res = fn(price, atr, candles)
-        if isinstance(res, dict): votes = res; return res
+        if isinstance(res, dict):
+            votes = res
+            return res
     except Exception as e: log(f"get_votes error {e}")
-    return {"cert": 0, "direction": "NONE", "agree": 0, "hunt_soon": False, "news_critical": False, "news_wait": 0, "pause_long": False, "pause_short": False}
+    return default
 
 def get_price_and_candles():
+    # FIXED: keep volume + time, else Data Engine Asia Range / CVD go break
     if HAS_DE:
         try:
             price, _ = DE.get_price_live()
             k1 = DE.get_klines("1", 20)
-            candles = [{"open": k["open"], "high": k["high"], "low": k["low"], "close": k["close"]} for k in k1]
+            candles = [{"open": k["open"], "high": k["high"], "low": k["low"], "close": k["close"],
+                        "volume": k.get("volume", 1), "time": k.get("time", 0)} for k in k1]
             return price, candles
         except: pass
     try:
@@ -239,17 +248,18 @@ def calc_atr(candles):
     return sum(trs[-14:]) / len(trs[-14:]) if trs else 0.0
 
 # ------------------------------------------------------------
-# 6. MAIN LOOP
+# 6. MAIN LOOP - HUNTER WIRED
 # ------------------------------------------------------------
 def main():
     global in_position, side, entry, qty, be_done, daily_pnl, wins, losses, breakevens
 
-    log("V15.2.1 CLEAN STARTED | ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20")
-    tg("🤖 <b>BTC Bot V15.2.1 CLEAN STARTED</b>\nISOLATED | Wide SL $1200 | TP $1500\nBE $500 -> Lock $20\nDyn Lev/Qty from V13")
+    log("V15.2.2 CLEAN + HUNTER STARTED | ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20")
+    tg("🤖 <b>BTC Bot V15.2.2 CLEAN + HUNTER STARTED</b>\nISOLATED | Wide SL $1200 | TP $1500\nBE $500 -> Lock $20\nDyn Lev/Qty from V13\nHunter Live ON")
     set_isolated_margin()
     get_balance()
     log(f"Balance ${balance:.2f} | Lev {get_dynamic_leverage()}x")
     last_vote_time = 0
+    news_wait_until = 0
 
     while True:
         try:
@@ -266,7 +276,6 @@ def main():
                     set_sl_to_be()
 
                 if get_position() is None:
-                    # Closed by exchange SL/TP/BE
                     sl, tp = calc_sl_tp(entry, side)
                     fees = qty * entry * FEE_RATE * 2
                     gross = (price - entry) * qty if side == "LONG" else (entry - price) * qty
@@ -279,7 +288,7 @@ def main():
                     log(f"W{wins} L{losses} BE{breakevens} | PnL ${daily_pnl:.2f}")
                     tg(f"🔴 <b>CLOSED {result}</b>\nExit {price:.1f}\nNet ${net:.2f}\nW{wins} L{losses} BE{breakevens}\nDaily PNL ${daily_pnl:.2f}")
                     if HAS_DE and hasattr(DE, "save_trade"):
-                        try: DE.save_trade({"time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "side": side, "entry": entry, "exit": price, "move": round(profit_move, 1), "qty": qty, "net_pnl": round(net, 2), "result": result, "balance_after": round(balance, 2), "cert": votes.get("cert", 0), "atr": round(atr, 1), "sl": sl, "tp": tp, "lev": leverage, "margin": "ISOLATED"})
+                        try: DE.save_trade({"time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "side": side, "entry": entry, "exit": price, "move": round(profit_move, 1), "qty": qty, "net_pnl": round(net, 2), "result": result, "balance_after": round(balance, 2), "cert": votes.get("cert", 0), "atr": round(atr, 1), "sl": sl, "tp": tp, "lev": leverage, "margin": "ISOLATED", "hunter_score": votes.get("hunter_score", 0), "hunter_bias": votes.get("hunter_bias", "NEUTRAL")})
                         except Exception as e: log(f"Save trade error {e}")
                     in_position = False; side = None; entry = 0.0; qty = 0.0; be_done = False
                     get_balance()
@@ -292,21 +301,45 @@ def main():
             if time.time() - last_vote_time < 5: continue
             last_vote_time = time.time()
 
+            # Real news wait - if we set news_wait_until, actually wait
+            if time.time() < news_wait_until:
+                log(f"📰 NEWS WAIT until {int(news_wait_until - time.time())}s left")
+                continue
+
             v = get_votes(price, atr, candles)
             cert = v.get("cert", 0); direction = v.get("direction", "NONE"); agree = v.get("agree", 0)
+            # HUNTER FIELDS - NEW
+            hunter_score = v.get("hunter_score", 0); hunter_bias = v.get("hunter_bias", "NEUTRAL")
+            hunter_wait = v.get("hunter_wait", False); hunter_wait_reason = v.get("hunter_wait_reason", "")
+            spot_prem = v.get("spot_premium_usd", 0)
+            fc = v.get("funding_cascade", {}) or {}
+            liq_c = v.get("liq_clusters", {}) or {}
+            pause_reason = v.get("pause_reason", "")
             lev = get_dynamic_leverage()
             qty_preview = get_dynamic_qty(price, lev)
             wsl_preview, tp_preview = calc_sl_tp(price, direction) if direction in ("LONG", "SHORT") else (0, 0)
 
             log(f"Price ${price:.0f} | ATR {atr:.0f} (log only) | {direction} Cert {cert}% Agree {agree}/8 | Bal ${balance:.2f}")
+            log(f"HUNTER {hunter_bias} {hunter_score} Wait={hunter_wait} | Liq Long ${liq_c.get('long_liq',0):,.0f} Short ${liq_c.get('short_liq',0):,.0f} ({liq_c.get('dominant','?')}) | Spot Prem ${spot_prem:.0f} | CVD Live {v.get('cvd_live',{}).get('buy_pct',50)}% | FundingCascade {fc.get('risk','NONE')} | PauseReason {pause_reason}")
+            if hunter_wait_reason:
+                log(f"👀 HUNTER WAIT: {hunter_wait_reason}")
             log(f"Qty {qty_preview} Lev {lev}x | WideSL ${wsl_preview:.0f} TP ${tp_preview:.0f} BE $500 | W{wins} L{losses} BE{breakevens} PnL ${daily_pnl:.2f}")
 
             if daily_pnl <= -MAX_DAILY_LOSS:
                 log(f"🛑 DAILY LOSS LIMIT ${daily_pnl:.2f}"); time.sleep(60); continue
             if v.get("news_critical") and cert < 90: log(f"📰 NEWS CRITICAL - Skip Cert {cert}%"); continue
-            if v.get("news_wait", 0) > 0: log(f"📰 NEWS WAIT {v.get('news_wait')}s"); continue
-            if direction == "LONG" and v.get("pause_long"): log("⏸️ PAUSE LONG"); continue
-            if direction == "SHORT" and v.get("pause_short"): log("⏸️ PAUSE SHORT"); continue
+            if v.get("news_wait", 0) > 0:
+                news_wait_until = time.time() + int(v.get("news_wait", 0))
+                log(f"📰 NEWS WAIT {v.get('news_wait')}s - set wait until")
+                continue
+            # HUNTER WAIT - NEW: hunters go sweep first, no enter yet
+            # Only block if hunter_wait AND hunter disagrees with our direction
+            # If hunter_bias == direction, e don agree, allow. If hunter_bias opposite, block.
+            if hunter_wait and hunter_bias != "NEUTRAL" and hunter_bias != direction and direction != "NONE":
+                log(f"👀 HUNTER WAIT BLOCK {direction} | Hunter {hunter_bias} {hunter_score} | {hunter_wait_reason}")
+                continue
+            if direction == "LONG" and v.get("pause_long"): log(f"⏸️ PAUSE LONG | {pause_reason}"); continue
+            if direction == "SHORT" and v.get("pause_short"): log(f"⏸️ PAUSE SHORT | {pause_reason}"); continue
             if v.get("hunt_soon") and cert < CERT_HUNT: log(f"👀 HUNT SOON - Waiting Cert {cert}%"); continue
 
             if direction in ("LONG", "SHORT") and cert >= CERT_MIN:
@@ -315,8 +348,8 @@ def main():
                 fees = qty_preview * price * FEE_RATE * 2
                 log(f"FEES CHECK TP Profit ${TP_DIST_USD * qty_preview:.2f} vs Fees ${fees:.2f} | SL Loss ${WIDE_SL_USD * qty_preview:.2f}")
                 order_side = "Buy" if direction == "LONG" else "Sell"
-                log(f"🚀 ENTER {direction} | Price ${price:.0f} | Qty {qty_preview} Lev {lev}x ISOLATED | SL ${sl:.0f} (-$1200) | TP ${tp:.0f} (+$1500) | BE $500 -> Lock $20 | Cert {cert}% Agree {agree}")
-                tg(f"🚀 <b>ENTER {direction}</b>\nPrice ${price:.0f}\nQty {qty_preview} Lev {lev}x ISOLATED\nSL ${sl:.0f} (-$1200)\nTP ${tp:.0f} (+$1500)\nBE $500 -> Lock $20\nCert {cert}% Agree {agree}/8")
+                log(f"🚀 ENTER {direction} | Price ${price:.0f} | Qty {qty_preview} Lev {lev}x ISOLATED | SL ${sl:.0f} (-$1200) | TP ${tp:.0f} (+$1500) | BE $500 -> Lock $20 | Cert {cert}% Agree {agree} | Hunter {hunter_bias} {hunter_score}")
+                tg(f"🚀 <b>ENTER {direction}</b>\nPrice ${price:.0f}\nQty {qty_preview} Lev {lev}x ISOLATED\nSL ${sl:.0f} (-$1200)\nTP ${tp:.0f} (+$1500)\nBE $500 -> Lock $20\nCert {cert}% Agree {agree}/8\nHunter {hunter_bias} {hunter_score}")
                 r = place_order(order_side, qty_preview, sl, tp)
                 if r.get("retCode", 1) == 0 or r.get("retMsg") == "OK":
                     in_position = True; side = direction; entry = price; qty = qty_preview; be_done = False
