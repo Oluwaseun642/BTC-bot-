@@ -1,7 +1,7 @@
 # ============================================================
-# MAIN.PY V15.1.0 - TRADING BRAIN
+# MAIN.PY V15.1.1 - TRADING BRAIN
 # CROSS | ATR SL | $500 BE TRIGGER | JSON via DATA ENGINE
-# + FAKE PORT for Render Free Web Service (No open ports fix)
+# + FAKE PORT for Render Free Web Service (HEAD + GET fix for UptimeRobot)
 # ============================================================
 import os, time, threading, hmac, hashlib, json
 from datetime import datetime, timezone
@@ -13,13 +13,28 @@ import requests
 # Render Web Service dey expect port. Bot no be website, so we open
 # small fake port make Render see "open port" and no kill am.
 # This must be FIRST, before anything else.
+# REMOVED: old do_GET only - e dey cause 501 for HEAD (UptimeRobot)
+# ADDED: _ok() + do_HEAD + do_GET + do_POST + do_PUT + do_DELETE + do_OPTIONS
 # ------------------------------------------------------------
 def _keep_port():
     try:
         port = int(os.environ.get("PORT", 10000))
         class H(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200); self.end_headers(); self.wfile.write(b"BTC-BOT V15 RUNNING")
+            def _ok(self, with_body=True):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "19" if with_body else "0")
+                self.end_headers()
+                if with_body:
+                    try:
+                        self.wfile.write(b"BTC-BOT V15 RUNNING")
+                    except: pass
+            def do_GET(self): self._ok(with_body=True)
+            def do_HEAD(self): self._ok(with_body=False)
+            def do_POST(self): self._ok(with_body=True)
+            def do_PUT(self): self._ok(with_body=True)
+            def do_DELETE(self): self._ok(with_body=True)
+            def do_OPTIONS(self): self._ok(with_body=True)
             def log_message(self, *a): pass
         HTTPServer(("0.0.0.0", port), H).serve_forever()
     except Exception as e:
