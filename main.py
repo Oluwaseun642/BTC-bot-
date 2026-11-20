@@ -7,6 +7,7 @@
 # ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20
 # DYNAMIC LEV/QTY FROM LIVE BYBIT BALANCE | NO HARDCODED BTC PRICE
 # NO DUPLICATES, NO DEAD CODE
+# KEY CHECKER PATCH: Log key len + first 4 chars on startup
 # ============================================================
 import os, time, threading, hmac, hashlib, json
 from datetime import datetime, timezone
@@ -46,10 +47,10 @@ except Exception as e:
     HAS_DE = False
     print(f"❌ Data Engine NOT Found: {e}", flush=True)
 
-BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "")
-BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "").strip()
+BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 SYMBOL = "BTCUSDT"
 CATEGORY = "linear"
 BASE_URL = "https://api.bybit.com"
@@ -263,6 +264,8 @@ def calc_atr(candles):
 def main():
     global in_position, side, entry, qty, be_done, daily_pnl, wins, losses, breakevens
     log("V15.6 CURATED WITH DATA ENGINE V15.6 | ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20 | FIRST AID ON | SPREAD BOOSTER ON | BYBIT V5 UTA2.0 AUTH")
+    # --- KEY CHECKER PATCH: prove if Render gave us the key or not ---
+    log(f"DEBUG KEY LEN {len(BYBIT_API_KEY)} START {BYBIT_API_KEY[:4]}**** | SECRET LEN {len(BYBIT_API_SECRET)}")
     tg("🤖 <b>BTC Bot V15.6 STARTED</b>\nISOLATED | Wide SL $1200 | TP $1500\nBE $500 -> Lock $20\nFirst Aid ON | Sweep ON\nSpread Booster ON\nBybit V5 UTA2.0 Auth")
     set_isolated_margin()
     get_balance()
