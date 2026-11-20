@@ -1,5 +1,6 @@
 # ============================================================
-# MAIN.PY V15.5 - CURATED WITH DATA ENGINE V15.5
+# MAIN.PY V15.6 - CURATED WITH DATA ENGINE V15.6 GOLD BOSS
+# BYBIT V5 UTA 2.0 AUTH: Headers X-BPI-APIKEY / SIGN / TIMESTAMP
 # SPREAD AS BOOSTER: +10% cert only when Worldwide + Hunter agree, never solo
 # FIRST AID: Close / Flip on worldwide flip. SWEEP: Enter immediately.
 # HUNT: Only block if hunt_soon + hunter_wait + no first_aid + no sweep
@@ -7,7 +8,7 @@
 # DYNAMIC LEV/QTY FROM LIVE BYBIT BALANCE | NO HARDCODED BTC PRICE
 # NO DUPLICATES, NO DEAD CODE
 # ============================================================
-import os, time, threading, hmac, hashlib
+import os, time, threading, hmac, hashlib, json
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
@@ -38,7 +39,7 @@ threading.Thread(target=_keep_port, daemon=True).start()
 
 try:
     import data_engine as DE
-    print("✅ Data Engine Connected V15.5", flush=True)
+    print("✅ Data Engine Connected V15.6", flush=True)
     HAS_DE = True
 except Exception as e:
     DE = None
@@ -86,25 +87,46 @@ def tg(msg):
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
     except: pass
 
-def _sign(params):
-    qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    return hmac.new(BYBIT_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+# ------------------------------------------------------------
+# V15.6 FIX: BYBIT V5 UTA 2.0 AUTH - HEADERS, NOT QUERY PARAM
+# Old V3: api_key + timestamp + sign in query -> REJECTED 110088
+# New V5: X-BPI-APIKEY / X-BPI-SIGN / X-BPI-TIMESTAMP / X-BPI-RECV-WINDOW
+# Sign = HMAC_SHA256(secret, timestamp + api_key + recv_window + payload)
+# GET payload = query string, POST payload = JSON body string
+# ------------------------------------------------------------
+RECV_WINDOW = "5000"
+
+def _sign_v5(payload_str, ts):
+    msg = ts + BYBIT_API_KEY + RECV_WINDOW + payload_str
+    return hmac.new(BYBIT_API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+def _headers(sign, ts):
+    return {
+        "X-BPI-APIKEY": BYBIT_API_KEY,
+        "X-BPI-SIGN": sign,
+        "X-BPI-SIGN-TYPE": "2",
+        "X-BPI-TIMESTAMP": ts,
+        "X-BPI-RECV-WINDOW": RECV_WINDOW,
+        "Content-Type": "application/json"
+    }
 
 def bybit_get(path, params):
     try:
         ts = str(int(time.time() * 1000))
-        params["api_key"] = BYBIT_API_KEY; params["timestamp"] = ts; params["recv_window"] = "5000"
-        params["sign"] = _sign(params)
-        return requests.get(BASE_URL + path, params=params, timeout=10).json()
+        params = dict(params or {})
+        qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        sign = _sign_v5(qs, ts)
+        url = BASE_URL + path + (f"?{qs}" if qs else "")
+        return requests.get(url, headers=_headers(sign, ts), timeout=10).json()
     except Exception as e:
         log(f"Bybit GET error {e}"); return {}
 
 def bybit_post(path, params):
     try:
         ts = str(int(time.time() * 1000))
-        params["api_key"] = BYBIT_API_KEY; params["timestamp"] = ts; params["recv_window"] = "5000"
-        params["sign"] = _sign(params)
-        return requests.post(BASE_URL + path, data=params, timeout=10).json()
+        body = json.dumps(params or {})
+        sign = _sign_v5(body, ts)
+        return requests.post(BASE_URL + path, headers=_headers(sign, ts), data=body, timeout=10).json()
     except Exception as e:
         log(f"Bybit POST error {e}"); return {}
 
@@ -240,8 +262,8 @@ def calc_atr(candles):
 
 def main():
     global in_position, side, entry, qty, be_done, daily_pnl, wins, losses, breakevens
-    log("V15.5 CURATED WITH DATA ENGINE V15.5 | ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20 | FIRST AID ON | SPREAD BOOSTER ON")
-    tg("🤖 <b>BTC Bot V15.5 STARTED</b>\nISOLATED | Wide SL $1200 | TP $1500\nBE $500 -> Lock $20\nFirst Aid ON | Sweep ON\nSpread Booster ON")
+    log("V15.6 CURATED WITH DATA ENGINE V15.6 | ISOLATED | WIDE SL $1200 | TP $1500 | BE $500 -> LOCK $20 | FIRST AID ON | SPREAD BOOSTER ON | BYBIT V5 UTA2.0 AUTH")
+    tg("🤖 <b>BTC Bot V15.6 STARTED</b>\nISOLATED | Wide SL $1200 | TP $1500\nBE $500 -> Lock $20\nFirst Aid ON | Sweep ON\nSpread Booster ON\nBybit V5 UTA2.0 Auth")
     set_isolated_margin()
     get_balance()
     log(f"Balance ${balance:.2f} | Lev {get_dynamic_leverage()}x")
