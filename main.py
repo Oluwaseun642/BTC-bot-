@@ -1,17 +1,19 @@
-# MAIN.PY - TEST 4 - MIRROR TEST, NO BYBIT
-import os, requests, json
+# MAIN.PY - TEST 5 - MAINNET vs TESTNET
+import os, time, hmac, hashlib, requests
 KEY = os.environ.get("BYBIT_API_KEY","").strip()
-print(f"TEST4 KEY {KEY[:4]}**** LEN {len(KEY)}", flush=True)
+SEC = os.environ.get("BYBIT_API_SECRET","").strip()
+RW = "5000"
+print(f"TEST5 KEY {KEY[:4]}**** LEN {len(KEY)}", flush=True)
+def test(base, label):
+    ts = str(int(time.time()*1000))
+    qs = "accountType=UNIFIED"
+    msg = ts + KEY + RW + qs
+    sign = hmac.new(SEC.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    h = {"X-BPI-APIKEY": KEY, "X-BPI-SIGN": sign, "X-BPI-SIGN-TYPE": "2", "X-BPI-TIMESTAMP": ts, "X-BPI-RECV-WINDOW": RW, "User-Agent": "Mozilla/5.0"}
+    r = requests.get(f"{base}/v5/account/wallet-balance?{qs}", headers=h, timeout=10)
+    print(f"{label} -> Status: {r.status_code} Body: {r.text[:300]}", flush=True)
 
-# Send to httpbin - e go echo back wetin e receive
-h = {
-    "X-BPI-APIKEY": KEY,
-    "X-BPI-SIGN": "test123",
-    "User-Agent": "Mozilla/5.0"
-}
-print(f"We send headers: {list(h.keys())}", flush=True)
-r = requests.get("https://httpbin.org/headers", headers=h, timeout=10)
-print(f"Status: {r.status_code}", flush=True)
-print(f"httpbin saw: {r.text[:1000]}", flush=True)
-print("\n=== TEST4 DONE ===", flush=True)
+test("https://api.bybit.com", "1. MAINNET")
+test("https://api-testnet.bybit.com", "2. TESTNET")
+print("=== TEST5 DONE ===", flush=True)
 import time; time.sleep(30)
