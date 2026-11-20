@@ -1,18 +1,20 @@
-# MAIN.PY - TEST 6 - WALLET VIA BYTICK
-import os, time, hmac, hashlib, requests
+# TEST 7 - V13 EXACT HEADERS
+import os, time, hmac, hashlib, json, requests
 KEY = os.environ.get("BYBIT_API_KEY","").strip()
 SEC = os.environ.get("BYBIT_API_SECRET","").strip()
-RW = "5000"
-print(f"TEST6 KEY {KEY[:4]}**** LEN {len(KEY)}", flush=True)
-def test(base, label):
-    ts = str(int(time.time()*1000))
-    qs = "accountType=UNIFIED"
-    sign = hmac.new(SEC.encode(), (ts+KEY+RW+qs).encode(), hashlib.sha256).hexdigest()
-    h = {"X-BPI-APIKEY": KEY, "X-BPI-SIGN": sign, "X-BPI-SIGN-TYPE": "2", "X-BPI-TIMESTAMP": ts, "X-BPI-RECV-WINDOW": RW, "User-Agent": "Mozilla/5.0"}
-    r = requests.get(f"{base}/v5/account/wallet-balance?{qs}", headers=h, timeout=10)
-    print(f"{label} -> Status: {r.status_code} Body: {r.text[:400]}", flush=True)
+print(f"TEST7 KEY {KEY[:4]}**** LEN {len(KEY)}", flush=True)
 
-test("https://api.bybit.com", "1. api.bybit.com")
-test("https://api.bytick.com", "2. api.bytick.com")
-print("=== TEST6 DONE ===", flush=True)
+def bybit_get(path, params):
+    ts = str(int(time.time()*1000)); rw = "5000"
+    qs = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
+    payload = f"{ts}{KEY}{rw}{qs}"
+    sign = hmac.new(SEC.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    h = {"X-BAPI-API-KEY": KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw, "X-BAPI-SIGN": sign}
+    r = requests.get("https://api.bybit.com"+path, params=params, headers=h, timeout=10)
+    print(f"Status: {r.status_code} Body: {r.text[:500]}", flush=True)
+    return r.text
+
+print("--- 1. WALLET with X-BAPI (V13 style) ---", flush=True)
+bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+print("=== TEST7 DONE ===", flush=True)
 import time; time.sleep(30)
