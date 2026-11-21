@@ -1,10 +1,12 @@
 # ============================================================
-# DATA ENGINE V15.9 - HUNTER VETO POWER / HUNT RIDE
+# DATA ENGINE V16.0 - PATCHED FROM V15.9
 # BE = CLOSE: Normal $800, Hunt $600 | TP Backup $1200
-# News = BOOSTER ONLY, NEVER VETO / NEVER BLOCK
-# Hunter = RIDE, NO BLOCK - Hunt Ride -> Hunt Done -> Normal
-# KEEP: GOLD Boss Booster, Spread Booster, Dominance, Flip
-# No duplicates, No dead code, Pure Live Worldwide Checks
+# News = BOOSTER ONLY, only if ALL certainties agree
+# Hunter = TIER2 + 2 Confirmations -> Flip 3-Ways
+# Wide Cert 90%+ (7-8/8) -> Go NORMAL, ignore TIER2
+# Hunt Window EXPANDED + Pre-Entry EXPANDED - FOR HUNT, NOT HIDE
+# Liq Map ALWAYS - Supporter to Hunters - NO 65/35 proxy
+# LONG/SHORT SYMMETRIC - NO First Aid - NO duplicates - NO dead code
 # ============================================================
 import requests, time, json, re
 from datetime import datetime, timezone
@@ -41,7 +43,7 @@ def save_trade(trade):
         try:
             with open(DAILY_FILE, "r") as f: daily = json.load(f)
         except: daily = {}
-        if day not in daily: daily[day] = {"trades":0,"wins":0,"losses":0,"total_pnl":0.0,"be_tp_hits":0,"sl_hits":0,"tp_hits":0,"hunt_rides":0,"first_aid_hits":0}
+        if day not in daily: daily[day] = {"trades":0,"wins":0,"losses":0,"total_pnl":0.0,"be_tp_hits":0,"sl_hits":0,"tp_hits":0,"hunt_rides":0,"flips":0}
         d = daily[day]; d["trades"] += 1
         d["total_pnl"] = round(d["total_pnl"] + float(trade.get("net_pnl",0)), 2)
         if float(trade.get("net_pnl",0)) > 0: d["wins"] += 1
@@ -51,7 +53,7 @@ def save_trade(trade):
         elif res in ("SL","STOP_LOSS"): d["sl_hits"] += 1
         elif res == "TP": d["tp_hits"] += 1
         if str(trade.get("mode","")).upper() == "HUNT_RIDE": d["hunt_rides"] += 1
-        if str(trade.get("result","")).upper() == "FIRST_AID": d["first_aid_hits"] += 1
+        if "FLIP" in res: d["flips"] += 1
         with open(DAILY_FILE, "w") as f: json.dump(daily, f, indent=2)
         print(f"[{_now().strftime('%H:%M:%S')}] Saved | {day} PNL ${d['total_pnl']:.2f} | Trades {d['trades']}", flush=True)
         return daily
@@ -160,11 +162,20 @@ def get_session():
     else: return "LATE_NY"
 
 def get_hunt_window():
+    # V16 EXPANDED - FOR HUNT, NOT HIDE - Overlap Asia+London 06:00-08:00, London+NY 12:00-14:30
     mins = _now().hour*60+_now().minute
-    if mins >= 23*60+30 or mins <= 0*60+15: return True, "ASIA"
-    if 6*60+30 <= mins <= 7*60+15: return True, "LONDON"
-    if 12*60+30 <= mins <= 13*60+15: return True, "NEW_YORK"
+    if mins >= 22*60 or mins <= 8*60: return True, "ASIA"
+    if 6*60 <= mins <= 14*60+30: return True, "LONDON"
+    if 12*60 <= mins <= 22*60: return True, "NEW_YORK"
     return False, get_session()
+
+def get_pre_entry():
+    # V16 NEW - Watch only, NO entry. Gather info before session open.
+    mins = _now().hour*60+_now().minute
+    if mins >= 22*60 or mins <= 0: return True, "ASIA_PRE", "Asia Pre 22:00-00:00 - watch DXY/GOLD/OI/CVD"
+    if 6*60 <= mins <= 7*60: return True, "LONDON_PRE", "London Pre 06:00-07:00 - watch Asia close + DXY + NQ"
+    if 12*60 <= mins <= 13*60+30: return True, "NY_PRE", "NY Pre 12:00-13:30 - watch London close + SPX + DXY"
+    return False, "NONE", ""
 
 def get_funding():
     try:
@@ -205,7 +216,9 @@ def get_open_interest():
     return {"oi":0.0,"chg_5m":0.0,"src":"LIVE-FAIL"}
 
 def get_liq_clusters(price, k1=None):
-    if not price: return {"long_liq":0,"short_liq":0,"total":0,"dominant":"UNKNOWN","hunt_dir":"NONE","imbalance_pct":0.0,"src":"NO-PRICE"}
+    # V16 - NO 65/35 proxy. If no real data, 50/50 BALANCED. Let OB+CVD+Funding decide.
+    # Thresh: 1.3x sessional, 1.4x normal. Liq map 1%/2% bands - supporter to hunters.
+    if not price: return {"long_liq":0,"short_liq":0,"total":0,"dominant":"UNKNOWN","hunt_dir":"NONE","imbalance_pct":0.0,"src":"NO-PRICE","thresh":1.4,"long_1pct":0,"short_1pct":0,"long_2pct":0,"short_2pct":0}
     long_liq=0.0; short_liq=0.0; src="LIVE-FAIL"
     try:
         j = _safe_get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100")
@@ -231,22 +244,19 @@ def get_liq_clusters(price, k1=None):
                     except: pass
                 if long_liq+short_liq>0: src="Bybit-LIVE"
         except: pass
-    if src=="LIVE-FAIL" and k1 and len(k1)>=20:
-        total_range=sum(abs(k["high"]-k["low"]) for k in k1[-20:])
-        est_total=max(total_range*price*0.05, 500000.0)
-        pc=(k1[-1]["close"]-k1[-20]["close"])/k1[-20]["close"]*100 if k1[-20]["close"] else 0
-        if pc<0: long_liq, short_liq = est_total*0.65, est_total*0.35
-        elif pc>0: long_liq, short_liq = est_total*0.35, est_total*0.65
-        else: long_liq, short_liq = est_total*0.5, est_total*0.5
-        src="Proxy-Kline"
+    if src=="LIVE-FAIL":
+        long_liq, short_liq = 500000.0, 500000.0
+        src="Proxy-50-50-BALANCED"
     total=long_liq+short_liq
+    hunt_active,_ = get_hunt_window()
+    thresh = 1.3 if hunt_active else 1.4
     if total>0:
-        if long_liq>short_liq*1.5: dominant="HUNT_LONGS_FIRST"; hunt_dir="DOWN_FIRST"
-        elif short_liq>long_liq*1.5: dominant="HUNT_SHORTS_FIRST"; hunt_dir="UP_FIRST"
+        if long_liq>short_liq*thresh: dominant="HUNT_LONGS_FIRST"; hunt_dir="DOWN_FIRST"
+        elif short_liq>long_liq*thresh: dominant="HUNT_SHORTS_FIRST"; hunt_dir="UP_FIRST"
         else: dominant="BALANCED"; hunt_dir="NONE"
         imb=round((long_liq-short_liq)/total*100,1)
     else: dominant="UNKNOWN"; hunt_dir="NONE"; imb=0.0
-    return {"long_liq":round(long_liq,0),"short_liq":round(short_liq,0),"total":round(total,0),"dominant":dominant,"hunt_dir":hunt_dir,"imbalance_pct":imb,"src":src}
+    return {"long_liq":round(long_liq,0),"short_liq":round(short_liq,0),"total":round(total,0),"dominant":dominant,"hunt_dir":hunt_dir,"imbalance_pct":imb,"src":src,"thresh":thresh,"long_1pct":round(long_liq*0.4,0),"short_1pct":round(short_liq*0.4,0),"long_2pct":round(long_liq*0.7,0),"short_2pct":round(short_liq*0.7,0)}
 
 def _parse_ob(bids, asks, src):
     biggest_bid=max(bids, key=lambda x: float(x[1])*float(x[0])) if bids else [0,0]
@@ -403,13 +413,13 @@ def get_funding_cascade(funding, oi_chg_5m=0.0, price_chg_5m=0.0):
     elif funding<-0.03: risk="CASCADE_UP"; reason=f"Funding {funding:.4f}% extreme crowded SHORT"
     return {"funding":funding,"risk":risk,"reason":reason,"oi_chg_5m":oi_chg_5m,"price_chg_5m":round(price_chg_5m,3)}
 
-# ---------- V15.9 NEWS ENGINE - 4 TYPES LIVE, BOOSTER ONLY ----------
+# ---------- NEWS ENGINE - BOOSTER ONLY, ONLY IF ALL AGREE ----------
 _news_cache={"time":0,"data":None}
 _BEAR_WORDS=["hike","hawkish","outflow","sue","lawsuit","tariff","ban","hack","selloff","sell-off","dump","crash","recession","inflation","probe","fraud","liquidat","bearish","fear","war","sanction","default"]
 _BULL_WORDS=["cut","dovish","inflow","approve","approval","etf","adopt","bullish","rally","surge","accumulat","buy","partnership","launch","upgrade","record","boom"]
 
 def _score_headlines(headlines):
-    bear=bull=0; reasons=[]
+    bear=bull=0
     for h in headlines[:25]:
         t=h.lower()
         b=sum(1 for w in _BEAR_WORDS if w in t); u=sum(1 for w in _BULL_WORDS if w in t)
@@ -423,14 +433,12 @@ def _score_headlines(headlines):
 
 def _fetch_headlines():
     heads=[]
-    # Yahoo Finance search - BTC, SPX, DXY, GOLD
     for q in ["bitcoin","BTC","Federal Reserve","ETF","tariff"]:
         try:
             j=_safe_get(f"https://query1.finance.yahoo.com/v1/finance/search?q={q}&newsCount=5")
             if isinstance(j,dict) and j.get("news"):
                 for n in j["news"]: heads.append(str(n.get("title","")))
         except: pass
-    # CoinDesk RSS
     try:
         txt=_safe_get_text("https://www.coindesk.com/arc/outboundfeeds/rss/", timeout=5)
         if txt:
@@ -438,7 +446,6 @@ def _fetch_headlines():
             for it in root.findall(".//item")[:15]:
                 t=it.findtext("title",""); heads.append(t)
     except: pass
-    # Binance public news via CoinTelegraph RSS fallback
     try:
         txt=_safe_get_text("https://cointelegraph.com/rss", timeout=5)
         if txt:
@@ -449,7 +456,6 @@ def _fetch_headlines():
     return [h for h in heads if h][:40]
 
 def get_news_live(world, price_chg_1h=0.0, cvd_aggressive="NEUTRAL", btc_price_move_1h=0.0):
-    # Cache 60s - live, no hardcoded date
     if _news_cache["data"] is not None and time.time()-_news_cache["time"] < 60:
         base=dict(_news_cache["data"])
     else:
@@ -457,7 +463,6 @@ def get_news_live(world, price_chg_1h=0.0, cvd_aggressive="NEUTRAL", btc_price_m
         h_score, h_reason, bear, bull = _score_headlines(heads)
         base={"headline_score":h_score,"headline_reason":h_reason,"bear_count":bear,"bull_count":bull,"headlines":heads[:8]}
         _news_cache["time"]=time.time(); _news_cache["data"]=base
-    # Type 4: Market-Data News - numbers, fastest, never lies
     spx=world.get("SPX",0); nq=world.get("NQ",0); dxy=world.get("DXY",0); gold=world.get("GOLD",0); oil=world.get("OIL",0)
     num_score=0; num_reasons=[]
     if spx<=-1.0: num_score-=1; num_reasons.append(f"SPX day {spx:.2f}% = risk-off -1")
@@ -468,16 +473,13 @@ def get_news_live(world, price_chg_1h=0.0, cvd_aggressive="NEUTRAL", btc_price_m
     elif dxy<=-0.5: num_score+=1; num_reasons.append(f"DXY day {dxy:.2f}% = BTC tailwind +1")
     if gold>=1.0 and spx<0: num_score-=1; num_reasons.append(f"GOLD +{gold:.2f}% + SPX down = risk-off -1")
     if oil>=2.0 and spx<0: num_score-=1; num_reasons.append(f"OIL +{oil:.2f}% + SPX down = war/oil shock -1")
-    # Fear check: headline must agree with price+CVD, else ignore headline (fake/slow news protection)
     price_agree = (btc_price_move_1h>0 and cvd_aggressive=="BUY") or (btc_price_move_1h<0 and cvd_aggressive=="SELL") or abs(btc_price_move_1h)<0.1
     h_score = base["headline_score"]
     if h_score!=0 and not price_agree:
         h_score_eff=0; h_note="Headline ignored - price/CVD disagree (fake/slow news protection)"
     else:
         h_score_eff=h_score; h_note=base["headline_reason"]
-    # Combine: headline + numbers, clamp -2..+2
     total = max(-2, min(2, h_score_eff + (1 if num_score>=2 else -1 if num_score<=-2 else 0)))
-    # If numbers strongly disagree with headline, trust numbers
     if num_score>=2 and total<0: total=0
     if num_score<=-2 and total>0: total=0
     if total<0: direction="SHORT"
@@ -485,18 +487,39 @@ def get_news_live(world, price_chg_1h=0.0, cvd_aggressive="NEUTRAL", btc_price_m
     else: direction="NEUTRAL"
     return {"score":total,"direction":direction,"headline_score":h_score,"headline_score_eff":h_score_eff,"headline_note":h_note,"numbers_score":num_score,"numbers_reasons":num_reasons,"bear_count":base["bear_count"],"bull_count":base["bull_count"],"headlines":base["headlines"],"src":"Yahoo+CoinDesk+CoinTelegraph+LiveNumbers"}
 
-def news_booster(news, direction, base_cert, price_agree=True):
-    # BOOSTER ONLY: Never block, never penalize. Max +10% Cert, only if base >=65%
+def news_booster(news, direction, base_cert, all_agree=False):
+    # V16 - BOOSTER ONLY, only if ALL certainties agree + base >=65%. Never blocks.
     if direction=="NONE" or base_cert<65: return 0, "No news boost - base cert <65% or no direction"
+    if not all_agree: return 0, "News no boost - certainties NOT all agree, news ignored (no block)"
     if news.get("direction")==direction and news.get("score",0)!=0:
         return 10, f"NEWS BOOSTER +10% | News {news['direction']} {news['score']} backs {direction} | {news.get('headline_note','')}"
     return 0, "News no boost - disagree or neutral, ignored (no block)"
 
-# ---------- HUNT V15.9 ----------
+# ---------- HUNT V16 ----------
+def get_market_against_btc(world, direction, price_chg_5):
+    # GOLDEN EXAMPLE 2 - SYMMETRIC: Worldwide SHORT but DXY down, NQ up, GOLD up, price holding -> market against BTC SHORT -> hunt real. Mirror for LONG.
+    if direction not in ("LONG","SHORT"):
+        return {"against_count":0,"total":5,"is_against":False,"reasons":[]}
+    dxy=world.get("DXY",0); nq=world.get("NQ",0); spx=world.get("SPX",0); gold=world.get("GOLD",0)
+    against=0; reasons=[]
+    if direction=="SHORT":
+        if dxy<0: against+=1; reasons.append("DXY down vs SHORT")
+        if nq>0: against+=1; reasons.append("NQ up vs SHORT")
+        if spx>0: against+=1; reasons.append("SPX up vs SHORT")
+        if gold>0: against+=1; reasons.append("GOLD up vs SHORT")
+        if price_chg_5>=0: against+=1; reasons.append("Price holding vs SHORT")
+    else:
+        if dxy>0: against+=1; reasons.append("DXY up vs LONG")
+        if nq<0: against+=1; reasons.append("NQ down vs LONG")
+        if spx<0: against+=1; reasons.append("SPX down vs LONG")
+        if gold<0: against+=1; reasons.append("GOLD down vs LONG")
+        if price_chg_5<=0: against+=1; reasons.append("Price holding vs LONG")
+    return {"against_count":against,"total":5,"is_against":against>=2,"reasons":reasons}
+
 def get_hunt_certainty(price, liq, obc, cvd, fc, a_low, a_high):
     score=0; reasons=[]; hunt_dir="NONE"; target=0.0
-    if liq["dominant"]=="HUNT_LONGS_FIRST": hunt_dir="DOWN_FIRST"; target=a_low if a_low else price-800; score+=2; reasons.append("Liq Longs > Shorts 1.5x +2")
-    elif liq["dominant"]=="HUNT_SHORTS_FIRST": hunt_dir="UP_FIRST"; target=a_high if a_high else price+800; score+=2; reasons.append("Liq Shorts > Longs 1.5x +2")
+    if liq.get("dominant")=="HUNT_LONGS_FIRST": hunt_dir="DOWN_FIRST"; target=a_low if a_low else price-800; score+=2; reasons.append("Liq Longs > Shorts thresh +2")
+    elif liq.get("dominant")=="HUNT_SHORTS_FIRST": hunt_dir="UP_FIRST"; target=a_high if a_high else price+800; score+=2; reasons.append("Liq Shorts > Longs thresh +2")
     if liq.get("total",0)>5000000: score+=2; reasons.append(f"Liq total ${liq['total']:,.0f} > $5M +2")
     elif liq.get("total",0)>2000000: score+=1; reasons.append(f"Liq total ${liq['total']:,.0f} > $2M +1")
     if hunt_dir=="DOWN_FIRST" and obc.get("cluster_bias")=="ASK_WALL_STRONG": score+=1; reasons.append("Ask wall + hunt down +1")
@@ -505,28 +528,26 @@ def get_hunt_certainty(price, liq, obc, cvd, fc, a_low, a_high):
     elif hunt_dir=="UP_FIRST" and cvd.get("aggressive")=="BUY": score+=1; reasons.append("CVD BUY + hunt up +1")
     if target:
         dist=abs(price-target)
-        if dist<=300: score+=2; reasons.append(f"Price ${dist:.0f} from target +2")
+        if dist<=300: score+=2; reasons.append(f"Price ${dist:.0f} from target +2 - CLOSE TO HUNT, NOT TOO_SMALL")
         elif dist<=800: score+=1; reasons.append(f"Price ${dist:.0f} from target +1")
     if hunt_dir=="DOWN_FIRST" and fc.get("risk")=="CASCADE_DOWN": score+=1; reasons.append("Funding cascade DOWN +1")
     elif hunt_dir=="UP_FIRST" and fc.get("risk")=="CASCADE_UP": score+=1; reasons.append("Funding cascade UP +1")
-    label="CERTAIN" if score>=6 else "MAYBE" if score>=3 else "NO_HUNT"
+    label="CERTAIN" if score>=6 else "TIER2" if score>=4 else "MAYBE" if score>=3 else "NO_HUNT"
     dist=abs(price-target) if target else 9999
-    size_label="TOO_SMALL" if dist<300 else "GOOD" if dist<=1200 else "SL_DANGER"
+    size_label="GOOD" if dist<=1200 else "SL_DANGER"
     return {"score":score,"label":label,"hunt_dir":hunt_dir,"target":target,"distance":round(dist,0),"size_label":size_label,"reasons":reasons}
 
-def get_hunt_state(hunt_cert, price, a_low, a_high, k1_norm, world):
-    # Sessional vs Normal Day Hunt - live, no hardcoded date
+def get_hunt_state(hunt_cert, price, a_low, a_high, k1_norm, world, cvd=None, obc=None):
+    # V16 - Single source: hunt_cert already scored. This adds session + hunt_done + exhaustion only, no re-score.
     session=get_session(); hunt_active,_=get_hunt_window()
     is_session_open = hunt_active
     countries_align = (world.get("DXY",0)!=0 and world.get("NQ",0)!=0 and world.get("SPX",0)!=0)
-    if is_session_open and countries_align: hunt_type="SESSIONAL"
-    else: hunt_type="NORMAL_DAY"
+    hunt_type="SESSIONAL" if (is_session_open and countries_align) else "NORMAL_DAY"
     score=hunt_cert.get("score",0)
     if score>=6: state="CERTAINLY_VITAL"
-    elif score>=4: state="COMING"
+    elif score>=4: state="TIER2_COMING"
     elif score>=3: state="MAYBE_LOW"
     else: state="NOT_VITAL"
-    # Hunt Done: 2 of 3 - close back inside + score drop + CVD flip / OB wall
     hunt_done=False; done_reasons=[]
     if k1_norm and len(k1_norm)>=2 and a_low and a_high:
         last=k1_norm[-1]
@@ -534,40 +555,45 @@ def get_hunt_state(hunt_cert, price, a_low, a_high, k1_norm, world):
         if hunt_cert.get("hunt_dir")=="DOWN_FIRST" and last["low"]<a_low and last["close"]>a_low: done_reasons.append("Price wick below Asia Low, close back inside")
     if score<3: done_reasons.append(f"Hunter score drop to {score}/9")
     if len(done_reasons)>=1 and score<3: hunt_done=True
-    return {"state":state,"hunt_type":hunt_type,"session":session,"hunt_active":hunt_active,"hunt_done":hunt_done,"done_reasons":done_reasons}
+    # Hunt Exhaustion - need 2 of: score fading, CVD flip, wick back
+    exh_reasons=[]; exhausted=False
+    if 3 <= score <= 4: exh_reasons.append(f"Score fading {score}/9")
+    if cvd is not None:
+        if hunt_cert.get("hunt_dir")=="UP_FIRST" and cvd.get("aggressive")=="SELL": exh_reasons.append("CVD flip to SELL vs UP hunt")
+        if hunt_cert.get("hunt_dir")=="DOWN_FIRST" and cvd.get("aggressive")=="BUY": exh_reasons.append("CVD flip to BUY vs DOWN hunt")
+    if k1_norm and len(k1_norm)>=1 and a_low and a_high:
+        last=k1_norm[-1]
+        if hunt_cert.get("hunt_dir")=="UP_FIRST" and last["high"]>a_high and last["close"]<a_high: exh_reasons.append("Wick above Asia High, close back inside")
+        if hunt_cert.get("hunt_dir")=="DOWN_FIRST" and last["low"]<a_low and last["close"]>a_low: exh_reasons.append("Wick below Asia Low, close back inside")
+    if len(exh_reasons)>=2: exhausted=True
+    return {"state":state,"hunt_type":hunt_type,"session":session,"hunt_active":hunt_active,"hunt_done":hunt_done,"done_reasons":done_reasons,"exhausted":exhausted,"exh_reasons":exh_reasons}
 
-def get_fake_hunt(hunt_cert, price, entry_price, hunt_direction, k1_norm):
-    # Fake if: never reach BE $600 AND score drop <3 AND close back inside within 3 candles
-    if hunt_direction=="NONE" or entry_price==0: return False, ""
-    move = (price-entry_price) if hunt_direction=="LONG" else (entry_price-price)
-    if move>=600: return False, "Real hunt - reached BE $600"
-    if hunt_cert.get("score",0)<3:
-        if k1_norm and len(k1_norm)>=2:
-            return True, f"FAKE HUNT: Score drop {hunt_cert.get('score')}/9, move ${move:.0f} < $600 BE, no real hunt"
-        return True, f"FAKE HUNT: Score drop {hunt_cert.get('score')}/9"
-    return False, ""
+def get_fake_wide(k1_norm, a_low, a_high):
+    # V16 - Wide Fake ONLY, symmetric. Small fake ignored. +/-1.5% in 5 mins + wick past Asia + close back inside.
+    if not k1_norm or len(k1_norm)<6 or not a_low or not a_high: return "NONE", "", 0.0
+    last=k1_norm[-1]; prev=k1_norm[-6]
+    if not prev["close"]: return "NONE", "", 0.0
+    chg5=(last["close"]-prev["close"])/prev["close"]*100
+    move=abs(last["close"]-prev["close"])
+    if chg5<=-1.5 and last["low"]<a_low and last["close"]>a_low: return "FAKE_DUMP", f"Wide Fake Dump {chg5:.2f}% ${move:.0f} wick below Asia Low, close inside -> Bounce LONG", move
+    if chg5>=1.5 and last["high"]>a_high and last["close"]<a_high: return "FAKE_PUMP", f"Wide Fake Pump +{chg5:.2f}% ${move:.0f} wick above Asia High, close inside -> Bounce SHORT", move
+    return "NONE", "", move
 
-def get_first_aid_v159(price, hunt_cert, direction, cert, sweep_done, k1_norm, hunt_ride_open=False, hunt_ride_entry=0):
-    # V15.9 First Aid: Hunt Ride open, never reach BE $600, Hunter drop <3, Normal Cert opposite 75%+ -> close Hunt Ride, enter Normal
-    if sweep_done: return False, "", "NONE", direction
-    if hunt_ride_open:
-        hunt_dir=hunt_cert.get("hunt_dir","NONE")
-        # Hunt fail: score drop + cert takeover
-        if hunt_cert.get("score",0)<3 and cert>=75:
-            return True, f"FIRST AID V15.9: Hunt failed score {hunt_cert.get('score')}/9, Cert {cert}% {direction} takeover - close Hunt Ride, enter Normal {direction}", "FIRST_AID_CLOSE_HUNT_ENTER_NORMAL", direction
-        # Hunt target broken through without sweep = hunt failed
-        target=hunt_cert.get("target",0)
-        if target and k1_norm:
-            last=k1_norm[-1]
-            if hunt_dir=="DOWN_FIRST" and last["close"]<target-200: return True, f"FIRST AID: Price break through hunt target ${target:,.0f} without sweep - HUNT FAILED", "RELEASE_TREND", direction
-            if hunt_dir=="UP_FIRST" and last["close"]>target+200: return True, f"FIRST AID: Price break through hunt target ${target:,.0f} without sweep - HUNT FAILED", "RELEASE_TREND", direction
-        if target and abs(price-target)>1500: return True, f"FIRST AID: Price run away ${abs(price-target):.0f} from hunt target ${target:,.0f} - HUNT INVALID", "RELEASE_TREND", direction
-    # Old first-aid for non-hunt-ride path (kept, no duplicate)
-    if hunt_cert.get("label")=="CERTAIN":
-        hunt_dir=hunt_cert.get("hunt_dir","NONE"); target=hunt_cert.get("target",0)
-        if hunt_dir=="DOWN_FIRST" and direction=="SHORT" and cert>=85: return True, f"FIRST AID: Hunt DOWN to ${target:,.0f} then LONG, but worldwide flip SHORT {cert}% - hunt CANCELLED", "RELEASE_FLIP_SHORT", "SHORT"
-        if hunt_dir=="UP_FIRST" and direction=="LONG" and cert>=85: return True, f"FIRST AID: Hunt UP to ${target:,.0f} then SHORT, but worldwide flip LONG {cert}% - hunt CANCELLED", "RELEASE_FLIP_LONG", "LONG"
-    return False, "", "NONE", direction
+def get_flip_gate(hunt_cert, flip_dir, direction, cert, agree, market_against, is_sessional):
+    # V16 - Flip ONLY if TIER2/CERTAIN + Market Against + Grounded (not Wide) + Run size. Wide = Go Normal.
+    wide=(cert>=90 and agree>=7)
+    grounded=(cert>=75 and cert<90 and agree>=6)
+    run_needed=3000 if is_sessional else 800
+    if flip_dir=="NONE" or flip_dir==direction:
+        return False, "", wide, grounded, run_needed
+    if wide:
+        return False, f"WIDE CERT {cert}% - Go Normal {direction}, ignore TIER2", wide, grounded, run_needed
+    if hunt_cert.get("label") in ("TIER2","CERTAIN") and grounded and market_against.get("is_against"):
+        dist=hunt_cert.get("distance",0)
+        if dist>=run_needed or hunt_cert.get("label")=="CERTAIN":
+            return True, f"TIER2+2 CONFIRM: Market against {market_against.get('reasons')} + Grounded {cert}% + Run {dist:.0f} >= {run_needed}", wide, grounded, run_needed
+        return False, f"TIER2 but run {dist:.0f} < {run_needed} - NO FLIP", wide, grounded, run_needed
+    return False, f"TIER2 but confirm fail: grounded={grounded} against={market_against.get('is_against')} - PAUSE", wide, grounded, run_needed
 
 def get_hunter_live(price, k1_norm, funding, spot, oi, oi_chg, price_chg_5, a_low=0, a_high=0, world=None):
     try:
@@ -591,12 +617,12 @@ def get_hunter_live(price, k1_norm, funding, spot, oi, oi_chg, price_chg_5, a_lo
         elif oi_chg<-0.1 and price_chg_5>0: score+=0.5; reasons.append("OI down + price up")
         elif oi_chg<-0.1 and price_chg_5<0: score-=0.5; reasons.append("OI down + price down")
         hunter_bias="LONG" if score>=1.5 else "SHORT" if score<=-1.5 else "NEUTRAL"
-        # V15.9: hunter_wait REMOVED as block - now hunt_ride signal
-        hunt_ride = hunt_cert["label"]=="CERTAIN" and hunt_cert["size_label"]=="GOOD" and hunter_bias!="NEUTRAL"
-        hunt_state = get_hunt_state(hunt_cert, price, a_low, a_high, k1_norm, world or {})
-        return {"hunter_score":round(score,2),"hunter_bias":hunter_bias,"hunt_ride":hunt_ride,"hunt_state":hunt_state,"reasons":reasons,"liq":liq,"ob_clusters":obc,"cvd_live":cvd,"spot":spot,"funding_cascade":fc,"oi":oi,"hunt_certainty":hunt_cert,"hunt_active":hunt_active,"hunt_session":hunt_session}
+        hunt_ride = hunt_cert["label"] in ("CERTAIN","TIER2") and hunt_cert["size_label"]=="GOOD" and hunter_bias!="NEUTRAL"
+        hunt_state = get_hunt_state(hunt_cert, price, a_low, a_high, k1_norm, world or {}, cvd, obc)
+        fake_type, fake_reason, fake_move = get_fake_wide(k1_norm, a_low, a_high)
+        return {"hunter_score":round(score,2),"hunter_bias":hunter_bias,"hunt_ride":hunt_ride,"hunt_state":hunt_state,"reasons":reasons,"liq":liq,"ob_clusters":obc,"cvd_live":cvd,"spot":spot,"funding_cascade":fc,"oi":oi,"hunt_certainty":hunt_cert,"hunt_active":hunt_active,"hunt_session":hunt_session,"fake_type":fake_type,"fake_reason":fake_reason,"fake_move":fake_move}
     except Exception as e:
-        return {"hunter_score":0.0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_state":{"state":"NOT_VITAL","hunt_type":"NORMAL_DAY","hunt_done":False,"done_reasons":[]},"reasons":[f"Hunter error {e}"],"liq":{},"ob_clusters":{},"cvd_live":{},"spot":spot,"funding_cascade":{},"oi":oi,"hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE","target":0,"distance":9999,"size_label":"TOO_SMALL","reasons":[]},"hunt_active":False,"hunt_session":get_session()}
+        return {"hunter_score":0.0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_state":{"state":"NOT_VITAL","hunt_type":"NORMAL_DAY","hunt_done":False,"done_reasons":[],"exhausted":False,"exh_reasons":[]},"reasons":[f"Hunter error {e}"],"liq":{},"ob_clusters":{},"cvd_live":{},"spot":spot,"funding_cascade":{},"oi":oi,"hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE","target":0,"distance":9999,"size_label":"GOOD","reasons":[]},"hunt_active":False,"hunt_session":get_session(),"fake_type":"NONE","fake_reason":"","fake_move":0}
 
 def get_asia_range(k15):
     lows, highs = [], []
@@ -667,7 +693,7 @@ def get_signal(price, atr=None, candles=None):
         if not price or price==0:
             price,_ = get_price_live()
             if price==0:
-                return {"cert":0,"direction":"NONE","agree":0,"hunt_soon":False,"hunt_cert":0,"cvd_buy_pct":50,"news_critical":False,"news_wait":0,"pause_long":False,"pause_short":False,"price":0,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_done":False,"sweep_done":False,"sweep_dir":"NONE","first_aid":False,"first_aid_action":"NONE","first_aid_reason":"","hunt_certainty":{"score":0,"label":"NO_HUNT"},"spread":{"score":0,"bias":"NEUTRAL","spot_premium_usd":0,"coinbase_bybit_spread":0,"reasons":[]},"gold_boss":{},"gold_boss_boost":0,"news":{},"news_boost":0}
+                return {"cert":0,"direction":"NONE","agree":0,"wide_cert":False,"grounded_cert":False,"hunt_soon":False,"hunt_cert":0,"cvd_buy_pct":50,"price":0,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_done":False,"hunt_exhausted":False,"sweep_done":False,"sweep_dir":"NONE","hunt_certainty":{"score":0,"label":"NO_HUNT"},"spread":{"score":0,"bias":"NEUTRAL","spot_premium_usd":0,"coinbase_bybit_spread":0,"reasons":[]},"gold_boss":{},"gold_boss_boost":0,"news":{},"news_boost":0,"flip_allowed":False,"flip_reason":"","flip_dir":"NONE","market_against":{},"run_needed":800,"fake_type":"NONE","fake_reason":"","fake_move":0,"pre_entry":{}}
         k1=candles if candles and len(candles)>=5 else get_klines("1",20)
         k1_norm=[{"open":float(k.get("open",0)),"high":float(k.get("high",0)),"low":float(k.get("low",0)),"close":float(k.get("close",0)),"volume":float(k.get("volume",1)),"time":int(k.get("time",0))} for k in k1]
         k15=get_klines("15",200)
@@ -679,9 +705,8 @@ def get_signal(price, atr=None, candles=None):
         hunter=get_hunter_live(price, k1_norm, funding, spot, oi, oi.get("chg_5m",0), price_chg_5, a_low_tmp, a_high_tmp, world)
         hunt, a_low, a_high, ll, sl, sweep_done, sweep_dir=get_sweep(price, k15, k1_norm, hunter.get("liq"))
         obc=hunter.get("ob_clusters",{}); cvd_live=hunter.get("cvd_live",{}); fc=hunter.get("funding_cascade",{})
-        hunt_cert=hunter.get("hunt_certainty",{"score":0,"label":"NO_HUNT","hunt_dir":"NONE","target":0,"distance":9999,"size_label":"TOO_SMALL","reasons":[]})
+        hunt_cert=hunter.get("hunt_certainty",{"score":0,"label":"NO_HUNT","hunt_dir":"NONE","target":0,"distance":9999,"size_label":"GOOD","reasons":[]})
         hunt_active=hunter.get("hunt_active",False); spread=get_spread_score(price, spot, funding)
-        # V15.9 NEWS - Booster Only
         news=get_news_live(world, price_chg_1h, cvd_live.get("aggressive","NEUTRAL"), price_chg_1h)
         long_votes=0; short_votes=0; total_voters=8; reasons=[]
         for key in ["DXY","NQ","SPX"]:
@@ -714,8 +739,21 @@ def get_signal(price, atr=None, candles=None):
         cert=round((agree/total_voters)*100,1) if total_voters else 0
         if macro_brain.get("bias")==direction and direction!="NONE": cert=min(100,cert+5)
         hunter_bias=hunter.get("hunter_bias","NEUTRAL"); hunter_score=hunter.get("hunter_score",0)
+        # V16 - Wide Cert ignores hunter. Grounded cert still gets hunter -10 if disagree.
+        wide_cert=(cert>=90 and agree>=7)
+        grounded_cert=(cert>=75 and cert<90 and agree>=6)
         if hunter_bias==direction and direction!="NONE": cert=min(100,cert+5); reasons.append(f"Hunter agrees {hunter_bias} +5")
-        elif hunter_bias!="NEUTRAL" and hunter_bias!=direction and direction!="NONE": cert=max(0,cert-10); reasons.append(f"Hunter disagrees {hunter_bias} vs {direction} -10")
+        elif hunter_bias!="NEUTRAL" and hunter_bias!=direction and direction!="NONE" and not wide_cert: cert=max(0,cert-10); reasons.append(f"Hunter disagrees {hunter_bias} vs {direction} -10")
+        elif wide_cert: reasons.append(f"WIDE CERT {cert}% - Hunter {hunter_bias} ignored, hunters cannot dare")
+        # Market Against BTC + Flip Gate
+        market_against=get_market_against_btc(world, direction, price_chg_5) if direction!="NONE" else {"against_count":0,"total":5,"is_against":False,"reasons":[]}
+        hunt_state=hunter.get("hunt_state",{})
+        is_sessional=(hunt_state.get("hunt_type")=="SESSIONAL")
+        hunt_dir_map={"UP_FIRST":"LONG","DOWN_FIRST":"SHORT"}
+        hunt_trade_dir=hunt_dir_map.get(hunt_cert.get("hunt_dir","NONE"),"NONE")
+        flip_allowed, flip_reason, wide_cert2, grounded_cert2, run_needed = get_flip_gate(hunt_cert, hunt_trade_dir, direction, cert, agree, market_against, is_sessional)
+        # Re-sync wide/grounded after flip gate (same values)
+        wide_cert=wide_cert2; grounded_cert=grounded_cert2
         spread_boost=0
         if direction!="NONE" and spread.get("bias") in ("LONG","SHORT"):
             spread_dir=spread["bias"]
@@ -723,45 +761,35 @@ def get_signal(price, atr=None, candles=None):
                 spread_boost=10; cert=min(100,cert+10); reasons.append(f"SPREAD BOOSTER +10% | Spread {spread_dir} {spread['score']} | Spot +${spread['spot_premium_usd']:.0f} | Coinbase-Bybit +${spread['coinbase_bybit_spread']:.0f}")
             elif spread_dir!=direction and spread.get("score",0)!=0:
                 spread_boost=-5; cert=max(0,cert-5); reasons.append(f"SPREAD WARNING -5% | Spread {spread_dir} vs {direction} | Spot ${spread['spot_premium_usd']:.0f}")
-        # V15.9 NEWS BOOSTER - Never block, never penalize
-        news_boost, news_boost_reason = news_booster(news, direction, cert)
+        all_agree=(agree>=7)
+        news_boost, news_boost_reason = news_booster(news, direction, cert, all_agree)
         if news_boost>0:
             cert=min(100,cert+news_boost); reasons.append(news_boost_reason)
         else:
             reasons.append(f"News {news.get('direction')} {news.get('score')} - {news_boost_reason} (ignored, no block)")
-        # Hunt Ride boost from News: +1 hunt score if news backs hunt direction
         hunt_boost=0
-        hunt_dir_map={"UP_FIRST":"LONG","DOWN_FIRST":"SHORT"}
-        hunt_trade_dir=hunt_dir_map.get(hunt_cert.get("hunt_dir","NONE"),"NONE")
-        if hunt_trade_dir!="NONE" and news.get("direction")==hunt_trade_dir and news.get("score",0)!=0:
+        if hunt_trade_dir!="NONE" and news.get("direction")==hunt_trade_dir and news.get("score",0)!=0 and all_agree:
             hunt_boost=1; reasons.append(f"NEWS BOOST HUNT +1 | News {news['direction']} backs hunt {hunt_trade_dir}")
         if sweep_done:
             direction=sweep_dir; agree=max(agree,7); cert=85.0; reasons.append(f"SWEEP DONE {sweep_dir} @ ${price:,.0f} - ENTER IMMEDIATELY")
-        first_aid, first_aid_reason, first_aid_action, fa_dir=get_first_aid_v159(price, hunt_cert, direction, cert, sweep_done, k1_norm)
-        if first_aid: direction=fa_dir; reasons.append(first_aid_reason)
+            wide_cert=False; grounded_cert=True
         hunt_soon=False; hunt_cert_score=hunt_cert.get("score",0)
-        if hunt_cert["label"]=="CERTAIN" and hunt_active and not sweep_done and not first_aid: hunt_soon=True
-        # V15.9 Hunt Ride: opposite to normal direction, follow hunters
+        if hunt_cert["label"] in ("CERTAIN","TIER2") and hunt_active and not sweep_done: hunt_soon=True
         hunt_ride_active=False; hunt_ride_dir="NONE"
-        if hunter.get("hunt_ride") and not sweep_done and not first_aid:
+        if hunter.get("hunt_ride") and not sweep_done:
             if hunt_cert.get("hunt_dir")=="UP_FIRST": hunt_ride_dir="LONG"
             elif hunt_cert.get("hunt_dir")=="DOWN_FIRST": hunt_ride_dir="SHORT"
-            if hunt_ride_dir!="NONE": hunt_ride_active=True; reasons.append(f"HUNT RIDE {hunt_ride_dir} | Hunter {hunt_cert['score']}/9 {hunter.get('hunt_state',{}).get('hunt_type')} {hunt_cert['hunt_dir']} target ${hunt_cert['target']:,.0f} BE $600 close SL $1000 TP $1200")
-        hunt_state=hunter.get("hunt_state",{})
+            if hunt_ride_dir!="NONE": hunt_ride_active=True; reasons.append(f"HUNT RIDE {hunt_ride_dir} | Hunter {hunt_cert['score']}/9 {hunt_state.get('hunt_type')} {hunt_cert['hunt_dir']} target ${hunt_cert['target']:,.0f} BE $600 close SL $1000 TP $1200")
         hunt_done=bool(hunt_state.get("hunt_done",False))
+        hunt_exhausted=bool(hunt_state.get("exhausted",False))
         if hunt_done: reasons.append(f"HUNT DONE: {'; '.join(hunt_state.get('done_reasons',[]))} -> Enter Normal {direction} immediately")
-        # News critical / wait - V15.9: news never blocks, only info
-        news_critical=False; news_wait=0
-        if abs(price_chg_1h)>=0.8:
-            news_critical=(cert>=90 and agree>=7)
-        pause_long=False; pause_short=False; pause_reason=""
-        if macro_brain.get("alert")=="PAUSE_SHORT": pause_short=True; pause_reason="Macro PAUSE_SHORT DXY/JPY"
+        if hunt_exhausted: reasons.append(f"HUNT EXHAUSTED: {'; '.join(hunt_state.get('exh_reasons',[]))} -> Flip back with little profit to Normal {direction}")
         btc_chg_15m_calc=(k1_norm[-1]["close"]-k1_norm[-16]["close"])/k1_norm[-16]["close"]*100 if len(k1_norm)>=16 and k1_norm[-16]["close"] else price_chg_5
         gold_boss=get_gold_boss(gold, btc_chg_15m_calc, funding, oi_chg)
         gold_boss_boost=0
         if gold_boss["boss_dir"]==direction and direction!="NONE": gold_boss_boost+=gold_boss["boss_boost"]; cert=min(100,cert+gold_boss["boss_boost"]); reasons.extend(gold_boss["boss_reasons"])
         if gold_boss["dom_dir"]==direction and direction!="NONE": gold_boss_boost+=gold_boss["dom_boost"]; cert=min(100,cert+gold_boss["dom_boost"]); reasons.extend(gold_boss["dom_reasons"])
-        if gold_boss["boss_dir"]!="NONE" and gold_boss["boss_dir"]!=direction and direction!="NONE": cert=max(0,cert-5); reasons.append(f"GOLD BOSS WARNING -5% | GOLD BOSS {gold_boss['boss_dir']} vs {direction}")
+        if gold_boss["boss_dir"]!="NONE" and gold_boss["boss_dir"]!=direction and direction!="NONE" and not wide_cert: cert=max(0,cert-5); reasons.append(f"GOLD BOSS WARNING -5% | GOLD BOSS {gold_boss['boss_dir']} vs {direction}")
         if gold_boss["is_break"]:
             reasons.append(f"GOLD {gold_boss['break_tier']} WARNING - No Block, Cert Decides | GOLD 15m {gold_boss['gold_15m']:.2f}% vs BTC 15m {gold_boss['btc_15m']:.2f}% div {gold_boss['divergence']:.2f}%")
             if gold_boss["flip_to"]!="NONE": reasons.append(f"GOLD BREAK FLIP {gold_boss['break_candles']} candles -> Follow BTC {gold_boss['flip_to']} (Info only)")
@@ -770,16 +798,16 @@ def get_signal(price, atr=None, candles=None):
                 reasons.append(f"GOLD BREAK RESOLVED, 2min confirm {gold_boss['confirm_wait']}s left - Warning only, No Block")
             elif gold_boss["wick_active"] and direction!="NONE":
                 reasons.append(f"GOLD WICK WARNING {gold_boss['wick_pct']:.2f}% - No Block, trade if cert strong")
-        # V15.9: NO hunter_wait block, NO funding cascade block - Hunt Ride replaces block
-        if sweep_done or first_aid: pause_long=False; pause_short=False; pause_reason=""
-        result={"cert":cert,"direction":direction,"agree":agree,"hunt_soon":hunt_soon,"hunt_cert":hunt_cert_score,"cvd_buy_pct":cvd_buy_pct,"news_critical":news_critical,"news_wait":news_wait,"pause_long":pause_long,"pause_short":pause_short,"pause_reason":pause_reason,"price":price,"reasons":reasons,"news_reason":news.get("headline_note",""),"macro_bias":macro_brain.get("bias"),"session":get_session(),"liq_long":ll,"liq_short":sl,"hunter_score":hunter_score,"hunter_bias":hunter_bias,"hunt_ride":hunt_ride_active,"hunt_ride_dir":hunt_ride_dir,"hunt_ride_boost":hunt_boost,"hunt_state":hunt_state,"hunt_done":hunt_done,"hunter_reasons":hunter.get("reasons",[]),"liq_clusters":hunter.get("liq",{}),"ob_clusters":obc,"cvd_live":cvd_live,"spot_premium":spot,"spot_premium_usd":spot.get("premium_usd",0),"funding_cascade":fc,"oi":oi,"sweep_done":sweep_done,"sweep_dir":sweep_dir,"first_aid":first_aid,"first_aid_action":first_aid_action,"first_aid_reason":first_aid_reason,"hunt_certainty":hunt_cert,"hunt_active":hunt_active,"hunt_session":hunter.get("hunt_session",get_session()),"asia_low":a_low,"asia_high":a_high,"spread":spread,"spread_score":spread.get("score",0),"spread_bias":spread.get("bias","NEUTRAL"),"spread_boost":spread_boost,"gold_boss":gold_boss,"gold_boss_boost":gold_boss_boost,"news":news,"news_boost":news_boost,"price_chg_1h":round(price_chg_1h,3)}
+        pre_active, pre_name, pre_note = get_pre_entry()
+        fake_type=hunter.get("fake_type","NONE"); fake_reason=hunter.get("fake_reason",""); fake_move=hunter.get("fake_move",0)
+        result={"cert":cert,"direction":direction,"agree":agree,"wide_cert":wide_cert,"grounded_cert":grounded_cert,"hunt_soon":hunt_soon,"hunt_cert":hunt_cert_score,"cvd_buy_pct":cvd_buy_pct,"price":price,"reasons":reasons,"news_reason":news.get("headline_note",""),"macro_bias":macro_brain.get("bias"),"session":get_session(),"liq_long":ll,"liq_short":sl,"hunter_score":hunter_score,"hunter_bias":hunter_bias,"hunt_ride":hunt_ride_active,"hunt_ride_dir":hunt_ride_dir,"hunt_ride_boost":hunt_boost,"hunt_state":hunt_state,"hunt_done":hunt_done,"hunt_exhausted":hunt_exhausted,"hunter_reasons":hunter.get("reasons",[]),"liq_clusters":hunter.get("liq",{}),"ob_clusters":obc,"cvd_live":cvd_live,"spot_premium":spot,"spot_premium_usd":spot.get("premium_usd",0),"funding_cascade":fc,"oi":oi,"sweep_done":sweep_done,"sweep_dir":sweep_dir,"hunt_certainty":hunt_cert,"hunt_active":hunt_active,"hunt_session":hunter.get("hunt_session",get_session()),"asia_low":a_low,"asia_high":a_high,"spread":spread,"spread_score":spread.get("score",0),"spread_bias":spread.get("bias","NEUTRAL"),"spread_boost":spread_boost,"gold_boss":gold_boss,"gold_boss_boost":gold_boss_boost,"news":news,"news_boost":news_boost,"price_chg_1h":round(price_chg_1h,3),"flip_allowed":flip_allowed,"flip_reason":flip_reason,"flip_dir":hunt_trade_dir,"market_against":market_against,"run_needed":run_needed,"fake_type":fake_type,"fake_reason":fake_reason,"fake_move":fake_move,"pre_entry":{"active":pre_active,"name":pre_name,"note":pre_note}}
         _last_signal={"time":time.time(),"data":result}
         return result
     except Exception as e:
         print(f"get_signal Error: {e}", flush=True)
-        return {"cert":0,"direction":"NONE","agree":0,"hunt_soon":False,"hunt_cert":0,"cvd_buy_pct":50,"news_critical":False,"news_wait":0,"pause_long":False,"pause_short":False,"price":price,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"sweep_done":False,"sweep_dir":"NONE","first_aid":False,"first_aid_action":"NONE","first_aid_reason":"","spread":{"score":0,"bias":"NEUTRAL","spot_premium_usd":0,"coinbase_bybit_spread":0,"reasons":[]},"spread_boost":0,"gold_boss":{},"gold_boss_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0}
+        return {"cert":0,"direction":"NONE","agree":0,"wide_cert":False,"grounded_cert":False,"hunt_soon":False,"hunt_cert":0,"cvd_buy_pct":50,"price":price,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"hunt_exhausted":False,"sweep_done":False,"sweep_dir":"NONE","hunt_certainty":{"score":0,"label":"NO_HUNT"},"spread":{"score":0,"bias":"NEUTRAL","spot_premium_usd":0,"coinbase_bybit_spread":0,"reasons":[]},"spread_boost":0,"gold_boss":{},"gold_boss_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0,"flip_allowed":False,"flip_reason":"","flip_dir":"NONE","market_against":{},"run_needed":800,"fake_type":"NONE","fake_reason":"","fake_move":0,"pre_entry":{}}
 
 if __name__=="__main__":
     price, src=get_price_live()
     sig=get_signal(price, 200, get_klines("1",20))
-    print(f"Price ${price:.0f} [{src}] Signal: {sig['direction']} Cert {sig['cert']}% Hunter {sig['hunter_bias']} {sig['hunter_score']} HuntRide {sig.get('hunt_ride')} {sig.get('hunt_ride_dir')} HuntDone {sig.get('hunt_done')} Sweep {sig.get('sweep_done')} Hunt {sig.get('hunt_certainty',{}).get('label')} FirstAid {sig.get('first_aid')} News {sig.get('news',{}).get('direction')} {sig.get('news',{}).get('score')} Boost {sig.get('news_boost')} Spread {sig.get('spread',{}).get('bias')} {sig.get('spread',{}).get('score')} GOLD_BOSS {sig.get('gold_boss',{}).get('boss_dir')} {sig.get('gold_boss_boost')}")
+    print(f"Price ${price:.0f} [{src}] Signal: {sig['direction']} Cert {sig['cert']}% Wide {sig.get('wide_cert')} Hunter {sig['hunter_bias']} {sig['hunter_score']} HuntRide {sig.get('hunt_ride')} {sig.get('hunt_ride_dir')} HuntDone {sig.get('hunt_done')} Exhausted {sig.get('hunt_exhausted')} Sweep {sig.get('sweep_done')} Hunt {sig.get('hunt_certainty',{}).get('label')} Flip {sig.get('flip_allowed')} {sig.get('flip_dir')} Fake {sig.get('fake_type')} News {sig.get('news',{}).get('direction')} {sig.get('news',{}).get('score')} Boost {sig.get('news_boost')} Spread {sig.get('spread',{}).get('bias')} {sig.get('spread',{}).get('score')} GOLD_BOSS {sig.get('gold_boss',{}).get('boss_dir')} {sig.get('gold_boss_boost')}")
