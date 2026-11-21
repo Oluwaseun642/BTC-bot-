@@ -1,12 +1,11 @@
 # ============================================================
-# MAIN.PY V15.9 - HUNTER VETO POWER / HUNT RIDE
-# KEEP FROM V15.7: Flask + Self-Ping, X-BAPI Auth, _safe_json,
-#   Balance Fallback, Position Sync, Dynamic Lev/Qty, Isolated
-# NEW V15.9: BE=CLOSE Normal $800 / Hunt $600, TP Backup $1200,
-#   Hunt SL $1000 / Normal SL $1200, Hunt Ride -> Hunt Done -> Normal,
-#   First Aid V15.9, 1-Min Hold + Re-Check, News Booster Only
-# REMOVE: hunter_wait block, news_wait block, pause block,
-#   BE $500 -> Lock $20, TP $1500, dead duplicates
+# MAIN.PY V16.0 - PATCHED FROM V15.9
+# BE = CLOSE Normal $800 / Hunt $600, TP Backup $1200
+# Hunt SL $1000 / Normal SL $1200, CALM 150s After EVERY Trade/Fake/Flip
+# Flip 3-Ways: Normal->Hunt, Hunt->Normal (Wide), Hunt->Normal (Exhausted)
+# TIER2 + 2 Confirmations, Wide Cert -> Normal, Chase Fake + Eat Bounce
+# Qty NOT touched - Full Qty for Hunt + Normal + Flip
+# NO First Aid - NO Daily Loss Hard-Code - NO duplicates - NO dead code
 # ============================================================
 import os, time, threading, hmac, hashlib, json
 from datetime import datetime, timezone
@@ -17,7 +16,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V15.9 - HUNT RIDE + BE CLOSE", 200
+    def _health(): return "BOT ALIVE V16.0 - TIER2 + FLIP 3-WAYS + CALM 150s", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -39,7 +38,7 @@ threading.Thread(target=_self_ping_loop, daemon=True).start()
 
 try:
     import data_engine as DE
-    print("✅ Data Engine Connected V15.9", flush=True)
+    print("✅ Data Engine Connected V16.0", flush=True)
     HAS_DE = True
 except Exception as e:
     DE = None; HAS_DE = False
@@ -51,12 +50,12 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 SYMBOL = "BTCUSDT"; CATEGORY = "linear"; BASE_URL = "https://api.bybit.com"
 
-# --- V15.9 NUMBERS: BE = CLOSE ---
+# --- V16 NUMBERS: BE = CLOSE - QTY NOT TOUCHED - NO DAILY LOSS HARD-CODE ---
 NORMAL_BE_USD = 800.0; HUNT_BE_USD = 600.0
 NORMAL_TP_USD = 1200.0; HUNT_TP_USD = 1200.0
 NORMAL_SL_USD = 1200.0; HUNT_SL_USD = 1000.0
-CERT_MIN = 75.0; CERT_HUNT = 85.0; MAX_DAILY_LOSS = 50.0
-RECHECK_HOLD_SEC = 60
+CERT_MIN = 75.0; CERT_HUNT = 85.0
+CALM_SEC = 150  # 2-3 MINS CALM - single source, replaces RECHECK_HOLD_SEC
 QTY_BASE = 0.010; QTY_STEP = 0.005; QTY_MIN = 0.001; REAL_MAX_QTY = 0.100
 FEE_RATE = 0.0006
 balance = 0.0; leverage = 25
@@ -64,6 +63,7 @@ in_position = False; side = None; entry = 0.0; qty = 0.0
 mode = "NORMAL"  # NORMAL or HUNT_RIDE
 daily_pnl = 0.0; wins = 0; losses = 0; breakevens = 0
 recheck_until = 0; recheck_dir = None; recheck_mode = None
+last_flip_time = 0
 
 def log(msg): print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}", flush=True)
 def tg(msg):
@@ -143,6 +143,7 @@ def get_dynamic_leverage(bal=None):
     leverage = lev; return lev
 
 def get_dynamic_qty(price, lev, bal=None):
+    # QTY NOT TOUCHED - same as V15.9
     if bal is None: bal = balance or 12.56
     if price <= 0: return 0.0
     base_qty = QTY_BASE if bal < 20 else round(QTY_BASE + int((bal-20)//8)*QTY_STEP, 3)
@@ -163,6 +164,7 @@ def set_isolated_margin():
     except Exception as e: log(f"Margin ISOLATED error {e}")
 
 def calc_sl_tp(price, side_, mode_):
+    # SYMMETRIC $ SL/TP for LONG & SHORT
     if mode_ == "HUNT_RIDE":
         sl_dist, tp_dist = HUNT_SL_USD, HUNT_TP_USD
     else:
@@ -192,7 +194,8 @@ def close_position_market(reason="CLOSE"):
     except Exception as e: log(f"Close error {e}"); return False
 
 def get_votes(price, atr, candles):
-    default = {"cert":0,"direction":"NONE","agree":0,"hunt_soon":False,"hunt_cert":0,"news_critical":False,"news_wait":0,"pause_long":False,"pause_short":False,"pause_reason":"","hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"hunt_state":{},"sweep_done":False,"sweep_dir":"NONE","first_aid":False,"first_aid_action":"NONE","first_aid_reason":"","hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE"},"spread":{},"spread_score":0,"spread_bias":"NEUTRAL","spread_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0}
+    # V16 - NO first_aid, NO news_critical/wait, NO pause - only live V16 fields
+    default = {"cert":0,"direction":"NONE","agree":0,"wide_cert":False,"grounded_cert":False,"hunt_soon":False,"hunt_cert":0,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"hunt_exhausted":False,"hunt_state":{},"sweep_done":False,"sweep_dir":"NONE","hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE"},"spread":{},"spread_score":0,"spread_bias":"NEUTRAL","spread_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0,"flip_allowed":False,"flip_reason":"","flip_dir":"NONE","market_against":{},"run_needed":800,"fake_type":"NONE","fake_reason":"","fake_move":0,"pre_entry":{}}
     if not HAS_DE or DE is None: return default
     try:
         fn = getattr(DE, "get_signal", None)
@@ -235,11 +238,17 @@ def _record_close(exit_price, profit_move, result_tag, cert, atr, hunter_score, 
         except Exception as e: log(f"Save trade error {e}")
     return net
 
+def _start_calm(reason):
+    # V16 SINGLE SOURCE for calm - no direct recheck_until assignment elsewhere
+    global recheck_until, recheck_dir, recheck_mode
+    recheck_until=time.time()+CALM_SEC; recheck_dir=side; recheck_mode=mode
+    log(f"😌 CALM {CALM_SEC}s after {reason} - Watch hunters only, no enter")
+
 def main():
-    global in_position, side, entry, qty, mode, daily_pnl, wins, losses, breakevens, recheck_until, recheck_dir, recheck_mode
-    log("V15.9 HUNT RIDE | ISOLATED | Normal BE $800 CLOSE / Hunt BE $600 CLOSE | TP Backup $1200 | Normal SL $1200 / Hunt SL $1000 | First Aid ON | Hunt Done -> Normal | 1-Min Recheck ON | News Booster Only")
+    global in_position, side, entry, qty, mode, daily_pnl, wins, losses, breakevens, recheck_until, recheck_dir, recheck_mode, last_flip_time
+    log("V16.0 TIER2 + FLIP 3-WAYS | ISOLATED | Normal BE $800 / Hunt BE $600 | TP $1200 | Normal SL $1200 / Hunt SL $1000 | CALM 150s | No First Aid | No Daily Loss Hard-Code")
     log(f"DEBUG KEY LEN {len(BYBIT_API_KEY)} START {BYBIT_API_KEY[:4]}**** | SECRET LEN {len(BYBIT_API_SECRET)}")
-    tg("🤖 <b>BTC Bot V15.9 STARTED</b>\nISOLATED | Hunt Ride ON\nNormal BE $800 CLOSE\nHunt BE $600 CLOSE\nTP Backup $1200\nNormal SL $1200 / Hunt SL $1000\nFirst Aid ON | Hunt Done -> Normal\n1-Min Recheck ON | News Booster Only")
+    tg("🤖 <b>BTC Bot V16.0 STARTED</b>\nISOLATED | TIER2 + Flip 3-Ways\nNormal BE $800 / Hunt BE $600\nTP $1200 | SL $1200 / $1000\nCALM 150s | Chase Fake + Bounce")
     set_isolated_margin(); get_balance()
     log(f"Balance ${balance:.2f} | Lev {get_dynamic_leverage()}x")
     last_vote_time=0
@@ -253,42 +262,43 @@ def main():
             last_vote_time=time.time()
             v=get_votes(price,atr,candles)
             cert=v.get("cert",0); direction=v.get("direction","NONE"); agree=v.get("agree",0)
+            wide_cert=v.get("wide_cert",False); grounded_cert=v.get("grounded_cert",False)
             hunter_score=v.get("hunter_score",0); hunter_bias=v.get("hunter_bias","NEUTRAL")
             hunt_ride_sig=v.get("hunt_ride",False); hunt_ride_dir=v.get("hunt_ride_dir","NONE")
-            hunt_done=v.get("hunt_done",False); hunt_state=v.get("hunt_state",{}) or {}
+            hunt_done=v.get("hunt_done",False); hunt_exhausted=v.get("hunt_exhausted",False); hunt_state=v.get("hunt_state",{}) or {}
             spot_prem=v.get("spot_premium_usd",0); fc=v.get("funding_cascade",{}) or {}; liq_c=v.get("liq_clusters",{}) or {}
             sweep_done=v.get("sweep_done",False); sweep_dir=v.get("sweep_dir","NONE")
-            first_aid=v.get("first_aid",False); first_aid_action=v.get("first_aid_action","NONE"); first_aid_reason=v.get("first_aid_reason","")
             hunt_cert=v.get("hunt_certainty",{}) or {}; spread=v.get("spread",{}) or {}
             spread_score=v.get("spread_score",0); spread_bias=v.get("spread_bias","NEUTRAL"); spread_boost=v.get("spread_boost",0)
             news=v.get("news",{}) or {}; news_boost=v.get("news_boost",0)
+            flip_allowed=v.get("flip_allowed",False); flip_reason=v.get("flip_reason",""); flip_dir=v.get("flip_dir","NONE")
+            fake_type=v.get("fake_type","NONE"); fake_reason=v.get("fake_reason",""); fake_move=v.get("fake_move",0)
+            pre_entry=v.get("pre_entry",{}) or {}
 
-            # --- 1-MIN RECHECK HOLD: After BE Close, hold 60s, then re-evaluate ---
+            # --- CALM 150s: After EVERY trade / fake / flip - watch hunters only ---
             if not in_position and recheck_until>0 and time.time()<recheck_until:
-                log(f"⏳ RECHECK HOLD {int(recheck_until-time.time())}s | Waiting to see if {recheck_dir} can still run another ${NORMAL_BE_USD if recheck_mode=='NORMAL' else HUNT_BE_USD:.0f} | Cert {cert}% Hunter {hunt_cert.get('score',0)}/9 News {news.get('direction')} {news.get('score')}")
+                log(f"😌 CALM {int(recheck_until-time.time())}s | Watching hunters: Hunter {hunter_bias} {hunter_score} Hunt {hunt_cert.get('score',0)}/9 {hunt_cert.get('label')} Flip {flip_allowed} {flip_dir} Fake {fake_type} | Cert {cert}% {direction} Wide {wide_cert}")
                 continue
             if not in_position and recheck_until>0 and time.time()>=recheck_until:
-                # Hold done - decide: re-enter if cert still 75%+ OR hunter still 6/9+
-                can_reenter = False; re_dir = recheck_dir; re_mode = recheck_mode
-                if re_mode=="HUNT_RIDE" and hunt_ride_sig and hunt_ride_dir==re_dir:
-                    can_reenter=True; log(f"✅ RECHECK: Hunt still privilege Hunter {hunt_cert.get('score',0)}/9 - Re-enter Hunt Ride {re_dir}")
+                # Calm done - hunters FIRST, no re-enter same dir if opposite TIER2
+                can_reenter=False; re_dir=recheck_dir; re_mode=recheck_mode
+                if flip_allowed and flip_dir in ("LONG","SHORT") and flip_dir!=re_dir:
+                    re_dir=flip_dir; re_mode="HUNT_RIDE"; can_reenter=True; log(f"✅ CALM DONE: Opposite TIER2 -> FLIP to {re_dir} | {flip_reason}")
+                elif wide_cert and direction in ("LONG","SHORT"):
+                    re_dir=direction; re_mode="NORMAL"; can_reenter=True; log(f"✅ CALM DONE: Wide Cert {cert}% -> Normal {re_dir}")
+                elif re_mode=="HUNT_RIDE" and hunt_ride_sig and hunt_ride_dir==re_dir:
+                    can_reenter=True; log(f"✅ CALM DONE: Hunt still vital {hunt_cert.get('score',0)}/9 - Re-enter Hunt {re_dir}")
                 elif re_mode=="HUNT_RIDE" and hunt_done:
-                    # Hunt done -> go Normal instead of Hunt Ride
-                    re_dir=direction; re_mode="NORMAL"; can_reenter=(direction in ("LONG","SHORT") and cert>=CERT_MIN); log(f"✅ RECHECK: Hunt Done -> Switch to Normal {re_dir} Cert {cert}%")
-                elif re_mode=="NORMAL" and direction==re_dir and cert>=CERT_MIN:
-                    can_reenter=True; log(f"✅ RECHECK: Normal still strong Cert {cert}% {direction} - Re-enter for another $800")
+                    re_dir=direction; re_mode="NORMAL"; can_reenter=(direction in ("LONG","SHORT") and cert>=CERT_MIN); log(f"✅ CALM DONE: Hunt Done -> Normal {re_dir} Cert {cert}%")
                 elif re_mode=="NORMAL" and hunt_ride_sig:
-                    re_dir=hunt_ride_dir; re_mode="HUNT_RIDE"; can_reenter=True; log(f"✅ RECHECK: Hunt now vital - Switch to Hunt Ride {re_dir}")
+                    re_dir=hunt_ride_dir; re_mode="HUNT_RIDE"; can_reenter=True; log(f"✅ CALM DONE: Hunt now vital - Hunt {re_dir}")
+                elif re_mode=="NORMAL" and direction==re_dir and cert>=CERT_MIN and not flip_allowed:
+                    can_reenter=True; log(f"✅ CALM DONE: Normal still strong {cert}% {direction} - Re-enter")
                 else:
-                    log(f"❌ RECHECK: No re-entry Cert {cert}% {direction} Hunter {hunt_cert.get('score',0)}/9 - Wait")
+                    log(f"❌ CALM DONE: No re-entry Cert {cert}% {direction} Hunter {hunt_cert.get('score',0)}/9 Flip {flip_allowed}")
                 recheck_until=0; recheck_dir=None; recheck_mode=None
                 if not can_reenter: continue
-                # Fall through to entry below with re_dir / re_mode
-                direction=re_dir
-                # Use re_mode for entry
-                enter_mode=re_mode
-                enter_dir=re_dir
-                # Skip normal hunt/normal priority logic, go straight to entry check
+                direction=re_dir; enter_mode=re_mode; enter_dir=re_dir
                 qty_preview=get_dynamic_qty(price, get_dynamic_leverage())
                 if qty_preview==0: continue
                 sl,tp=calc_sl_tp(price,enter_dir,enter_mode)
@@ -303,68 +313,81 @@ def main():
             if in_position:
                 profit_move=(price-entry) if side=="LONG" else (entry-price)
                 be_target=be_target_for(mode)
-                # --- BE = CLOSE: Once BE hit, close, collect quick profit, start 1-min recheck ---
+                # --- BE = CLOSE ---
                 if profit_move>=be_target:
                     log(f"🎯 BE CLOSE {mode} | Move ${profit_move:.0f} >= ${be_target:.0f} | Closing {side} @ ${price:.0f} for quick profit")
                     if close_position_market("BE_CLOSE"):
                         _record_close(price, profit_move, "BE_CLOSE", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
-                        # Start 1-min recheck: can we run another BE?
-                        recheck_until=time.time()+RECHECK_HOLD_SEC; recheck_dir=side; recheck_mode=mode
+                        _start_calm("BE_CLOSE")
                         in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
                     else: log("BE CLOSE FAILED - retry next loop")
                     continue
-                # --- FIRST AID V15.9: Hunt Ride fail, Cert takeover -> close Hunt Ride, enter Normal immediately ---
-                if mode=="HUNT_RIDE" and first_aid and direction in ("LONG","SHORT") and direction!=side:
-                    log(f"🚨 FIRST AID IN HUNT RIDE: {first_aid_reason} | Our Hunt {side} @ ${entry:.0f} Price ${price:.0f} Move ${profit_move:.0f} -> Close Hunt, Enter Normal {direction}")
-                    tg(f"🚨 <b>FIRST AID</b>\n{first_aid_reason}\nClosing Hunt {side} @ ${price:.0f}\nEnter Normal {direction}")
-                    if close_position_market("FIRST_AID"):
-                        _record_close(price, profit_move, "FIRST_AID", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
+                # --- FLIP 3-WAYS IN POSITION - SYMMETRIC LONG/SHORT - Full Qty ---
+                flip_now=False; flip_to="NONE"; flip_tag=""; flip_reason2=""
+                can_flip_time=(time.time()-last_flip_time)>=CALM_SEC
+                if mode=="NORMAL" and flip_allowed and flip_dir in ("LONG","SHORT") and flip_dir!=side and can_flip_time:
+                    flip_now=True; flip_to=flip_dir; flip_tag="FLIP_NORMAL_TO_HUNT"; flip_reason2=flip_reason
+                elif mode=="HUNT_RIDE" and wide_cert and direction in ("LONG","SHORT") and direction!=side and can_flip_time:
+                    flip_now=True; flip_to=direction; flip_tag="FLIP_HUNT_TO_NORMAL_WIDE"; flip_reason2=f"Wide Cert {cert}% {direction} overrides hunters"
+                elif mode=="HUNT_RIDE" and hunt_exhausted and direction in ("LONG","SHORT") and direction!=side and can_flip_time:
+                    flip_now=True; flip_to=direction; flip_tag="FLIP_HUNT_TO_NORMAL_EXHAUSTED"; flip_reason2=f"Hunt exhausted, flip back with little profit Move ${profit_move:.0f} to Normal {direction}"
+                elif mode=="HUNT_RIDE" and hunt_done and direction in ("LONG","SHORT") and direction!=side:
+                    flip_now=True; flip_to=direction; flip_tag="FLIP_HUNT_DONE_TO_NORMAL"; flip_reason2="Hunt Done -> Normal"
+                if flip_now:
+                    # Flip as TP taker if profit, before SL if losing - both allowed
+                    log(f"🔄 {flip_tag}: {side} -> {flip_to} | Move ${profit_move:.0f} | {flip_reason2} | Price ${price:.0f}")
+                    tg(f"🔄 <b>{flip_tag}</b>\n{side} -> {flip_to}\nMove ${profit_move:.0f}\n{flip_reason2}")
+                    if close_position_market(flip_tag):
+                        _record_close(price, profit_move, flip_tag, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
+                        last_flip_time=time.time()
                         in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
-                        # Immediately enter Normal - fall through to entry logic below with direction
-                        # Do not set recheck, enter now
-                    else: log("FIRST AID CLOSE FAILED - retry"); continue
-                    # Continue to entry logic in same loop (do not continue)
-                elif mode=="HUNT_RIDE" and hunt_done:
-                    # --- HUNT DONE: Close Hunt Ride, enter Normal immediately ---
-                    log(f"✅ HUNT DONE IN POSITION: Hunter drop, price back inside -> Close Hunt {side} @ ${price:.0f} Move ${profit_move:.0f}, Enter Normal {direction}")
-                    tg(f"✅ <b>HUNT DONE</b>\nClosing Hunt {side} @ ${price:.0f}\nEnter Normal {direction}")
-                    if close_position_market("HUNT_DONE"):
-                        _record_close(price, profit_move, "HUNT_DONE", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
-                        in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
-                    else: log("HUNT DONE CLOSE FAILED - retry"); continue
-                    # Fall through to Normal entry
+                        # Immediately enter flip direction with FULL QTY
+                        qty2=get_dynamic_qty(price, get_dynamic_leverage())
+                        if qty2>0:
+                            sl2,tp2=calc_sl_tp(price,flip_to,"HUNT_RIDE" if "TO_HUNT" in flip_tag else "NORMAL")
+                            r2=place_order("Buy" if flip_to=="LONG" else "Sell", qty2, sl2, tp2)
+                            if r2.get("retCode",1)==0:
+                                in_position=True; side=flip_to; entry=price; qty=qty2; mode="HUNT_RIDE" if "TO_HUNT" in flip_tag else "NORMAL"
+                        continue
+                    else: log("FLIP CLOSE FAILED - retry"); continue
                 elif get_position() is None:
-                    # SL / TP hit on exchange (Bybit closed it)
-                    sl,tp=calc_sl_tp(entry,side,mode)
+                    # SL / TP hit on exchange (Bybit closed it) - TODO: fetch real closed PnL
                     _record_close(price, profit_move, "SL_TP_EXCHANGE", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
+                    _start_calm("SL_TP_EXCHANGE")
                     in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance(); continue
                 else:
-                    # Still holding - log
                     sl,tp=calc_sl_tp(entry,side,mode)
-                    log(f"HOLDING [{mode}] {side} Entry ${entry:.0f} Price ${price:.0f} Move ${profit_move:.0f} | SL ${sl:.0f} BE CLOSE ${be_target:.0f} TP Backup ${tp:.0f} | W{wins} L{losses} BE{breakevens} | HuntDone {hunt_done} FirstAid {first_aid} News {news.get('direction')} {news.get('score')} Boost {news_boost}%")
-                    # If we just closed via FirstAid/HuntDone above, we fell through - if still in_position, skip entry
+                    log(f"HOLDING [{mode}] {side} Entry ${entry:.0f} Price ${price:.0f} Move ${profit_move:.0f} | SL ${sl:.0f} BE CLOSE ${be_target:.0f} TP Backup ${tp:.0f} | W{wins} L{losses} BE{breakevens} | HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} Fake {fake_type} Wide {wide_cert} News {news.get('direction')} {news.get('score')} Boost {news_boost}%")
                     if in_position: continue
 
             # --- NOT IN POSITION: Entry Logic ---
             lev=get_dynamic_leverage(); qty_preview=get_dynamic_qty(price,lev)
-            log(f"Price ${price:.0f} | ATR {atr:.0f} | {direction} Cert {cert}% Agree {agree}/8 | Bal ${balance:.2f} | Sweep {sweep_done} {sweep_dir} | FirstAid {first_aid} {first_aid_action}")
-            log(f"HUNTER {hunter_bias} {hunter_score} | Hunt {hunt_cert.get('label','?')} {hunt_cert.get('score',0)}/9 {hunt_cert.get('hunt_dir','')} Type {hunt_state.get('hunt_type','')} State {hunt_state.get('state','')} | HuntRide {hunt_ride_sig} {hunt_ride_dir} HuntDone {hunt_done} | Liq Long ${liq_c.get('long_liq',0):,.0f} Short ${liq_c.get('short_liq',0):,.0f} ({liq_c.get('dominant','?')}) | Spot ${spot_prem:.0f} | CVD {v.get('cvd_live',{}).get('buy_pct',50)}% | Funding {fc.get('risk','NONE')}")
-            log(f"SPREAD {spread_bias} Score {spread_score} Boost {spread_boost}% | NEWS {news.get('direction')} {news.get('score')} Boost {news_boost}% | {news.get('headline_note','')}")
-            if first_aid_reason: log(f"🚨 FIRST AID: {first_aid_reason}")
-            log(f"Qty {qty_preview} Lev {lev}x | Normal BE $800 CLOSE SL $1200 TP $1200 | Hunt BE $600 CLOSE SL $1000 TP $1200 | W{wins} L{losses} BE{breakevens} PnL ${daily_pnl:.2f}")
-            if daily_pnl<=-MAX_DAILY_LOSS: log(f"🛑 DAILY LOSS LIMIT ${daily_pnl:.2f}"); time.sleep(60); continue
-            # V15.9: News NEVER blocks, Hunter NEVER blocks, Gold NEVER blocks - only Cert decides
-            # Priority: 1) Hunt Ride if hunt_ride True, 2) Normal if cert >=75, 3) Sweep = Normal immediately
+            log(f"Price ${price:.0f} | ATR {atr:.0f} | {direction} Cert {cert}% Agree {agree}/8 Wide {wide_cert} Grounded {grounded_cert} | Bal ${balance:.2f} | Sweep {sweep_done} {sweep_dir} | Fake {fake_type} {fake_reason}")
+            log(f"HUNTER {hunter_bias} {hunter_score} | Hunt {hunt_cert.get('label','?')} {hunt_cert.get('score',0)}/9 {hunt_cert.get('hunt_dir','')} Type {hunt_state.get('hunt_type','')} State {hunt_state.get('state','')} | HuntRide {hunt_ride_sig} {hunt_ride_dir} HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} | Liq Long ${liq_c.get('long_liq',0):,.0f} Short ${liq_c.get('short_liq',0):,.0f} ({liq_c.get('dominant','?')}) | Spot ${spot_prem:.0f} | CVD {v.get('cvd_live',{}).get('buy_pct',50)}% | Funding {fc.get('risk','NONE')}")
+            log(f"SPREAD {spread_bias} Score {spread_score} Boost {spread_boost}% | NEWS {news.get('direction')} {news.get('score')} Boost {news_boost}% | {news.get('headline_note','')} | PreEntry {pre_entry.get('active')} {pre_entry.get('name')}")
+            if flip_reason: log(f"🔄 FLIP CHECK: {flip_reason}")
+            log(f"Qty {qty_preview} Lev {lev}x | Normal BE $800 CLOSE SL $1200 TP $1200 | Hunt BE $600 CLOSE SL $1000 TP $1200 | W{wins} L{losses} BE{breakevens} PnL ${daily_pnl:.2f} | CALM {CALM_SEC}s")
+            # NO DAILY LOSS HARD-CODE - less losses via calm/flip/hunt
+            # Pre-Entry: watch only, NO entry unless Sweep
+            if pre_entry.get("active"):
+                log(f"👀 PRE-ENTRY {pre_entry.get('name')} - Watching only, no entry: {pre_entry.get('note')} | Hunt {hunt_cert.get('score',0)}/9")
+                if not sweep_done: continue
+            # V16 Priority SYMMETRIC: 1) Sweep, 2) Wide -> Normal, 3) Flip/Hunt Ride, 4) Wide Fake Bounce, 5) Normal cert>=75
             enter_dir=None; enter_mode="NORMAL"
             if sweep_done and direction in ("LONG","SHORT"):
                 enter_dir=direction; enter_mode="NORMAL"; log(f"⚡ SWEEP ENTER {enter_dir} @ ${price:.0f} - No bounce wait")
+            elif wide_cert and direction in ("LONG","SHORT"):
+                enter_dir=direction; enter_mode="NORMAL"; log(f"✅ WIDE CERT ENTER {enter_dir} Cert {cert}% - Ignore TIER2, hunters cannot dare")
+            elif flip_allowed and flip_dir in ("LONG","SHORT"):
+                enter_dir=flip_dir; enter_mode="HUNT_RIDE"; log(f"🏹 FLIP/HUNT ENTER {enter_dir} | {flip_reason}")
             elif hunt_ride_sig and hunt_ride_dir in ("LONG","SHORT"):
-                # Hunt Ride: follow hunters, opposite to normal - high cert only, no timeout, no max limit
                 enter_dir=hunt_ride_dir; enter_mode="HUNT_RIDE"; log(f"🏹 HUNT RIDE ENTER {enter_dir} | Hunter {hunt_cert.get('score',0)}/9 {hunt_cert.get('hunt_dir')} target ${hunt_cert.get('target',0):,.0f} Normal {direction} Cert {cert}% - Ride hunters, BE $600 CLOSE")
-            elif direction in ("LONG","SHORT") and cert>=CERT_MIN:
-                enter_dir=direction; enter_mode="NORMAL"; log(f"✅ NORMAL ENTER {enter_dir} Cert {cert}% >= {CERT_MIN}%")
+            elif fake_type in ("FAKE_DUMP","FAKE_PUMP"):
+                enter_dir="LONG" if fake_type=="FAKE_DUMP" else "SHORT"; enter_mode="HUNT_RIDE"; log(f"🎯 WIDE FAKE BOUNCE ENTER {enter_dir} | {fake_reason} | Move ${fake_move:.0f}")
+            elif direction in ("LONG","SHORT") and cert>=CERT_MIN and not flip_allowed:
+                enter_dir=direction; enter_mode="NORMAL"; log(f"✅ NORMAL ENTER {enter_dir} Cert {cert}% >= {CERT_MIN}% - No opposite TIER2")
             elif direction!="NONE":
-                log(f"⏳ Cert {cert}% < {CERT_MIN}% - No trade | HuntRide {hunt_ride_sig} Sweep {sweep_done}")
+                log(f"⏳ Cert {cert}% < {CERT_MIN}% or Flip blocks - No trade | HuntRide {hunt_ride_sig} Sweep {sweep_done} Fake {fake_type}")
                 continue
             else:
                 log(f"⏳ No direction - Wait | Cert {cert}% Hunt {hunt_cert.get('label')}")
