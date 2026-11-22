@@ -1,10 +1,16 @@
 # ============================================================
-# MAIN.PY V16.0 - PATCHED FROM V15.9
+# MAIN.PY V16.1 - PATCHED FROM V16.0
 # BE = CLOSE Normal $800 / Hunt $600, TP Backup $1200
-# Hunt SL $1000 / Normal SL $1200, CALM 150s After EVERY Trade/Fake/Flip
+# Hunt SL $1000 / Normal SL $1200, CALM 150s After EVERY Big/Normal Trade/Fake/Flip
 # Flip 3-Ways: Normal->Hunt, Hunt->Normal (Wide), Hunt->Normal (Exhausted)
 # TIER2 + 2 Confirmations, Wide Cert -> Normal, Chase Fake + Eat Bounce
-# Qty NOT touched - Full Qty for Hunt + Normal + Flip
+# Qty NOT touched - Full Qty for Hunt + Normal + Flip + Pile-Up (sync from current code)
+# --- V16.1 NEW: PILE-UPS TRADING MODE - PART 2 FOR MAIN.PY ---
+# Pro-Type Calm Hunters Flip: Seamless, no hard max, escalating strictness
+# Re-Pile Certain only -> flip immediately, no wait $300 to SL
+# No fixed TP for Pile-Up: Follow until Done / Done For (Void Eaten Live + 1 confirm)
+# Cooldowns separate: Pile-Up 60s-150s only, Big/Normal 2-3 mins (CALM 150s) only
+# No 4-5 confirmations, No 1-flip limit, No qty/leverage code here - reuse current code
 # NO First Aid - NO Daily Loss Hard-Code - NO duplicates - NO dead code
 # ============================================================
 import os, time, threading, hmac, hashlib, json
@@ -16,7 +22,7 @@ try:
     from flask import Flask
     _flask_app = Flask(__name__)
     @_flask_app.route("/")
-    def _health(): return "BOT ALIVE V16.0 - TIER2 + FLIP 3-WAYS + CALM 150s", 200
+    def _health(): return "BOT ALIVE V16.1 - TIER2 + FLIP 3-WAYS + PILE-UP + CALM 150s", 200
     @_flask_app.route("/health")
     def _health2(): return "OK", 200
     def _run_flask():
@@ -38,7 +44,7 @@ threading.Thread(target=_self_ping_loop, daemon=True).start()
 
 try:
     import data_engine as DE
-    print("✅ Data Engine Connected V16.0", flush=True)
+    print("✅ Data Engine Connected V16.1", flush=True)
     HAS_DE = True
 except Exception as e:
     DE = None; HAS_DE = False
@@ -55,12 +61,12 @@ NORMAL_BE_USD = 800.0; HUNT_BE_USD = 600.0
 NORMAL_TP_USD = 1200.0; HUNT_TP_USD = 1200.0
 NORMAL_SL_USD = 1200.0; HUNT_SL_USD = 1000.0
 CERT_MIN = 75.0; CERT_HUNT = 85.0
-CALM_SEC = 150  # 2-3 MINS CALM - single source, replaces RECHECK_HOLD_SEC
+CALM_SEC = 150
 QTY_BASE = 0.010; QTY_STEP = 0.005; QTY_MIN = 0.001; REAL_MAX_QTY = 0.100
 FEE_RATE = 0.0006
 balance = 0.0; leverage = 25
 in_position = False; side = None; entry = 0.0; qty = 0.0
-mode = "NORMAL"  # NORMAL or HUNT_RIDE
+mode = "NORMAL"
 daily_pnl = 0.0; wins = 0; losses = 0; breakevens = 0
 recheck_until = 0; recheck_dir = None; recheck_mode = None
 last_flip_time = 0
@@ -72,6 +78,126 @@ def tg(msg):
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
     except: pass
+
+# ============================================================
+# PILE-UPS TRADING MODE - PART 2 FOR MAIN.PY
+# Flip brain only. No detection, no qty, no leverage.
+# Uses DE.is_pileup_done / DE.decay_pileup_by_1 / DE.reset_pileup / DE.remember_void
+# ============================================================
+def is_repile_certain(pileup_count, hunt_score, cvd_agg, direction_against_position,
+                      two_candles_confirm=False, void_is_fresh=True,
+                      expected_move_to_void=0.0, flip_number=1,
+                      price_already_moved_for_pile=0.0, cert_vivid_against_pileup=False):
+    if pileup_count < 3:
+        return False, f"Re-Pile NOT certain - Count {pileup_count}/3 < 3"
+    if hunt_score < 4:
+        return False, f"Re-Pile NOT certain - Score {hunt_score} < 4"
+    if direction_against_position == "UP" and cvd_agg != "BUY":
+        return False, f"Re-Pile NOT certain - CVD {cvd_agg} != BUY for UP pile-up"
+    if direction_against_position == "DOWN" and cvd_agg != "SELL":
+        return False, f"Re-Pile NOT certain - CVD {cvd_agg} != SELL for DOWN pile-up"
+    if not two_candles_confirm:
+        return False, "Re-Pile NOT certain - Need 2 candles confirm, no be one wick"
+    if expected_move_to_void < 150:
+        return False, f"Re-Pile NOT certain - Expected move ${expected_move_to_void:.0f} < $150 - fees go chop am, hold"
+    if flip_number >= 3 and not void_is_fresh:
+        return False, f"Re-Pile NOT certain - Flip #{flip_number} needs fresh void, old void don chop"
+    if flip_number >= 5:
+        if hunt_score < 5:
+            return False, f"Re-Pile NOT certain - Flip #{flip_number} needs Score 5, got {hunt_score}"
+        if price_already_moved_for_pile < 200:
+            return False, f"Re-Pile NOT certain - Flip #{flip_number} needs price don move $200 for pile, got ${price_already_moved_for_pile:.0f}"
+        if cert_vivid_against_pileup:
+            return False, f"Re-Pile NOT certain - Flip #{flip_number} + Cert vivid against pile-up - hold"
+    return True, f"Re-Pile CERTAIN - Flip #{flip_number} - Count {pileup_count}/3 Score {hunt_score} CVD {cvd_agg} 2 candles Void fresh Move ${expected_move_to_void:.0f} - Flip IMMEDIATELY, no wait $300 to SL"
+
+class PileupFlipBrain:
+    def __init__(self):
+        self.original_dir = None
+        self.original_entry = 0.0
+        self.original_cert = 0.0
+        self.original_mode = "NORMAL"
+        self.in_pileup_hunt = False
+        self.pileup_dir = None
+        self.pileup_flip_count = 0
+        self.last_pileup_flip_ts = 0.0
+        self.last_pileup_done_ts = 0.0
+        self.void_remembered_for = None
+    def save_original(self, direction, entry, cert, mode_="NORMAL"):
+        if self.original_dir is None:
+            self.original_dir = direction; self.original_entry = float(entry or 0)
+            self.original_cert = float(cert or 0); self.original_mode = mode_ or "NORMAL"
+        return self.original_dir
+    def can_flip_pileup_now(self, now_ts=None):
+        now_ts = now_ts or time.time()
+        elapsed = now_ts - self.last_pileup_flip_ts if self.last_pileup_flip_ts else 9999
+        if elapsed < 60:
+            return False, f"Pile-Up 60s cooldown - {int(60 - elapsed)}s left, hold - same pile-up, no flip again"
+        return True, "Pile-Up 60s cooldown passed - can flip"
+    def should_flip_to_pileup(self, in_position_dir, pileup_up_active, pileup_down_active,
+                              pileup_count, hunt_score, cvd_agg, two_candles_confirm,
+                              void_is_fresh, expected_move_to_void, wide_cert, now_ts=None):
+        now_ts = now_ts or time.time()
+        if not in_position_dir or in_position_dir not in ("LONG", "SHORT"):
+            return False, "No position - no flip to pile-up", None
+        if wide_cert:
+            return False, "Lock 2 - Wide Cert - ignore pile-up", None
+        if in_position_dir == "SHORT" and not pileup_up_active:
+            return False, "No UP pile-up opposite SHORT", None
+        if in_position_dir == "LONG" and not pileup_down_active:
+            return False, "No DOWN pile-up opposite LONG", None
+        pileup_dir = "LONG" if in_position_dir == "SHORT" else "SHORT"
+        dir_against = "UP" if pileup_dir == "LONG" else "DOWN"
+        next_flip_no = self.pileup_flip_count + 1
+        certain, reason = is_repile_certain(pileup_count=pileup_count, hunt_score=hunt_score, cvd_agg=cvd_agg,
+            direction_against_position=dir_against, two_candles_confirm=two_candles_confirm,
+            void_is_fresh=void_is_fresh, expected_move_to_void=expected_move_to_void, flip_number=next_flip_no)
+        if not certain:
+            return False, reason, None
+        can_flip, cool_reason = self.can_flip_pileup_now(now_ts)
+        if not can_flip:
+            return False, cool_reason, None
+        return True, f"FLIP TO PILE-UP {pileup_dir} - {reason}", pileup_dir
+    def should_flip_back_to_original(self, is_pileup_done_fn, price, liq_now, ob_wall_now, k1_norm,
+                                     hunt_score, cvd_agg, cert_against_pileup=False):
+        if not self.in_pileup_hunt or not self.pileup_dir:
+            return False, "Not in pile-up hunt - no flip back", None
+        dir_against = "UP" if self.pileup_dir == "LONG" else "DOWN"
+        done, reason = is_pileup_done_fn(dir_against, price, liq_now, ob_wall_now, k1_norm,
+                                          hunt_score, cvd_agg, cert_against_pileup)
+        if not done:
+            return False, reason, None
+        if not self.original_dir:
+            return False, "No original dir saved - cannot flip back", None
+        return True, f"FLIP BACK TO ORIGINAL {self.original_dir} - {reason} - Take profit from pile-up, follow original bounce", self.original_dir
+    def mark_flip_to_pileup(self, pileup_dir, original_dir, entry, cert, mode_="NORMAL", reset_pileup_fn=None, now_ts=None):
+        self.save_original(original_dir, entry, cert, mode_)
+        self.in_pileup_hunt = True; self.pileup_dir = pileup_dir
+        self.pileup_flip_count += 1; self.last_pileup_flip_ts = now_ts or time.time()
+        if reset_pileup_fn:
+            dir_against = "UP" if pileup_dir == "LONG" else "DOWN"
+            reset_pileup_fn(dir_against)
+        return self.pileup_flip_count
+    def mark_flip_back_to_original(self, now_ts=None):
+        self.in_pileup_hunt = False; self.pileup_dir = None
+        self.last_pileup_flip_ts = now_ts or time.time(); self.last_pileup_done_ts = now_ts or time.time()
+        return self.original_dir
+    def reset_after_big_or_normal_takeover(self):
+        self.original_dir = None; self.original_entry = 0.0; self.original_cert = 0.0; self.original_mode = "NORMAL"
+        self.in_pileup_hunt = False; self.pileup_dir = None; self.pileup_flip_count = 0
+        self.last_pileup_flip_ts = 0.0; self.last_pileup_done_ts = 0.0; self.void_remembered_for = None
+
+pileup_brain = PileupFlipBrain()
+_pileup_decay_mark = {"price": 0.0}
+
+def _two_candles_confirm(candles, want_dir):
+    if not candles or len(candles) < 3: return False
+    c1, c2 = candles[-2], candles[-1]
+    if want_dir == "UP":
+        return c1["close"] > c1["open"] and c2["close"] > c2["open"] and c2["close"] > c1["close"]
+    if want_dir == "DOWN":
+        return c1["close"] < c1["open"] and c2["close"] < c2["open"] and c2["close"] < c1["close"]
+    return False
 
 # ------------------------------------------------------------
 # V13 AUTH - X-BAPI-* - PROVEN
@@ -143,7 +269,6 @@ def get_dynamic_leverage(bal=None):
     leverage = lev; return lev
 
 def get_dynamic_qty(price, lev, bal=None):
-    # QTY NOT TOUCHED - same as V15.9
     if bal is None: bal = balance or 12.56
     if price <= 0: return 0.0
     base_qty = QTY_BASE if bal < 20 else round(QTY_BASE + int((bal-20)//8)*QTY_STEP, 3)
@@ -164,8 +289,9 @@ def set_isolated_margin():
     except Exception as e: log(f"Margin ISOLATED error {e}")
 
 def calc_sl_tp(price, side_, mode_):
-    # SYMMETRIC $ SL/TP for LONG & SHORT
-    if mode_ == "HUNT_RIDE":
+    if mode_ == "PILEUP":
+        sl_dist, tp_dist = HUNT_SL_USD, HUNT_TP_USD
+    elif mode_ == "HUNT_RIDE":
         sl_dist, tp_dist = HUNT_SL_USD, HUNT_TP_USD
     else:
         sl_dist, tp_dist = NORMAL_SL_USD, NORMAL_TP_USD
@@ -173,6 +299,7 @@ def calc_sl_tp(price, side_, mode_):
     return (round(price+sl_dist,1), round(price-tp_dist,1))
 
 def be_target_for(mode_):
+    if mode_ == "PILEUP": return float("inf")
     return HUNT_BE_USD if mode_ == "HUNT_RIDE" else NORMAL_BE_USD
 
 def place_order(order_side, qty_, sl, tp):
@@ -194,8 +321,7 @@ def close_position_market(reason="CLOSE"):
     except Exception as e: log(f"Close error {e}"); return False
 
 def get_votes(price, atr, candles):
-    # V16 - NO first_aid, NO news_critical/wait, NO pause - only live V16 fields
-    default = {"cert":0,"direction":"NONE","agree":0,"wide_cert":False,"grounded_cert":False,"hunt_soon":False,"hunt_cert":0,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"hunt_exhausted":False,"hunt_state":{},"sweep_done":False,"sweep_dir":"NONE","hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE"},"spread":{},"spread_score":0,"spread_bias":"NEUTRAL","spread_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0,"flip_allowed":False,"flip_reason":"","flip_dir":"NONE","market_against":{},"run_needed":800,"fake_type":"NONE","fake_reason":"","fake_move":0,"pre_entry":{}}
+    default = {"cert":0,"direction":"NONE","agree":0,"wide_cert":False,"grounded_cert":False,"hunt_soon":False,"hunt_cert":0,"hunter_score":0,"hunter_bias":"NEUTRAL","hunt_ride":False,"hunt_ride_dir":"NONE","hunt_done":False,"hunt_exhausted":False,"hunt_state":{},"sweep_done":False,"sweep_dir":"NONE","hunt_certainty":{"score":0,"label":"NO_HUNT","hunt_dir":"NONE"},"spread":{},"spread_score":0,"spread_bias":"NEUTRAL","spread_boost":0,"news":{"score":0,"direction":"NEUTRAL"},"news_boost":0,"flip_allowed":False,"flip_reason":"","flip_dir":"NONE","market_against":{},"run_needed":800,"fake_type":"NONE","fake_reason":"","fake_move":0,"pre_entry":{},"pileup":{"allowed":False,"allowed_reason":"no DE","pileup_up":False,"pileup_up_count":0,"pileup_down":False,"pileup_down_count":0,"pileup_up_effective":False,"pileup_down_effective":False}}
     if not HAS_DE or DE is None: return default
     try:
         fn = getattr(DE, "get_signal", None)
@@ -239,16 +365,35 @@ def _record_close(exit_price, profit_move, result_tag, cert, atr, hunter_score, 
     return net
 
 def _start_calm(reason):
-    # V16 SINGLE SOURCE for calm - no direct recheck_until assignment elsewhere
     global recheck_until, recheck_dir, recheck_mode
     recheck_until=time.time()+CALM_SEC; recheck_dir=side; recheck_mode=mode
     log(f"😌 CALM {CALM_SEC}s after {reason} - Watch hunters only, no enter")
 
+def _do_flip(flip_to, flip_tag, flip_reason2, price, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias, new_mode, is_pileup=False):
+    # Single flip helper - no duplicate close + re-enter code for old flip and pile-up flip.
+    # Pile-Up flips: NO CALM, NO last_flip_time touch. Old flips: caller sets last_flip_time + CALM if needed.
+    global in_position, side, entry, qty, mode
+    log(f"🔄 {flip_tag}: {side} -> {flip_to} | {flip_reason2} | Price ${price:.0f}")
+    tg(f"🔄 <b>{flip_tag}</b>\n{side} -> {flip_to}\n{flip_reason2}")
+    profit_move = (price-entry) if side=="LONG" else (entry-price)
+    if not close_position_market(flip_tag):
+        log("FLIP CLOSE FAILED - retry"); return False
+    _record_close(price, profit_move, flip_tag, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
+    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
+    qty2=get_dynamic_qty(price, get_dynamic_leverage())
+    if qty2<=0: return True
+    sl2,tp2=calc_sl_tp(price,flip_to,new_mode)
+    r2=place_order("Buy" if flip_to=="LONG" else "Sell", qty2, sl2, tp2)
+    if r2.get("retCode",1)==0:
+        in_position=True; side=flip_to; entry=price; qty=qty2; mode=new_mode
+        log(f"✅ FLIP ENTERED {flip_to} [{new_mode}] Qty {qty2} SL ${sl2:.0f} TP ${tp2:.0f} {'No fixed TP - Follow until Done' if is_pileup else ''}")
+    return True
+
 def main():
     global in_position, side, entry, qty, mode, daily_pnl, wins, losses, breakevens, recheck_until, recheck_dir, recheck_mode, last_flip_time
-    log("V16.0 TIER2 + FLIP 3-WAYS | ISOLATED | Normal BE $800 / Hunt BE $600 | TP $1200 | Normal SL $1200 / Hunt SL $1000 | CALM 150s | No First Aid | No Daily Loss Hard-Code")
+    log("V16.1 TIER2 + FLIP 3-WAYS + PILE-UP | ISOLATED | Normal BE $800 / Hunt BE $600 / Pile-Up No Fixed TP | TP $1200 | Normal SL $1200 / Hunt SL $1000 / Pile-Up SL $1000 | CALM 150s Big/Normal | Pile-Up 60s | No First Aid | No Daily Loss Hard-Code")
     log(f"DEBUG KEY LEN {len(BYBIT_API_KEY)} START {BYBIT_API_KEY[:4]}**** | SECRET LEN {len(BYBIT_API_SECRET)}")
-    tg("🤖 <b>BTC Bot V16.0 STARTED</b>\nISOLATED | TIER2 + Flip 3-Ways\nNormal BE $800 / Hunt BE $600\nTP $1200 | SL $1200 / $1000\nCALM 150s | Chase Fake + Bounce")
+    tg("🤖 <b>BTC Bot V16.1 STARTED</b>\nISOLATED | TIER2 + Flip 3-Ways + Pile-Up\nNormal BE $800 / Hunt BE $600 / Pile-Up No Fixed TP\nTP $1200 | SL $1200 / $1000\nCALM 150s Big/Normal | Pile-Up 60s")
     set_isolated_margin(); get_balance()
     log(f"Balance ${balance:.2f} | Lev {get_dynamic_leverage()}x")
     last_vote_time=0
@@ -267,6 +412,7 @@ def main():
             hunt_ride_sig=v.get("hunt_ride",False); hunt_ride_dir=v.get("hunt_ride_dir","NONE")
             hunt_done=v.get("hunt_done",False); hunt_exhausted=v.get("hunt_exhausted",False); hunt_state=v.get("hunt_state",{}) or {}
             spot_prem=v.get("spot_premium_usd",0); fc=v.get("funding_cascade",{}) or {}; liq_c=v.get("liq_clusters",{}) or {}
+            ob_c=v.get("ob_clusters",{}) or {}; cvd_live=v.get("cvd_live",{}) or {}
             sweep_done=v.get("sweep_done",False); sweep_dir=v.get("sweep_dir","NONE")
             hunt_cert=v.get("hunt_certainty",{}) or {}; spread=v.get("spread",{}) or {}
             spread_score=v.get("spread_score",0); spread_bias=v.get("spread_bias","NEUTRAL"); spread_boost=v.get("spread_boost",0)
@@ -274,13 +420,17 @@ def main():
             flip_allowed=v.get("flip_allowed",False); flip_reason=v.get("flip_reason",""); flip_dir=v.get("flip_dir","NONE")
             fake_type=v.get("fake_type","NONE"); fake_reason=v.get("fake_reason",""); fake_move=v.get("fake_move",0)
             pre_entry=v.get("pre_entry",{}) or {}
+            pileup=v.get("pileup",{}) or {}
+            pileup_allowed=pileup.get("allowed",False)
+            pileup_up_eff=pileup.get("pileup_up_effective",False); pileup_down_eff=pileup.get("pileup_down_effective",False)
+            pileup_up_count=pileup.get("pileup_up_count",0); pileup_down_count=pileup.get("pileup_down_count",0)
 
-            # --- CALM 150s: After EVERY trade / fake / flip - watch hunters only ---
+            # --- CALM 150s: After EVERY Big/Normal trade / fake / flip - watch hunters only ---
+            # Pile-Up flips do NOT use CALM. CALM here is Big/Normal only, as locked.
             if not in_position and recheck_until>0 and time.time()<recheck_until:
-                log(f"😌 CALM {int(recheck_until-time.time())}s | Watching hunters: Hunter {hunter_bias} {hunter_score} Hunt {hunt_cert.get('score',0)}/9 {hunt_cert.get('label')} Flip {flip_allowed} {flip_dir} Fake {fake_type} | Cert {cert}% {direction} Wide {wide_cert}")
+                log(f"😌 CALM {int(recheck_until-time.time())}s | Watching hunters: Hunter {hunter_bias} {hunter_score} Hunt {hunt_cert.get('score',0)}/9 {hunt_cert.get('label')} Flip {flip_allowed} {flip_dir} Fake {fake_type} PileUp Up {pileup_up_count}/3 Down {pileup_down_count}/3 Allowed {pileup_allowed} | Cert {cert}% {direction} Wide {wide_cert}")
                 continue
             if not in_position and recheck_until>0 and time.time()>=recheck_until:
-                # Calm done - hunters FIRST, no re-enter same dir if opposite TIER2
                 can_reenter=False; re_dir=recheck_dir; re_mode=recheck_mode
                 if flip_allowed and flip_dir in ("LONG","SHORT") and flip_dir!=re_dir:
                     re_dir=flip_dir; re_mode="HUNT_RIDE"; can_reenter=True; log(f"✅ CALM DONE: Opposite TIER2 -> FLIP to {re_dir} | {flip_reason}")
@@ -308,20 +458,73 @@ def main():
                 r=place_order(order_side,qty_preview,sl,tp)
                 if r.get("retCode",1)==0:
                     in_position=True; side=enter_dir; entry=price; qty=qty_preview; mode=enter_mode
+                    pileup_brain.reset_after_big_or_normal_takeover()
                 continue
 
             if in_position:
                 profit_move=(price-entry) if side=="LONG" else (entry-price)
                 be_target=be_target_for(mode)
-                # --- BE = CLOSE ---
-                if profit_move>=be_target:
+                # --- Lock 3 B: Price $200 for us but hunters still dey -> decay by 1 only ---
+                if HAS_DE and profit_move>=200 and abs(price-_pileup_decay_mark["price"])>=200:
+                    if side=="SHORT" and pileup_up_count>0:
+                        new_c=DE.decay_pileup_by_1("UP"); log(f"PILE-UP DECAY UP {pileup_up_count} -> {new_c} - Price ${profit_move:.0f} for us but hunters still dey, no reset to 0")
+                        _pileup_decay_mark["price"]=price
+                    elif side=="LONG" and pileup_down_count>0:
+                        new_c=DE.decay_pileup_by_1("DOWN"); log(f"PILE-UP DECAY DOWN {pileup_down_count} -> {new_c} - Price ${profit_move:.0f} for us but hunters still dey, no reset to 0")
+                        _pileup_decay_mark["price"]=price
+                # --- BE = CLOSE - PILEUP SKIPS THIS, no fixed TP, follow until Done ---
+                if profit_move>=be_target and mode!="PILEUP":
                     log(f"🎯 BE CLOSE {mode} | Move ${profit_move:.0f} >= ${be_target:.0f} | Closing {side} @ ${price:.0f} for quick profit")
                     if close_position_market("BE_CLOSE"):
                         _record_close(price, profit_move, "BE_CLOSE", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
                         _start_calm("BE_CLOSE")
                         in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
+                        pileup_brain.reset_after_big_or_normal_takeover()
                     else: log("BE CLOSE FAILED - retry next loop")
                     continue
+                # --- PILE-UP FLIP - CHECK FIRST, BEFORE OLD FLIP 3-WAYS ---
+                # If in PILEUP and Done -> flip back to original immediately. If in NORMAL/HUNT and opposite pile-up certain -> flip to pile-up immediately.
+                pileup_handled=False
+                if HAS_DE and pileup_allowed:
+                    if pileup_brain.in_pileup_hunt and mode=="PILEUP":
+                        dir_against = "UP" if side=="LONG" else "DOWN"
+                        liq_now = liq_c.get("short_liq",0) if dir_against=="UP" else liq_c.get("long_liq",0)
+                        ob_now = ob_c.get("ask_wall_usd",0) if dir_against=="UP" else ob_c.get("bid_wall_usd",0)
+                        cert_against = cert>=85 and direction!=side
+                        back_ok, back_reason, back_to = pileup_brain.should_flip_back_to_original(DE.is_pileup_done, price, liq_now, ob_now, candles, hunt_cert.get("score",0), cvd_live.get("aggressive","NEUTRAL"), cert_against)
+                        if back_ok and back_to in ("LONG","SHORT"):
+                            orig_mode = pileup_brain.original_mode or "NORMAL"
+                            log(f"PILE-UP DONE -> FLIP BACK {side} -> {back_to} [{orig_mode}] | {back_reason}")
+                            pileup_brain.mark_flip_back_to_original()
+                            if _do_flip(back_to, "FLIP_PILEUP_TO_ORIGINAL", back_reason, price, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias, orig_mode, is_pileup=False):
+                                pileup_handled=True
+                        else:
+                            log(f"PILE-UP HOLD {side} | Not Done: {back_reason} | Move ${profit_move:.0f} | Up {pileup_up_count}/3 Down {pileup_down_count}/3")
+                    elif not pileup_brain.in_pileup_hunt and mode in ("NORMAL","HUNT_RIDE"):
+                        # Opposite pile-up count: SHORT needs UP count, LONG needs DOWN count
+                        opp_count = pileup_up_count if side=="SHORT" else pileup_down_count
+                        opp_active = pileup_up_eff if side=="SHORT" else pileup_down_eff
+                        want_dir = "UP" if side=="SHORT" else "DOWN"
+                        two_c = _two_candles_confirm(candles, want_dir)
+                        expected = abs(price - (hunt_cert.get("target", price) or price))
+                        # Fresh void = we never remembered this void, or last pile-up done >150s ago
+                        void_fresh = pileup_brain.void_remembered_for != hunt_cert.get("target",0)
+                        to_ok, to_reason, to_dir = pileup_brain.should_flip_to_pileup(side, pileup_up_eff, pileup_down_eff, opp_count, hunt_cert.get("score",0), cvd_live.get("aggressive","NEUTRAL"), two_c, void_fresh, expected, wide_cert)
+                        if to_ok and to_dir in ("LONG","SHORT"):
+                            # Remember void live before flip, so Done check can use Void Eaten Live
+                            try:
+                                dir_against2 = "UP" if to_dir=="LONG" else "DOWN"
+                                liq_at = liq_c.get("short_liq",0) if dir_against2=="UP" else liq_c.get("long_liq",0)
+                                ob_at = ob_c.get("ask_wall_usd",0) if dir_against2=="UP" else ob_c.get("bid_wall_usd",0)
+                                DE.remember_void(dir_against2, hunt_cert.get("target", price) or price, liq_at, ob_at)
+                                pileup_brain.void_remembered_for = hunt_cert.get("target",0)
+                            except Exception as e: log(f"Remember void error {e}")
+                            orig_dir, orig_entry, orig_cert, orig_mode = side, entry, cert, mode
+                            log(f"PILE-UP FLIP {orig_dir} -> {to_dir} [PILEUP] | {to_reason}")
+                            pileup_brain.mark_flip_to_pileup(to_dir, orig_dir, orig_entry, orig_cert, orig_mode, DE.reset_pileup if HAS_DE else None)
+                            if _do_flip(to_dir, "FLIP_TO_PILEUP", to_reason, price, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias, "PILEUP", is_pileup=True):
+                                pileup_handled=True
+                if pileup_handled: continue
                 # --- FLIP 3-WAYS IN POSITION - SYMMETRIC LONG/SHORT - Full Qty ---
                 flip_now=False; flip_to="NONE"; flip_tag=""; flip_reason2=""
                 can_flip_time=(time.time()-last_flip_time)>=CALM_SEC
@@ -334,45 +537,31 @@ def main():
                 elif mode=="HUNT_RIDE" and hunt_done and direction in ("LONG","SHORT") and direction!=side:
                     flip_now=True; flip_to=direction; flip_tag="FLIP_HUNT_DONE_TO_NORMAL"; flip_reason2="Hunt Done -> Normal"
                 if flip_now:
-                    # Flip as TP taker if profit, before SL if losing - both allowed
-                    log(f"🔄 {flip_tag}: {side} -> {flip_to} | Move ${profit_move:.0f} | {flip_reason2} | Price ${price:.0f}")
-                    tg(f"🔄 <b>{flip_tag}</b>\n{side} -> {flip_to}\nMove ${profit_move:.0f}\n{flip_reason2}")
-                    if close_position_market(flip_tag):
-                        _record_close(price, profit_move, flip_tag, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
+                    if _do_flip(flip_to, flip_tag, flip_reason2, price, cert, atr, hunter_score, hunter_bias, spread_score, spread_bias, "HUNT_RIDE" if "TO_HUNT" in flip_tag else "NORMAL", is_pileup=False):
                         last_flip_time=time.time()
-                        in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
-                        # Immediately enter flip direction with FULL QTY
-                        qty2=get_dynamic_qty(price, get_dynamic_leverage())
-                        if qty2>0:
-                            sl2,tp2=calc_sl_tp(price,flip_to,"HUNT_RIDE" if "TO_HUNT" in flip_tag else "NORMAL")
-                            r2=place_order("Buy" if flip_to=="LONG" else "Sell", qty2, sl2, tp2)
-                            if r2.get("retCode",1)==0:
-                                in_position=True; side=flip_to; entry=price; qty=qty2; mode="HUNT_RIDE" if "TO_HUNT" in flip_tag else "NORMAL"
-                        continue
-                    else: log("FLIP CLOSE FAILED - retry"); continue
+                        pileup_brain.reset_after_big_or_normal_takeover()
+                    continue
                 elif get_position() is None:
-                    # SL / TP hit on exchange (Bybit closed it) - TODO: fetch real closed PnL
                     _record_close(price, profit_move, "SL_TP_EXCHANGE", cert, atr, hunter_score, hunter_bias, spread_score, spread_bias)
                     _start_calm("SL_TP_EXCHANGE")
-                    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance(); continue
+                    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; get_balance()
+                    pileup_brain.reset_after_big_or_normal_takeover()
+                    continue
                 else:
                     sl,tp=calc_sl_tp(entry,side,mode)
-                    log(f"HOLDING [{mode}] {side} Entry ${entry:.0f} Price ${price:.0f} Move ${profit_move:.0f} | SL ${sl:.0f} BE CLOSE ${be_target:.0f} TP Backup ${tp:.0f} | W{wins} L{losses} BE{breakevens} | HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} Fake {fake_type} Wide {wide_cert} News {news.get('direction')} {news.get('score')} Boost {news_boost}%")
+                    log(f"HOLDING [{mode}] {side} Entry ${entry:.0f} Price ${price:.0f} Move ${profit_move:.0f} | SL ${sl:.0f} {'BE CLOSE $inf - Pile-Up Follow until Done' if mode=='PILEUP' else f'BE CLOSE ${be_target:.0f} TP Backup ${tp:.0f}'} | W{wins} L{losses} BE{breakevens} | HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} Fake {fake_type} Wide {wide_cert} PileUp Up {pileup_up_count}/3 Down {pileup_down_count}/3 Allowed {pileup_allowed} News {news.get('direction')} {news.get('score')} Boost {news_boost}%")
                     if in_position: continue
 
             # --- NOT IN POSITION: Entry Logic ---
             lev=get_dynamic_leverage(); qty_preview=get_dynamic_qty(price,lev)
             log(f"Price ${price:.0f} | ATR {atr:.0f} | {direction} Cert {cert}% Agree {agree}/8 Wide {wide_cert} Grounded {grounded_cert} | Bal ${balance:.2f} | Sweep {sweep_done} {sweep_dir} | Fake {fake_type} {fake_reason}")
-            log(f"HUNTER {hunter_bias} {hunter_score} | Hunt {hunt_cert.get('label','?')} {hunt_cert.get('score',0)}/9 {hunt_cert.get('hunt_dir','')} Type {hunt_state.get('hunt_type','')} State {hunt_state.get('state','')} | HuntRide {hunt_ride_sig} {hunt_ride_dir} HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} | Liq Long ${liq_c.get('long_liq',0):,.0f} Short ${liq_c.get('short_liq',0):,.0f} ({liq_c.get('dominant','?')}) | Spot ${spot_prem:.0f} | CVD {v.get('cvd_live',{}).get('buy_pct',50)}% | Funding {fc.get('risk','NONE')}")
+            log(f"HUNTER {hunter_bias} {hunter_score} | Hunt {hunt_cert.get('label','?')} {hunt_cert.get('score',0)}/9 {hunt_cert.get('hunt_dir','')} Type {hunt_state.get('hunt_type','')} State {hunt_state.get('state','')} | HuntRide {hunt_ride_sig} {hunt_ride_dir} HuntDone {hunt_done} Exhausted {hunt_exhausted} Flip {flip_allowed} {flip_dir} | Liq Long ${liq_c.get('long_liq',0):,.0f} Short ${liq_c.get('short_liq',0):,.0f} ({liq_c.get('dominant','?')}) | Spot ${spot_prem:.0f} | CVD {v.get('cvd_live',{}).get('buy_pct',50)}% | Funding {fc.get('risk','NONE')} | PileUp Up {pileup_up_count}/3 Down {pileup_down_count}/3 Allowed {pileup_allowed}")
             log(f"SPREAD {spread_bias} Score {spread_score} Boost {spread_boost}% | NEWS {news.get('direction')} {news.get('score')} Boost {news_boost}% | {news.get('headline_note','')} | PreEntry {pre_entry.get('active')} {pre_entry.get('name')}")
             if flip_reason: log(f"🔄 FLIP CHECK: {flip_reason}")
-            log(f"Qty {qty_preview} Lev {lev}x | Normal BE $800 CLOSE SL $1200 TP $1200 | Hunt BE $600 CLOSE SL $1000 TP $1200 | W{wins} L{losses} BE{breakevens} PnL ${daily_pnl:.2f} | CALM {CALM_SEC}s")
-            # NO DAILY LOSS HARD-CODE - less losses via calm/flip/hunt
-            # Pre-Entry: watch only, NO entry unless Sweep
+            log(f"Qty {qty_preview} Lev {lev}x | Normal BE $800 CLOSE SL $1200 TP $1200 | Hunt BE $600 CLOSE SL $1000 TP $1200 | Pile-Up No Fixed TP SL $1000 | W{wins} L{losses} BE{breakevens} PnL ${daily_pnl:.2f} | CALM {CALM_SEC}s Big/Normal | Pile-Up 60s")
             if pre_entry.get("active"):
                 log(f"👀 PRE-ENTRY {pre_entry.get('name')} - Watching only, no entry: {pre_entry.get('note')} | Hunt {hunt_cert.get('score',0)}/9")
                 if not sweep_done: continue
-            # V16 Priority SYMMETRIC: 1) Sweep, 2) Wide -> Normal, 3) Flip/Hunt Ride, 4) Wide Fake Bounce, 5) Normal cert>=75
             enter_dir=None; enter_mode="NORMAL"
             if sweep_done and direction in ("LONG","SHORT"):
                 enter_dir=direction; enter_mode="NORMAL"; log(f"⚡ SWEEP ENTER {enter_dir} @ ${price:.0f} - No bounce wait")
@@ -404,6 +593,7 @@ def main():
             r=place_order(order_side,qty_preview,sl,tp)
             if r.get("retCode",1)==0:
                 in_position=True; side=enter_dir; entry=price; qty=qty_preview; mode=enter_mode
+                _pileup_decay_mark["price"]=price
             else: log(f"Order failed: {r}")
         except Exception as e: log(f"MAIN LOOP ERROR: {e}"); time.sleep(5)
 
