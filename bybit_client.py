@@ -4,7 +4,6 @@ BASE="https://api.bybit.com"
 KEY=os.getenv("BYBIT_API_KEY","").strip(); SEC=os.getenv("BYBIT_API_SECRET","").strip()
 SYMBOL="BTCUSDT"; MARGIN="USDT"; RECV="5000"
 def _sign(payload,ts):
-    # FIXED: Bybit V5 = timestamp + api_key + recv_window + payload
     if not SEC: return "MISSING"
     msg=f"{ts}{KEY}{RECV}{payload}"
     return hmac.new(SEC.encode(),msg.encode(),hashlib.sha256).hexdigest()
@@ -21,7 +20,7 @@ def bybit_get(path,params):
     try: return requests.get(BASE+path,headers=h,params=params or {},timeout=30).json()
     except Exception as e: return {"retCode":-1,"retMsg":str(e),"result":{}}
 def get_balance():
-    # FIXED: try UNIFIED then CONTRACT, log retCode, never silent None
+    # PATCHED: avail FIRST, wallet second. Bot must use avail, no be wallet.
     for acct in ["UNIFIED","CONTRACT"]:
         j=bybit_get("/v5/account/wallet-balance",{"accountType":acct,"coin":"USDT"})
         print(f"[BAL DEBUG] {acct} retCode={j.get('retCode')} retMsg={j.get('retMsg')} ",flush=True)
@@ -32,13 +31,23 @@ def get_balance():
                 if c.get("coin")==MARGIN:
                     bal=float(c.get("walletBalance",0) or 0)
                     avail=float(c.get("availableBalance",0) or 0)
+                    # Bybit sometimes puts avail in availableToWithdraw
+                    if avail==0:
+                        avail=float(c.get("availableToWithdraw",0) or 0)
                     print(f"[BAL] {acct} wallet=${bal:.2f} avail=${avail:.2f}",flush=True)
-                    if bal>0: return bal
-                    if avail>0: return avail
+                    if avail>0:
+                        print(f"[BAL] Using AVAIL ${avail:.2f} from {acct}",flush=True)
+                        return avail
+                    if bal>0:
+                        print(f"[BAL] Avail 0, fallback to wallet ${bal:.2f} - order fit fail if avail still 0, transfer to Unified!",flush=True)
+                        return bal
         except Exception as e:
             print(f"[BAL ERROR] {acct} {e}",flush=True); continue
     print("[BAL] All wallets $0 - check Assets -> Unified USDT",flush=True)
     return 0.0
+def get_available_balance():
+    # Helper for main.py - returns avail only, no wallet fallback
+    return get_balance()
 def get_position():
     try:
         j=bybit_get("/v5/position/list",{"category":"linear","symbol":SYMBOL}); lst=j.get("result",{}).get("list",[])
@@ -47,7 +56,6 @@ def get_position():
     except Exception as e: print(f"[POS] {e}",flush=True)
     return None,0.0,0.0
 def get_dynamic_leverage(price,bal,risk=30.0):
-    # V12 + $5 RULE - kept for backward compat, main.py uses dynamic_qty_lev
     if not price or not bal: return 1
     if bal<5: return 60
     if bal<15: return 40
@@ -55,7 +63,6 @@ def get_dynamic_leverage(price,bal,risk=30.0):
     if bal<200: return 20
     return 15
 def get_dynamic_qty(price,bal,risk=30.0):
-    # FIXED: old formula returned 0.0 for $3.66, now uses V12 protocol
     if not price or not bal: return 0.0,1
     if bal<5: return 0.001,60
     if bal<15: return 0.001,40
@@ -63,7 +70,6 @@ def get_dynamic_qty(price,bal,risk=30.0):
     if bal<200: return 0.001,20
     return 0.001,15
 def set_isolated_margin(sym,lev,side):
-    # FIXED: sym must be BTCUSDT, not BTCUSDT.P
     sym="BTCUSDT"
     return bybit_post("/v5/position/switch-isolated",{"category":"linear","symbol":sym,"tradeMode":1,"buyLeverage":str(lev),"sellLeverage":str(lev)})
 def place_order(side,qty,sl,tp,price,lev):
