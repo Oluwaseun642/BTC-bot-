@@ -1,25 +1,51 @@
 import time
-from pileup_patch import pileup_gate_for_main
-from hunter_takeover import is_hunter_takeover
+try:
+    from pileup_patch import pileup_gate_for_main
+except Exception:
+    # Fallback if pileup_patch.py miss - servant gate simple
+    def pileup_gate_for_main(k1,count,score,cvd_flip,cert,cert_drop,move_against):
+        if count<3: return False,f"Pile count {count}/3 <3",None
+        if score<4: return False,f"Hunt {score} <4",None
+        if not cvd_flip: return False,"CVD no flip",None
+        return True,"Servant gate OK - pile 3/3 + hunt + CVD flip",None
+try:
+    from hunter_takeover import is_hunter_takeover
+except Exception:
+    # Fallback if hunter_takeover.py miss - takeover if hunt strong + liq big + CVD strong
+    def is_hunter_takeover(score,liq_total,cvd_buy,cert_dir,move_against):
+        if score>=6 and liq_total>=500000:
+            return True,f"Takeover fallback - hunt {score}/9 liq ${liq_total:.0f}"
+        return False,"No takeover"
 class PileupFlipBrain:
     def __init__(self): self.flip_locked=False; self.flip_block_until=0.0; self.void_price=0.0
-    def note_flip_used(self,dir,price): self.flip_locked=True; self.flip_block_until=time.time()+90; print(f"[FLIP] Used {dir} @ ${price:.1f}",flush=True)
+    def note_flip_used(self,dir,price): self.flip_locked=True; self.flip_block_until=time.time()+90; print(f"[FLIP] Used {dir} @ ${price:.1f} - locked 90s",flush=True)
     def can_flip_now(self):
-        if self.flip_locked: return False,"Flip locked - already flipped"
+        # FIXED: auto-unlock after 90s, no forever lock
+        if self.flip_locked and time.time()>=self.flip_block_until:
+            self.flip_locked=False
+        if self.flip_locked: return False,"Flip locked - already flipped, wait 90s"
         if time.time()<self.flip_block_until: return False,"Flip blocked 90s"
         return True,"OK"
     def is_repile_certain(self,price,side,entry,count,expected,target,liq,ob,cvd_agg,score):
         if count<3: return False,f"Repile: Count {count}/3 <3"
-        if expected<80: return False,f"Repile: Expected ${expected:.0f} < $80 - too close"  # WAS 150, NOW 80
+        if expected<80: return False,f"Repile: Expected ${expected:.0f} < $80 - too close"
         if expected>3000: return False,f"Repile: Expected ${expected:.0f} > $3000 - too far"
         if score<3: return False,f"Repile: Hunt {score} <3"
         return True,f"Repile Certain - count 3/3, move ${expected:.0f}, hunt {score}"
 def _two_candles_confirm(candles,dir):
     if not candles or len(candles)<2: return False,"No 2 candles"
     a,b=candles[-2],candles[-1]
-    if dir=="LONG": return (b["close"]>b["open"] and a["close"]>a["open"]),"2 candles LONG" if (b["close"]>b["open"] and a["close"]>a["open"]) else "2 candles no confirm LONG"
-    return (b["close"]<b["open"] and a["close"]<a["open"]),"2 candles SHORT" if (b["close"]<b["open"] and a["close"]<a["open"]) else "2 candles no confirm SHORT"
-def should_flip_to_pileup(brain,price,side,entry,count,pile_dir,score,cvd_agg,cvd_buy,cert,cert_dir,liq_total,k1,candles):
+    try:
+        a_close=float(a.get("close",0) if isinstance(a,dict) else a); a_open=float(a.get("open",0) if isinstance(a,dict) else a)
+        b_close=float(b.get("close",0) if isinstance(b,dict) else b); b_open=float(b.get("open",0) if isinstance(b,dict) else b)
+    except Exception:
+        return False,"Candles format wahala"
+    if dir=="LONG": return (b_close>b_open and a_close>a_open),"2 candles LONG" if (b_close>b_open and a_close>a_open) else "2 candles no confirm LONG"
+    return (b_close<b_open and a_close<a_open),"2 candles SHORT" if (b_close<b_open and a_close<a_open) else "2 candles no confirm SHORT"
+def should_flip_to_pileup(brain,price,side,entry,count,pile_dir,score,cvd_agg,cvd_buy,cert,cert_dir,liq_total,k1=None,candles=None):
+    # FIXED: k1/candles optional, so main.py no go crash if e no pass am
+    if k1 is None: k1=[]
+    if candles is None: candles=[]
     can,why=brain.can_flip_now()
     if not can: return False,why,None
     if count<3: return False,f"Flip: Count {count}/3 <3",None
