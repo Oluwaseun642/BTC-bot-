@@ -1,10 +1,23 @@
-# DATA ENGINE V17.2 FINAL - SESSION-AWARE CERT+HUNT, PILE FREE
+# DATA ENGINE V19.2 - FIXED: get_signal(price,candles) + _f safe
 import time,requests,csv,io,datetime
 try:
  from bybit_client import bybit_get
 except: bybit_get=None
 CACHE={"t":0,"d":None}
 H={"User-Agent":"Mozilla/5.0"}
+def _f(x):
+  try:
+    if isinstance(x, (list, tuple)):
+      if len(x)>0 and isinstance(x[0], dict):
+        return float(x[-1].get("c", x[-1].get("close", 0)))
+      if len(x)>=5 and isinstance(x[0], (int,float,str)):
+        try: return float(x[4])
+        except: return float(x[0])
+      return float(x[0]) if len(x)>0 else 0
+    if isinstance(x, dict):
+      return float(x.get("c", x.get("close", x.get("price", 0))))
+    return float(x)
+  except: return 0
 def _get(u,t=5):
  try:
   r=requests.get(u,headers=H,timeout=t)
@@ -24,10 +37,10 @@ def price_live():
   except:continue
  return _safe(lambda:float(bybit_get("/v5/market/tickers",{"category":"linear","symbol":"BTCUSDT"})["result"]["list"][0]["lastPrice"]),0)
 def klines(tf,n=60):
- def _f():
+ def _ff():
   r=bybit_get("/v5/market/kline",{"category":"linear","symbol":"BTCUSDT","interval":tf,"limit":n})
   return [{"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4]),"t":int(x[0])} for x in reversed(r["result"]["list"])]
- return _safe(_f,[])
+ return _safe(_ff,[])
 def world_one(y,s):
  d=_get(f"https://query1.finance.yahoo.com/v8/finance/chart/{y}")
  if d:
@@ -69,6 +82,7 @@ def news_live():
   return {"dir":"SHORT" if bear and not bull else "LONG" if bull and not bear else "NEUTRAL","txt":t[:180],"n":len(d["results"])}
  return {"dir":"NEUTRAL","txt":"news fallback","n":0}
 def liq_map(price):
+ price=_f(price)
  d=_get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100",t=5)
  if d:
   try:
@@ -83,6 +97,7 @@ def past_future():
  except:trend=0
  return {"trend_24h":trend,"next_event":"FOMC Dec 9 hike 93%","etf_1d":-645000000}
 def spot_premium(price):
+ price=_f(price)
  try:
   c=_get("https://api.coinbase.com/v2/prices/BTC-USD/spot")
   if c and price:return round((float(c["data"]["amount"])/price-1)*100,3)
@@ -131,6 +146,7 @@ def gold_boss(gold_chg,btc_chg):
  if abs(div)>1.5:return {"dir":"LONG" if div>0 else "SHORT","boost":5}
  return {"dir":"NONE","boost":0}
 def hunt(price,L,O,C,al,ah,R=None):
+ price=_f(price); al=_f(al); ah=_f(ah)
  sc=0;rs=[];dom=L["dom"];hd="SHORT" if dom=="HUNT_LONGS_FIRST" else "LONG" if dom=="HUNT_SHORTS_FIRST" else "NONE"
  if dom!="NONE":sc+=2;rs.append(f"Liq {dom} +2")
  if L["total"]>5000000:sc+=2;rs.append(f"Liq ${L['total']/1e6:.1f}M +2")
@@ -139,11 +155,10 @@ def hunt(price,L,O,C,al,ah,R=None):
  if hd=="LONG" and O["bias"]=="BID_WALL_STRONG":sc+=1;rs.append("Bid wall +1")
  if hd=="SHORT" and C["ag"]=="SELL":sc+=1;rs.append("CVD SELL +1")
  if hd=="LONG" and C["ag"]=="BUY":sc+=1;rs.append("CVD BUY +1")
- tgt=al if hd=="SHORT" else ah if hd=="LONG" else 0;dist=abs(price-tgt) if tgt else 9999
+ tgt=al if hd=="SHORT" else ah if hd=="LONG" else 0;tgt=_f(tgt);dist=abs(price-tgt) if tgt else 9999
  if tgt and dist<=300:sc+=2;rs.append(f"${dist:.0f} to tgt +2")
  elif tgt and dist<=800:sc+=1;rs.append(f"${dist:.0f} to tgt +1")
  if R and R["ACTIVE"]:
-  # SESSION-AWARE HUNT: only active session regions boost hunt
   act=R["ACTIVE"];agree=sum(1 for k in act if R[f"{k}_DIR"]==hd);dis=sum(1 for k in act if R[f"{k}_DIR"] not in (hd,"NEUTRAL"))
   if agree>=len(act) and agree>0:sc+=1;rs.append(f"Session {R['SESSION']} {hd} hunt +1")
   elif dis>=len(act) and dis>0:sc-=1;rs.append(f"Session {R['SESSION']} vs hunt -1")
@@ -151,7 +166,6 @@ def hunt(price,L,O,C,al,ah,R=None):
  return {"score":max(0,min(9,sc)),"label":lab,"dir":hd,"target":tgt,"dist":round(dist),"rs":rs}
 PILE={"up":0,"down":0,"last":0}
 def pile_upd(h):
- # PILE = SESSION-FREE - can happen anytime, weekend, midnight, no session
  if h["score"]>=3 and h["dist"]>300 and time.time()-PILE["last"]>300:
   if h["dir"]=="SHORT":PILE["down"]=min(3,PILE["down"]+1)
   elif h["dir"]=="LONG":PILE["up"]=min(3,PILE["up"]+1)
@@ -159,11 +173,17 @@ def pile_upd(h):
  if h["score"]<2:PILE["up"]=0;PILE["down"]=0
  return dict(PILE)
 def get_signal(price=0,candles=None):
+ # FIX: main.py fit call get_signal(candles) by mistake before, so if price na list/dict, treat am as candles
+ if isinstance(price, (list, tuple)) and candles is None:
+  candles=price; price=0
+ if isinstance(price, dict) and candles is None:
+  candles=[price]; price=0
  if CACHE["d"] and time.time()-CACHE["t"]<15:
-  d=dict(CACHE["d"]);d["price"]=price or d["price"];return d
- price=price or price_live()
+  d=dict(CACHE["d"]);d["price"]=_f(price) or d["price"];return d
+ price=_f(price) or price_live()
+ price=_f(price)
  if not price:return {"cert":0,"direction":"NONE","agree":0,"price":0,"reasons":["No price"]}
- k1=candles or klines("1",20);k15=klines("15",200)
+ k1=candles or klines("1",60);k15=klines("15",200)
  w=world();R=regions(w);fng=fear();fund,oi=funding_oi();rsi_v=rsi(k15);al,ah=asia(k15)
  O=ob();C=cvd();L=liq_map(price);M=macro(w,fund,rsi_v,fng);N=news_live();PF=past_future();SP=spot_premium(price)
  lv=sv=0;rs=[]
@@ -222,6 +242,6 @@ def get_signal(price=0,candles=None):
  out={"cert":cert,"direction":direction,"agree":agree,"total":total,"wide_cert":cert>=90 and agree>=total-2,"grounded":75<=cert<90 and agree>=total-3,"hunt_score":H["score"],"hunt_label":H["label"],"hunt_dir":H["dir"],"hunt_target":H["target"],"hunt_dist":H["dist"],"flip_allowed":flip_allowed,"flip_dir":H["dir"],"flip_reason":f"Hunt {H['score']}/9 {H['dir']} vs Cert {direction}" if flip_allowed else "","sweep_done":sweep_done,"sweep_dir":sweep,"trap_dir":trap_dir,"trap_mode":trap_mode,"pile_up":P["up"],"pile_down":P["down"],"cvd_buy_pct":C["pct"],"price":price,"asia_low":al,"asia_high":ah,"macro_bias":M["bias"],"fng":fng,"rsi":rsi_v,"world":w,"regions":R,"news":N,"liq_src":L["src"],"past":PF,"spot_prem":SP,"reasons":rs,"hunt_reasons":H["rs"],"k1_norm":k1}
  CACHE["t"]=time.time();CACHE["d"]=out;return out
 def get_price_and_candles():
- return price_live(),klines("1",20)
+ return price_live(),klines("1",60)
 if __name__=="__main__":
  p=price_live();s=get_signal(p);print(f"${p:.0f} {s['direction']} {s['cert']}% {s['agree']}/{s['total']} Sess {s['regions']['SESSION']} Act {s['regions']['ACTIVE']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Trap {s['trap_mode']} Pile {s['pile_up']}/{s['pile_down']}")
