@@ -1,202 +1,120 @@
-import os,time,requests,traceback
-from flask import Flask
-from threading import Thread
-from bybit_client import bybit_get,bybit_post,get_balance,get_dynamic_leverage,get_dynamic_qty,set_isolated_margin,place_order,close_position_market,SYMBOL
-from trade_helpers import be_target_for,calc_sl_tp,calc_atr
-from position_sync import sync_position_from_bybit
-from pileup_brain import PileupFlipBrain,should_flip_to_pileup,_two_candles_confirm
+# MAIN V17 - ONE FILE - 2 DOORS + FLIP GUARDIAN
+import os,time,threading,datetime,requests
 from data_engine import get_signal,get_price_and_candles
-app=Flask(__name__)
-@app.route("/")
-def home(): return "OK V16.5 MAIN SPLIT - 3 DOORS LONG+SHORT",200
-@app.route("/health")
-def health(): return "OK",200
-def keep_alive(): Thread(target=lambda: app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")),threaded=True),daemon=True).start()
-KEEP=os.getenv("RENDER_EXTERNAL_URL","") or os.getenv("KEEP_ALIVE_URL","")
-TRADING=os.getenv("TRADING_ENABLED","1").strip()!="0"
-def self_ping():
-    while True:
-        try:
-            if KEEP: requests.get(KEEP.rstrip("/")+"/",timeout=10)
-        except Exception: pass
-        time.sleep(300)
-def dynamic_qty_lev(price, bal):
-    if bal < 5: return 0.001, 60
-    if bal < 15: return 0.001, 40
-    if bal < 50:
-        q = 10.0 / 600.0
-        return max(0.001, round(q,3)), 30
-    if bal < 200:
-        q = 20.0 / 600.0
-        return max(0.001, round(q,3)), 20
-    risk = bal * 0.02
-    q = risk / 600.0
-    return max(0.001, round(q,3)), 15
-
-def do_enter(direction, price, bal, mode_label):
-    # Symmetric for LONG & SHORT - same qty, same lev, same SL/TP logic
-    q,lev=dynamic_qty_lev(price,bal)
-    print(f"[ENTRY CHECK] Bal ${bal:.2f} -> Qty {q} Lev {lev}x Dir {direction} Mode {mode_label}",flush=True)
-    sl,tp=calc_sl_tp(direction,price,"NORMAL")
-    set_isolated_margin("BTCUSDT",lev,direction)
-    r=place_order(direction,q,sl,tp,price,lev)
-    print(f"[ENTRY] {direction} {q} @ ${price:.1f} Lev {lev}x SL ${sl:.1f} TP ${tp:.1f} Mode {mode_label} -> {r.get('retCode')} {r.get('retMsg')}",flush=True)
-    return r,q
-
-def main():
-    keep_alive(); Thread(target=self_ping,daemon=True).start()
-    print("[MAIN] V16.5 MAIN SPLIT started - 3 DOORS LONG+SHORT | CERT 75% Worldwide | HUNTER 5/9 Override | PILE 3/3 Calm Bounce",flush=True)
-    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"
-    be_done=False; last_trade_close=0.0; in_calm=False; calm_start=0.0
-    brain=PileupFlipBrain(); flip_history=[]
-    wins=0; losses=0; bes=0
-    last_dir=None
-    last_price_for_calm=0.0
-    while True:
-        try:
-            prev_in_pos=in_position; prev_side=side; prev_entry=entry
-            st={"in_position":in_position,"side":side,"entry":entry,"qty":qty,"mode":mode}
-            st=sync_position_from_bybit(bybit_get,st)
-            in_position,side,entry,qty,mode=st["in_position"],st["side"],st["entry"],st["qty"],st["mode"]
-            price_live, k1_live = get_price_and_candles()
-            if not price_live or price_live==0:
-                print("[MAIN] No live price, wait 5s",flush=True); time.sleep(5); continue
-            sig=get_signal(price_live, None, k1_live)
-            price=float(sig.get("price",0) or price_live or 0)
-            if price==0: price=price_live
-            k1=sig.get("k1_norm",[]) or k1_live or []
-            candles=k1[-10:] if k1 else []
-            direction=sig.get("direction","NONE"); cert=sig.get("cert",0)
-            hunt_cert=sig.get("hunt_certainty",{}) or {}
-            hunt_score=int(hunt_cert.get("score",0) or sig.get("hunt_cert",0) or 0)
-            hunt_label=hunt_cert.get("label","NO_HUNT")
-            # Hunter direction: from data_engine if e give am, else use cert direction for support, opposite for override check
-            hunt_dir=hunt_cert.get("direction") or hunt_cert.get("dir") or sig.get("hunt_direction") or sig.get("hunt_dir") or direction
-            if hunt_dir not in ("LONG","SHORT"): hunt_dir=direction
-            liq=sig.get("liq_clusters",{}) or {}
-            cvd=sig.get("cvd_live",{}) or {}
-            cvd_agg=cvd.get("aggressive","NEUTRAL"); cvd_buy=float(cvd.get("buy_pct",50) or 50)
-            pileup=sig.get("pileup",{}) or {}
-            raw_up=min(int(pileup.get("pileup_up_count",0) or 0),3)
-            raw_down=min(int(pileup.get("pileup_down_count",0) or 0),3)
-            pile_allowed=bool(pileup.get("allowed", True))
-            if not pile_allowed:
-                try: brain.reset_pile("allowed=False from data_engine")
-                except Exception: pass
-                pile_up=0; pile_down=0
-            else:
-                pile_up=raw_up; pile_down=raw_down
-                _pile_dir_for_track="UP" if pile_up>=pile_down else "DOWN" if pile_down>0 else None
-                try:
-                    if _pile_dir_for_track: brain.track_pile(price, _pile_dir_for_track, max(pile_up,pile_down))
-                except Exception: pass
-                if getattr(brain,"pile_reset",False): pile_up=0; pile_down=0
-            # --- PILE RESET ON DIRECTION CHANGE - BOTH LONG & SHORT ---
-            if last_dir is not None and direction in ("LONG","SHORT") and direction != last_dir:
-                pile_up=0; pile_down=0
-                try: brain.reset_pile(f"direction change {last_dir}->{direction}")
-                except Exception: pass
-                print(f"[PILE] Reset - direction {last_dir} -> {direction} - 0/3",flush=True)
-            if direction in ("LONG","SHORT"): last_dir=direction
-            # Flat pile: UP = LONG bounce, DOWN = SHORT bounce. In-pos pile: opposite side
-            if not in_position:
-                if pile_up >= 3 and pile_up >= pile_down: flat_pile_dir="LONG"; flat_pile_count=pile_up
-                elif pile_down >= 3 and pile_down >= pile_up: flat_pile_dir="SHORT"; flat_pile_count=pile_down
-                else: flat_pile_dir="NONE"; flat_pile_count=max(pile_up,pile_down)
-            else:
-                flat_pile_dir="NONE"; flat_pile_count=0
-            if side=="SHORT": pile_count=pile_up
-            elif side=="LONG": pile_count=pile_down
-            else: pile_count=max(pile_up,pile_down)
-            pile_dir="LONG" if side=="SHORT" else "SHORT" if side=="LONG" else "NONE"
-            # Calm = no worldwide vitality: Cert < 75% and no big hunter. Pile fit work here.
-            is_calm = (cert < 75 and hunt_score < 5)
-            if last_price_for_calm==0: last_price_for_calm=price
-            # --- CLOSE COUNTING ---
-            if prev_in_pos and not in_position and prev_entry>0:
-                pnl_close=(price-prev_entry) if prev_side=="LONG" else (prev_entry-price)
-                if be_done: bes+=1; print(f"[STATS] Close -> BE | W {wins} L {losses} BE {bes} pnl ${pnl_close:.0f}",flush=True)
-                elif pnl_close>0: wins+=1; print(f"[STATS] Close -> WIN | W {wins} L {losses} BE {bes} pnl ${pnl_close:.0f}",flush=True)
-                elif pnl_close<0: losses+=1; print(f"[STATS] Close -> LOSS | W {wins} L {losses} BE {bes} pnl ${pnl_close:.0f}",flush=True)
-                be_done=False; last_trade_close=time.time(); mode="NORMAL"
-            bal_now=get_balance() or 0
-            total=max(1,wins+losses+bes)
-            win_rate=round((wins/total)*100,1) if (wins+losses)>0 else 0
-            print(f"[STATS] Bal ${bal_now:.2f} W {wins} L {losses} BE {bes} Win {win_rate}% | Price ${price:.0f} Dir {direction} Cert {cert}% Hunt {hunt_label} {hunt_score}/9 HuntDir {hunt_dir} Pile Up {pile_up}/3 Down {pile_down}/3 FlatPile {flat_pile_dir} {flat_pile_count}/3 Calm {is_calm} InPos {in_position} {side or ''} Mode {mode}",flush=True)
-            if in_position and side and entry:
-                pnl=(price-entry) if side=="LONG" else (entry-price)
-                be_t=be_target_for(mode)
-                if not be_done and pnl>=be_t:
-                    print(f"[BE] {side} pnl ${pnl:.0f} >= BE ${be_t:.0f}",flush=True); be_done=True
-                # --- FLIP BACK: Hunter done -> back to NORMAL. Pile done -> back to NORMAL. BOTH SIDES ---
-                if mode=="HUNTER" and hunt_score < 2:
-                    print(f"[FLIP BACK] Hunters done {hunt_score}/9 - close {side} hunter trade, flip back to NORMAL {direction}",flush=True)
-                    if TRADING and qty>0: close_position_market(side,qty)
-                    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; be_done=False; last_trade_close=time.time(); time.sleep(5); continue
-                if mode=="PILE" and flat_pile_count==0 and pile_count==0:
-                    print(f"[PILE DONE] Pile reset 0/3 - close {side} pile trade, flip back to NORMAL {direction}",flush=True)
-                    if TRADING and qty>0: close_position_market(side,qty)
-                    in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; be_done=False; last_trade_close=time.time(); time.sleep(5); continue
-                # --- BIG HUNTER OVERRIDE WHILE IN POSITION: flip to hunter direction - BOTH SIDES ---
-                if hunt_score >= 5 and hunt_dir in ("LONG","SHORT") and hunt_dir != side:
-                    print(f"[BIG HUNTER OVERRIDE] In {side} but Hunt {hunt_score}/9 {hunt_dir} override Cert {direction} - FLIP {side}->{hunt_dir}",flush=True)
-                    if TRADING and qty>0: close_position_market(side,qty)
-                    time.sleep(2)
-                    bal=get_balance() or 0
-                    if bal>=2 and TRADING:
-                        r,q2=do_enter(hunt_dir,price,bal,"HUNTER")
-                        if r.get("retCode")==0: in_position=True; side=hunt_dir; entry=price; qty=q2; mode="HUNTER"; be_done=False
-                    else:
-                        in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"
-                    time.sleep(5); continue
-                if pile_dir!="NONE" and (pile_allowed or pile_count>=3):
-                    try: ok,reason,tdir=should_flip_to_pileup(brain,price,side,entry,pile_count,pile_dir,hunt_score,cvd_agg,cvd_buy,cert,direction,float(liq.get("total",0) or 0),k1,candles)
-                    except TypeError: ok,reason,tdir=should_flip_to_pileup(brain,price,side,entry,pile_count,pile_dir,hunt_score,cvd_agg,cvd_buy,cert,direction,float(liq.get("total",0) or 0))
-                    print(f"[FLIP CHECK] {reason}",flush=True)
-                    if ok and tdir:
-                        print(f"[FLIP] Close {side} @ ${price:.1f}, open {tdir}",flush=True)
-                        if TRADING and qty>0: close_position_market(side,qty)
-                        try: brain.note_flip_used(tdir,price)
-                        except Exception: pass
-                        try: brain.reset_pile("after flip - new trade")
-                        except Exception: pass
-                        in_position=False; side=None; entry=0.0; qty=0.0; mode="NORMAL"; be_done=False; flip_history.append((time.time(),tdir,price)); last_trade_close=time.time(); time.sleep(5); continue
-            else:
-                # --- FLAT: 3 DOORS - SYMMETRIC LONG & SHORT ---
-                if not in_calm: in_calm=True; calm_start=time.time()
-                # CALM 150s only for NORMAL door. Hunter & Pile no dey wait CALM - session hunters must catch.
-                calm_passed = (time.time()-calm_start>=150) or (time.time()-last_trade_close>=150)
-                if not TRADING:
-                    time.sleep(5); continue
-                # Decide door
-                enter_dir=None; enter_mode=None
-                # DOOR 1: NORMAL - Worldwide vitality, Cert 75% - LONG or SHORT
-                if direction in ("LONG","SHORT") and cert>=75 and calm_passed:
-                    enter_dir=direction; enter_mode="NORMAL"
-                # DOOR 2: BIG HUNTER OVERRIDE - Hunt 5/9+, direction opposite or different from Cert, LONG or SHORT
-                elif hunt_score>=5 and hunt_dir in ("LONG","SHORT"):
-                    # If hunt_dir != cert direction, e be override. If same, e be confirmation - still enter hunter dir
-                    enter_dir=hunt_dir; enter_mode="HUNTER"
-                    print(f"[BIG HUNTER] Hunt {hunt_score}/9 {hunt_dir} override/support Cert {direction} {cert}% - enter hunter",flush=True)
-                # DOOR 3: PILE BOUNCE - Calm market, Pile 3/3, Cert no worry am, LONG or SHORT
-                elif is_calm and flat_pile_dir in ("LONG","SHORT") and flat_pile_count>=3:
-                    enter_dir=flat_pile_dir; enter_mode="PILE"
-                    print(f"[PILE BOUNCE] Pile {flat_pile_count}/3 {flat_pile_dir} Calm - Cert {cert}% no block am",flush=True)
-                else:
-                    # Clear WHY log - no be just SKIP
-                    if direction not in ("LONG","SHORT"): print(f"[SKIP] Dir NONE - no worldwide direction",flush=True)
-                    elif cert<75 and hunt_score<5 and not (is_calm and flat_pile_count>=3): print(f"[SKIP] Cert {cert}% <75% + Hunt {hunt_score}/9 <5 + Pile {flat_pile_count}/3 <3 - all 3 doors closed",flush=True)
-                    elif not calm_passed and cert>=75: print(f"[SKIP] NORMAL Cert {cert}% ok but CALM {int(time.time()-calm_start)}s/150s - wait",flush=True)
-                    time.sleep(5); continue
-                bal=get_balance() or 0
-                if bal < 2:
-                    print(f"[SKIP] Bal ${bal:.2f} < $2 min",flush=True); time.sleep(10); continue
-                r,q=do_enter(enter_dir,price,bal,enter_mode)
-                if r.get("retCode")==0:
-                    in_position=True; side=enter_dir; entry=price; qty=q; be_done=False; in_calm=False; mode=enter_mode
-                    try: brain.reset_pile("after entry - new pile")
-                    except Exception: pass
-            time.sleep(5)
-        except Exception as e:
-            print(f"[MAIN] Loop error {e}\n{traceback.format_exc()}",flush=True); time.sleep(5)
-if __name__=="__main__": main()
+from bybit_client import bybit_get,bybit_post
+import http.server,socketserver
+def keep():
+ class H(http.server.BaseHTTPRequestHandler):
+  def do_GET(self):self.send_response(200);self.end_headers();self.wfile.write(b"ok")
+  def log_message(self,*a):pass
+ socketserver.TCPServer(("",int(os.getenv("PORT",10000))),H).serve_forever()
+threading.Thread(target=keep,daemon=True).start()
+def ping():
+ while True:
+  try:requests.get(os.getenv("RENDER_EXTERNAL_URL","http://localhost:10000"),timeout=5)
+  except:pass
+  time.sleep(240)
+threading.Thread(target=ping,daemon=True).start()
+BAL=0;POS=None;ENTRY=0;MODE="";BE_DONE=False;LAST_CLOSE=0;LAST_FLIP_CANDLE=-1;PAUSED=False
+def bal():
+ try:
+  r=bybit_get("/v5/account/wallet-balance",{"accountType":"UNIFIED"})
+  return float(r["result"]["list"][0]["totalWalletBalance"])
+ except:return BAL
+def pos():
+ try:
+  r=bybit_get("/v5/position/list",{"category":"linear","symbol":"BTCUSDT"})
+  p=r["result"]["list"][0]
+  return p if float(p.get("size",0))>0 else None
+ except:return None
+def qty_lev(b):
+ if b<5:return 0.001,60
+ if b<20:return 0.002,50
+ if b<100:return 0.005,40
+ return 0.01,30
+def set_lev(l):
+ try:bybit_post("/v5/position/set-leverage",{"category":"linear","symbol":"BTCUSDT","buyLeverage":str(l),"sellLeverage":str(l)})
+ except:pass
+def order(side,q):
+ try:return bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(q),"positionIdx":0})
+ except Exception as e:print("[ERR order]",e);return None
+def close_all():
+ global POS
+ try:
+  p=pos()
+  if p:
+   side="Sell" if p["side"]=="Buy" else "Buy";bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(p["size"]),"positionIdx":0,"reduceOnly":True})
+ except Exception as e:print("[ERR close]",e)
+ POS=None
+def news_block():
+ # 5 min before/after FOMC/CPI/PCE - from env HH:MM list, default empty
+ return False
+print("[MAIN] V17 - 2 DOORS + FLIP - START")
+BAL=bal();print(f"[MAIN] Bal ${BAL:.2f}")
+POS=pos()
+if POS:ENTRY=float(POS["avgPrice"]);MODE="SYNC";print(f"[SYNC] Pos {POS['side']} {POS['size']} @ {ENTRY}")
+while True:
+ try:
+  if os.getenv("PAUSE_BOT")=="1":print("[PAUSE]");time.sleep(10);continue
+  BAL=bal();POS=pos()
+  if POS:ENTRY=float(POS["avgPrice"])
+  price,kl=get_price_and_candles();s=get_signal(price,kl)
+  # --- FLIP GUARDIAN - CHECK FIRST, BEFORE BE/TP/SL ---
+  if POS:
+   cur="LONG" if POS["side"]=="Buy" else "SHORT";opp="SHORT" if cur=="LONG" else "LONG"
+   candle=int(time.time()//60)
+   flip=False;why=""
+   if s["hunt_dir"]==opp and s["hunt_score"]>=6:flip=True;why=f"HUNTER {opp} {s['hunt_score']}/9"
+   elif s["direction"]==opp and s["cert"]>=75 and s["agree"]>=s["total"]-3:flip=True;why=f"CERT {opp} {s['cert']}%"
+   elif (s["pile_up"]>=3 and opp=="LONG") or (s["pile_down"]>=3 and opp=="SHORT"):
+    if s["hunt_dir"]==opp and s["hunt_score"]>=5:flip=True;why=f"PILE {opp} 3/3 + HUNT"
+   if flip and candle!=LAST_FLIP_CANDLE:
+    print(f"[FLIP] {cur}->{opp} {why} @ {price:.0f}");close_all();time.sleep(1);q,l=qty_lev(BAL);set_lev(l)
+    if BAL>=2 and (os.getenv("FORCE_SHORT")!="1" and os.getenv("FORCE_LONG")!="1"):order("Buy" if opp=="LONG" else "Sell",q)
+    ENTRY=price;MODE="FLIP";LAST_FLIP_CANDLE=candle;LAST_CLOSE=time.time();BE_DONE=False;POS=pos()
+  # --- MANAGE OPEN POS: BE / TP / SL / OPP SWEEP ---
+  if POS:
+   cur="LONG" if POS["side"]=="Buy" else "SHORT";run=(price-ENTRY) if cur=="LONG" else (ENTRY-price)
+   be_need=800 if MODE in ("NORMAL","SYNC") else 500 if MODE=="HUNTER" else 600
+   sl_d=1800 if MODE in ("NORMAL","SYNC") else 800 if MODE=="HUNTER" else 1000
+   tp1=2000 if MODE in ("NORMAL","SYNC") else 1000 if MODE=="HUNTER" else 1500
+   tp2=3500 if MODE in ("NORMAL","SYNC") else 2000 if MODE=="HUNTER" else 2500
+   # BE = early TP $500/600/800, close 50%
+   if not BE_DONE and run>=be_need:
+    print(f"[BE] {cur} +${run:.0f} close 50% @ {price:.0f}");q=float(POS["size"])/2
+    bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":"Sell" if cur=="LONG" else "Buy","orderType":"Market","qty":str(q),"positionIdx":0,"reduceOnly":True});BE_DONE=True
+   # TP2 / SL in $
+   if run>=tp2 or run<=-sl_d:
+    print(f"[EXIT] {cur} run ${run:.0f} @ {price:.0f}");close_all();LAST_CLOSE=time.time();BE_DONE=False;MODE=""
+   # Opposite sweep close early
+   elif (cur=="LONG" and s["sweep_dir"]=="SHORT") or (cur=="SHORT" and s["sweep_dir"]=="LONG"):
+    print(f"[SWEEP CLOSE] {cur} opp sweep");close_all();LAST_CLOSE=time.time();BE_DONE=False;MODE=""
+   print(f"[STATS] Bal ${BAL:.2f} Pos {cur} @ {ENTRY:.0f} Run ${run:.0f} Dir {s['direction']} Cert {s['cert']}% {s['agree']}/{s['total']} Sess {s['regions']['SESSION']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Trap {s['trap_mode']}")
+   time.sleep(7);continue
+  # --- NO POS: COOLDOWN ---
+  cd=150 if s["trap_mode"]=="PILE" else 150 # 2-3 min = 150s, pile 150s
+  if time.time()-LAST_CLOSE<cd:print(f"[COOLDOWN] {int(cd-(time.time()-LAST_CLOSE))}s");time.sleep(7);continue
+  if BAL<2:print(f"[NO BAL] ${BAL:.2f}");time.sleep(10);continue
+  # --- DECIDE DOOR ---
+  force=os.getenv("FORCE_LONG")=="1" and "LONG" or os.getenv("FORCE_SHORT")=="1" and "SHORT" or None
+  enter=None;mode=""
+  # DOOR 2 TRAP FIRST - HUNTER / PILE / SWEEP
+  if s["trap_mode"]=="SWEEP" and s["trap_dir"] in ("LONG","SHORT"):enter=s["trap_dir"];mode="HUNTER"
+  elif s["trap_mode"]=="HUNTER" and s["hunt_score"]>=5:enter=s["trap_dir"];mode="HUNTER"
+  elif s["trap_mode"]=="PILE" and s["trap_dir"] in ("LONG","SHORT") and s["cert"]<75:enter=s["trap_dir"];mode="PILE"
+  elif s["hunt_score"]>=6 and s["hunt_dir"] in ("LONG","SHORT"):enter=s["hunt_dir"];mode="HUNTER" # BIGGEST take over Cert
+  # DOOR 1 NORMAL - WORLDWIDE CERT V17.2
+  if not enter and s["direction"] in ("LONG","SHORT") and s["cert"]>=75 and s["agree"]>=s["total"]-3:
+   if news_block() and s["hunt_score"]<5:print("[NEWS BLOCK] Normal skip");enter=None
+   else:enter=s["direction"];mode="NORMAL"
+  if force:enter=force;mode="NORMAL";print(f"[FORCE] {force}")
+  if enter:
+   # Funding guard: no LONG if funding too high
+   from data_engine import funding_oi
+   fu,_=funding_oi()
+   if enter=="LONG" and fu>0.02:print(f"[FUND BLOCK] {fu}");time.sleep(7);continue
+   q,l=qty_lev(BAL);set_lev(l);print(f"[ENTER] {mode} {enter} Cert {s['cert']}% Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Qty {q} Lev {l}x @ {price:.0f}")
+   order("Buy" if enter=="LONG" else "Sell",q);ENTRY=price;MODE=mode;BE_DONE=False
+  else:print(f"[SKIP] Dir {s['direction']} Cert {s['cert']}% {s['agree']}/{s['total']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Trap {s['trap_mode']} Sess {s['regions']['SESSION']}")
+  time.sleep(7)
+ except Exception as e:print("[ERR loop]",e);time.sleep(7)
