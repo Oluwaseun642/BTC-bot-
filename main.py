@@ -1,4 +1,4 @@
-# MAIN V19 - VOL ONLY + CERT FLIP + HUNTER FLIP
+# MAIN V19.1 - VOL ONLY + CERT FLIP + HUNTER FLIP - FIXED VOL
 # Rules:
 # - No High Vol = No Trade
 # - Cert 70% + Vol 1.35 = ENTER Normal
@@ -41,26 +41,56 @@ def ping():
   time.sleep(60)
 threading.Thread(target=ping,daemon=True).start()
 
-# --- VOL ENGINE ---
+# --- VOL ENGINE - STRONG VERSION, HANDLE ANY CANDLE FORMAT ---
+def _num(x):
+  try:
+    if isinstance(x, (list, tuple)):
+      return float(x[0]) if len(x)>0 else 0
+    if isinstance(x, dict):
+      return float(x.get("close", x.get("c", 0)))
+    return float(x)
+  except: return 0
+
+def _candle(c):
+  try:
+    if isinstance(c, dict):
+      h=_num(c.get("high", c.get("h", 0)))
+      l=_num(c.get("low", c.get("l", 0)))
+      cl=_num(c.get("close", c.get("c", 0)))
+      return h,l,cl
+    if isinstance(c, (list, tuple)):
+      if len(c)==1 and isinstance(c[0], (list, tuple, dict)):
+        return _candle(c[0])
+      h=_num(c[2]) if len(c)>2 else 0
+      l=_num(c[3]) if len(c)>3 else 0
+      cl=_num(c[4]) if len(c)>4 else 0
+      return h,l,cl
+    return 0,0,0
+  except: return 0,0,0
+
 def get_vol(candles, price):
- try:
-  if len(candles)<55: return 0,0,0
-  ranges=[float(c[2])-float(c[3]) for c in candles[-55:]]
-  avg_50=sum(ranges[:-5])/50
-  avg_5=sum(ranges[-5:])/5
-  vol_ratio=avg_5/avg_50 if avg_50>0 else 0
-  price_5_ago=float(candles[-6][4])
-  velocity=abs(price-price_5_ago)/price_5_ago*100
-  hr=int(time.strftime("%H"))
-  sess_boost=1.15 if hr in (8,9,10,13,14,15) else 1.0
-  return round(vol_ratio,2), round(velocity,3), round(vol_ratio*sess_boost,2)
- except: return 0,0,0
+  try:
+    if not candles or len(candles)<55: return 0,0,0
+    parsed=[_candle(c) for c in candles[-55:]]
+    ranges=[h-l for h,l,cl in parsed if h>0 and l>0]
+    if len(ranges)<55: return 0,0,0
+    avg_50=sum(ranges[:-5])/50
+    avg_5=sum(ranges[-5:])/5
+    vol_ratio=avg_5/avg_50 if avg_50>0 else 0
+    price_5_ago=parsed[-6][2]
+    if price_5_ago==0: price_5_ago=price
+    velocity=abs(price-price_5_ago)/price_5_ago*100 if price_5_ago>0 else 0
+    hr=int(time.strftime("%H"))
+    sess_boost=1.15 if hr in (8,9,10,13,14,15) else 1.0
+    return round(vol_ratio,2), round(velocity,3), round(vol_ratio*sess_boost,2)
+  except Exception as e:
+    print(f"[VOL-ERR] {e}", flush=True)
+    return 0,0,0
 
 BAL=bal(); ENTRY=0; MODE=""; BE_DONE=False; LAST_CLOSE=0
 VOL_DEAD_START=0; FLIPS_TODAY=0; LAST_FLIP_DAY=""
-# Keep last cert direction to detect Cert Flip
 LAST_CERT_DIR=""
-log(f"START V19 VOL-ONLY Bal ${BAL:.2f}")
+log(f"START V19.1 VOL-ONLY Bal ${BAL:.2f}")
 
 while True:
  try:
@@ -72,33 +102,23 @@ while True:
   BAL=bal(); P=pos()
   today=time.strftime("%Y-%m-%d")
   if today!=LAST_FLIP_DAY: LAST_FLIP_DAY=today; FLIPS_TODAY=0
-
-  # Thresholds - agreed
   VOL_HIGH = vol_score>=1.35 and velocity>=0.12
   VOL_DEAD = vol_score<1.15 and velocity<0.08
   cert_dir=s.get("direction","")
   cert=s.get("cert",0)
   hunt_dir=s.get("hunt_dir","")
   hunt_score=s.get("hunt_score",0)
-  # Hunter = Session opposite Worldwide
   IS_HUNTER = hunt_dir!="" and cert_dir!="" and hunt_dir!=cert_dir and hunt_score>=7
-
-  # --- NO POSITION ---
   if not P:
    enter=None; why=""
-   # 1. HUNTER ENTER - Session vs Worldwide + Vol
    if VOL_HIGH and IS_HUNTER:
     enter=hunt_dir; MODE="HUNTER"; why=f"HUNTER {hunt_dir} {hunt_score}/9 vs Cert {cert_dir} Vol {vol_score} Vel {velocity}%"
-   # 2. CERT FLIP ENTER - Vol Flip sudden (even if cert never reach 70 yet, hunters takeover)
    elif VOL_HIGH and hunt_score>=7 and hunt_dir in ("LONG","SHORT"):
-    # Vol explode + Hunt strong = hunters don take over, enter with them
     enter=hunt_dir; MODE="HUNTER"; why=f"VOL-FLIP HUNT {hunt_dir} {hunt_score}/9 Vol {vol_score} Vel {velocity}%"
-   # 3. NORMAL CERT ENTER
    elif VOL_HIGH and cert>=70 and cert_dir in ("LONG","SHORT"):
     enter=cert_dir; MODE="NORMAL"; why=f"CERT {cert_dir} {cert:.0f}% Vol {vol_score} Vel {velocity}%"
    elif env("FORCE_LONG")=="1": enter="LONG"; MODE="FORCE"
    elif env("FORCE_SHORT")=="1": enter="SHORT"; MODE="FORCE"
-
    if enter and time.time()-LAST_CLOSE>60:
     q,l=qty_lev(BAL); set_lev(l); order("Buy" if enter=="LONG" else "Sell",q)
     ENTRY=price; BE_DONE=False; VOL_DEAD_START=0; LAST_CERT_DIR=cert_dir
@@ -109,13 +129,9 @@ while True:
     else:
      log(f"[STATS] Bal ${BAL:.2f} NoPos Price {price:.0f} Cert {cert_dir} {cert:.0f}% Hunt {hunt_dir} {hunt_score}/9 Hunter? {IS_HUNTER} Vol {vol_score} Vel {velocity}%")
    time.sleep(7); continue
-
-  # --- HAVE POSITION ---
   if ENTRY==0: ENTRY=float(P["avgPrice"])
   cur="LONG" if P["side"]=="Buy" else "SHORT"; opp="SHORT" if cur=="LONG" else "LONG"
   run=(price-ENTRY) if cur=="LONG" else (ENTRY-price)
-
-  # BE / SL / TP2 - still dey, but Vol-Dead TP go cut am before SL most times
   be_need=500 if MODE=="HUNTER" else 800
   if not BE_DONE and run>=be_need:
    close_all(); time.sleep(1); q,l=qty_lev(BAL); set_lev(l); order("Buy" if cur=="LONG" else "Sell",q)
@@ -125,37 +141,28 @@ while True:
    log(f"[SL] {cur} @ {price:.0f} Run ${run:.0f}"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
   if run>=2000:
    log(f"[TP2] {cur} @ {price:.0f} Run ${run:.0f}"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
-
-  # --- FLIP CHECK - ONLY IF VOL HIGH ---
   flip=False; why=""
   if VOL_HIGH and run<200 and time.time()-LAST_CLOSE>600 and FLIPS_TODAY<3:
-   # A. CERT FLIP: Worldwide itself flip to opposite 80%+
    if cert_dir==opp and cert>=80:
     flip=True; why=f"CERT-FLIP Worldwide {opp} {cert:.0f}% Vol {vol_score}"
-   # B. HUNTER FLIP: Session opposite Worldwide + Hunt 7/9 + Vol, and hunter direction na opp
    elif IS_HUNTER and hunt_dir==opp:
     flip=True; why=f"HUNTER-FLIP Session {opp} {hunt_score}/9 vs Worldwide {cert_dir} Vol {vol_score} Vel {velocity}%"
-   # C. VOL-FLIP: Hunters takeover, hunt opp strong, even if cert never flip yet
    elif hunt_dir==opp and hunt_score>=7:
     flip=True; why=f"VOL-FLIP Hunt {opp} {hunt_score}/9 Vol {vol_score} Vel {velocity}%"
   if flip:
    log(f"[FLIP] {cur}->{opp} {why} @ {price:.0f} Run ${run:.0f}"); close_all(); time.sleep(1); q,l=qty_lev(BAL); set_lev(l); order("Buy" if opp=="LONG" else "Sell",q)
    ENTRY=price; MODE="HUNTER"; BE_DONE=False; LAST_CLOSE=time.time(); FLIPS_TODAY+=1; VOL_DEAD_START=0; LAST_CERT_DIR=cert_dir
    time.sleep(7); continue
-
-  # --- VOL DEAD LOGIC ---
   if VOL_DEAD:
    if VOL_DEAD_START==0:
     VOL_DEAD_START=time.time(); log(f"[VOL-DIE] Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Vol {vol_score} Vel {velocity}% - Hold 2 min, dey watch flip or continue")
    elif time.time()-VOL_DEAD_START>=120:
-    # 2 min pass, no flip, no vol come back = TP where e is
     log(f"[TP-DEAD-VOL] {cur} @ {price:.0f} Run ${run:.0f} Vol dead 2min, no flip - TP here, wait for good vol"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
    else:
     left=int(120-(time.time()-VOL_DEAD_START))
     log(f"[HOLD-NO-VOL] Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Vol {vol_score} Vel {velocity}% - {left}s to TP if no vol/flip")
    time.sleep(7); continue
   else:
-   # Vol don come back, reset dead timer
    if VOL_DEAD_START!=0: log(f"[VOL-BACK] Pos {cur} Vol {vol_score} Vel {velocity}% - Vol continue, hold")
    VOL_DEAD_START=0
    log(f"[STATS] Bal ${BAL:.2f} Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Price {price:.0f} Cert {cert_dir} {cert:.0f}% Hunt {hunt_dir} {hunt_score}/9 Hunter? {IS_HUNTER} Vol {vol_score} Vel {velocity}% Flips {FLIPS_TODAY}/3")
