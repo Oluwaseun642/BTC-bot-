@@ -1,120 +1,164 @@
-# MAIN V17 - ONE FILE - 2 DOORS + FLIP GUARDIAN
-import os,time,threading,datetime,requests
-from data_engine import get_signal,get_price_and_candles
+# MAIN V19 - VOL ONLY + CERT FLIP + HUNTER FLIP
+# Rules:
+# - No High Vol = No Trade
+# - Cert 70% + Vol 1.35 = ENTER Normal
+# - Hunt 7/9 + Vol 1.35 = ENTER Hunter (Session vs Worldwide)
+# - Cert Flip 80% + Vol = TP + FLIP
+# - Hunter Flip (Session opposite Worldwide) + Hunt 7/9 + Vol = TP + FLIP
+# - Vol Die 2 min, no flip = TP where e is, WAIT for good vol
+import os,time,threading
+from http.server import BaseHTTPRequestHandler,HTTPServer
 from bybit_client import bybit_get,bybit_post
-import http.server,socketserver
-def keep():
- class H(http.server.BaseHTTPRequestHandler):
-  def do_GET(self):self.send_response(200);self.end_headers();self.wfile.write(b"ok")
-  def log_message(self,*a):pass
- socketserver.TCPServer(("",int(os.getenv("PORT",10000))),H).serve_forever()
-threading.Thread(target=keep,daemon=True).start()
-def ping():
- while True:
-  try:requests.get(os.getenv("RENDER_EXTERNAL_URL","http://localhost:10000"),timeout=5)
-  except:pass
-  time.sleep(240)
-threading.Thread(target=ping,daemon=True).start()
-BAL=0;POS=None;ENTRY=0;MODE="";BE_DONE=False;LAST_CLOSE=0;LAST_FLIP_CANDLE=-1;PAUSED=False
+from data_engine import get_signal,get_price_and_candles
+
+def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}",flush=True)
+def env(k,d="0"): return os.getenv(k,d)
 def bal():
- try:
-  r=bybit_get("/v5/account/wallet-balance",{"accountType":"UNIFIED"})
-  return float(r["result"]["list"][0]["totalWalletBalance"])
- except:return BAL
+ r=bybit_get("/v5/account/wallet-balance",{"accountType":"UNIFIED","coin":"USDT"})
+ try: return float(r["result"]["list"][0]["coin"][0]["walletBalance"])
+ except: return 0
 def pos():
+ r=bybit_get("/v5/position/list",{"category":"linear","symbol":"BTCUSDT"})
  try:
-  r=bybit_get("/v5/position/list",{"category":"linear","symbol":"BTCUSDT"})
-  p=r["result"]["list"][0]
-  return p if float(p.get("size",0))>0 else None
- except:return None
-def qty_lev(b):
- if b<5:return 0.001,60
- if b<20:return 0.002,50
- if b<100:return 0.005,40
- return 0.01,30
-def set_lev(l):
- try:bybit_post("/v5/position/set-leverage",{"category":"linear","symbol":"BTCUSDT","buyLeverage":str(l),"sellLeverage":str(l)})
- except:pass
-def order(side,q):
- try:return bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(q),"positionIdx":0})
- except Exception as e:print("[ERR order]",e);return None
+  l=r["result"]["list"]; return l[0] if l and float(l[0]["size"])>0 else None
+ except: return None
+def qty_lev(b): return 0.001,60
+def set_lev(l): bybit_post("/v5/position/set-leverage",{"category":"linear","symbol":"BTCUSDT","buyLeverage":str(l),"sellLeverage":str(l)})
+def order(side,q): return bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(q)})
 def close_all():
- global POS
+ p=pos()
+ if p: order("Sell" if p["side"]=="Buy" else "Buy",p["size"])
+
+class H(BaseHTTPRequestHandler):
+ def do_GET(self): self.send_response(200);self.end_headers();self.wfile.write(b"ok")
+ def log_message(self,*a): pass
+threading.Thread(target=lambda:HTTPServer(("0.0.0.0",int(os.getenv("PORT","10000"))),H).serve_forever(),daemon=True).start()
+def ping():
+ import requests
+ while True:
+  try: requests.get(os.getenv("RENDER_EXTERNAL_URL","http://localhost:10000"),timeout=5)
+  except: pass
+  time.sleep(60)
+threading.Thread(target=ping,daemon=True).start()
+
+# --- VOL ENGINE ---
+def get_vol(candles, price):
  try:
-  p=pos()
-  if p:
-   side="Sell" if p["side"]=="Buy" else "Buy";bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":side,"orderType":"Market","qty":str(p["size"]),"positionIdx":0,"reduceOnly":True})
- except Exception as e:print("[ERR close]",e)
- POS=None
-def news_block():
- # 5 min before/after FOMC/CPI/PCE - from env HH:MM list, default empty
- return False
-print("[MAIN] V17 - 2 DOORS + FLIP - START")
-BAL=bal();print(f"[MAIN] Bal ${BAL:.2f}")
-POS=pos()
-if POS:ENTRY=float(POS["avgPrice"]);MODE="SYNC";print(f"[SYNC] Pos {POS['side']} {POS['size']} @ {ENTRY}")
+  if len(candles)<55: return 0,0,0
+  ranges=[float(c[2])-float(c[3]) for c in candles[-55:]]
+  avg_50=sum(ranges[:-5])/50
+  avg_5=sum(ranges[-5:])/5
+  vol_ratio=avg_5/avg_50 if avg_50>0 else 0
+  price_5_ago=float(candles[-6][4])
+  velocity=abs(price-price_5_ago)/price_5_ago*100
+  hr=int(time.strftime("%H"))
+  sess_boost=1.15 if hr in (8,9,10,13,14,15) else 1.0
+  return round(vol_ratio,2), round(velocity,3), round(vol_ratio*sess_boost,2)
+ except: return 0,0,0
+
+BAL=bal(); ENTRY=0; MODE=""; BE_DONE=False; LAST_CLOSE=0
+VOL_DEAD_START=0; FLIPS_TODAY=0; LAST_FLIP_DAY=""
+# Keep last cert direction to detect Cert Flip
+LAST_CERT_DIR=""
+log(f"START V19 VOL-ONLY Bal ${BAL:.2f}")
+
 while True:
  try:
-  if os.getenv("PAUSE_BOT")=="1":print("[PAUSE]");time.sleep(10);continue
-  BAL=bal();POS=pos()
-  if POS:ENTRY=float(POS["avgPrice"])
-  price,kl=get_price_and_candles();s=get_signal(price,kl)
-  # --- FLIP GUARDIAN - CHECK FIRST, BEFORE BE/TP/SL ---
-  if POS:
-   cur="LONG" if POS["side"]=="Buy" else "SHORT";opp="SHORT" if cur=="LONG" else "LONG"
-   candle=int(time.time()//60)
-   flip=False;why=""
-   if s["hunt_dir"]==opp and s["hunt_score"]>=6:flip=True;why=f"HUNTER {opp} {s['hunt_score']}/9"
-   elif s["direction"]==opp and s["cert"]>=75 and s["agree"]>=s["total"]-3:flip=True;why=f"CERT {opp} {s['cert']}%"
-   elif (s["pile_up"]>=3 and opp=="LONG") or (s["pile_down"]>=3 and opp=="SHORT"):
-    if s["hunt_dir"]==opp and s["hunt_score"]>=5:flip=True;why=f"PILE {opp} 3/3 + HUNT"
-   if flip and candle!=LAST_FLIP_CANDLE:
-    print(f"[FLIP] {cur}->{opp} {why} @ {price:.0f}");close_all();time.sleep(1);q,l=qty_lev(BAL);set_lev(l)
-    if BAL>=2 and (os.getenv("FORCE_SHORT")!="1" and os.getenv("FORCE_LONG")!="1"):order("Buy" if opp=="LONG" else "Sell",q)
-    ENTRY=price;MODE="FLIP";LAST_FLIP_CANDLE=candle;LAST_CLOSE=time.time();BE_DONE=False;POS=pos()
-  # --- MANAGE OPEN POS: BE / TP / SL / OPP SWEEP ---
-  if POS:
-   cur="LONG" if POS["side"]=="Buy" else "SHORT";run=(price-ENTRY) if cur=="LONG" else (ENTRY-price)
-   be_need=800 if MODE in ("NORMAL","SYNC") else 500 if MODE=="HUNTER" else 600
-   sl_d=1800 if MODE in ("NORMAL","SYNC") else 800 if MODE=="HUNTER" else 1000
-   tp1=2000 if MODE in ("NORMAL","SYNC") else 1000 if MODE=="HUNTER" else 1500
-   tp2=3500 if MODE in ("NORMAL","SYNC") else 2000 if MODE=="HUNTER" else 2500
-   # BE = early TP $500/600/800, close 50%
-   if not BE_DONE and run>=be_need:
-    print(f"[BE] {cur} +${run:.0f} close 50% @ {price:.0f}");q=float(POS["size"])/2
-    bybit_post("/v5/order/create",{"category":"linear","symbol":"BTCUSDT","side":"Sell" if cur=="LONG" else "Buy","orderType":"Market","qty":str(q),"positionIdx":0,"reduceOnly":True});BE_DONE=True
-   # TP2 / SL in $
-   if run>=tp2 or run<=-sl_d:
-    print(f"[EXIT] {cur} run ${run:.0f} @ {price:.0f}");close_all();LAST_CLOSE=time.time();BE_DONE=False;MODE=""
-   # Opposite sweep close early
-   elif (cur=="LONG" and s["sweep_dir"]=="SHORT") or (cur=="SHORT" and s["sweep_dir"]=="LONG"):
-    print(f"[SWEEP CLOSE] {cur} opp sweep");close_all();LAST_CLOSE=time.time();BE_DONE=False;MODE=""
-   print(f"[STATS] Bal ${BAL:.2f} Pos {cur} @ {ENTRY:.0f} Run ${run:.0f} Dir {s['direction']} Cert {s['cert']}% {s['agree']}/{s['total']} Sess {s['regions']['SESSION']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Trap {s['trap_mode']}")
-   time.sleep(7);continue
-  # --- NO POS: COOLDOWN ---
-  cd=150 if s["trap_mode"]=="PILE" else 150 # 2-3 min = 150s, pile 150s
-  if time.time()-LAST_CLOSE<cd:print(f"[COOLDOWN] {int(cd-(time.time()-LAST_CLOSE))}s");time.sleep(7);continue
-  if BAL<2:print(f"[NO BAL] ${BAL:.2f}");time.sleep(10);continue
-  # --- DECIDE DOOR ---
-  force=os.getenv("FORCE_LONG")=="1" and "LONG" or os.getenv("FORCE_SHORT")=="1" and "SHORT" or None
-  enter=None;mode=""
-  # DOOR 2 TRAP FIRST - HUNTER / PILE / SWEEP
-  if s["trap_mode"]=="SWEEP" and s["trap_dir"] in ("LONG","SHORT"):enter=s["trap_dir"];mode="HUNTER"
-  elif s["trap_mode"]=="HUNTER" and s["hunt_score"]>=5:enter=s["trap_dir"];mode="HUNTER"
-  elif s["trap_mode"]=="PILE" and s["trap_dir"] in ("LONG","SHORT") and s["cert"]<75:enter=s["trap_dir"];mode="PILE"
-  elif s["hunt_score"]>=6 and s["hunt_dir"] in ("LONG","SHORT"):enter=s["hunt_dir"];mode="HUNTER" # BIGGEST take over Cert
-  # DOOR 1 NORMAL - WORLDWIDE CERT V17.2
-  if not enter and s["direction"] in ("LONG","SHORT") and s["cert"]>=75 and s["agree"]>=s["total"]-3:
-   if news_block() and s["hunt_score"]<5:print("[NEWS BLOCK] Normal skip");enter=None
-   else:enter=s["direction"];mode="NORMAL"
-  if force:enter=force;mode="NORMAL";print(f"[FORCE] {force}")
-  if enter:
-   # Funding guard: no LONG if funding too high
-   from data_engine import funding_oi
-   fu,_=funding_oi()
-   if enter=="LONG" and fu>0.02:print(f"[FUND BLOCK] {fu}");time.sleep(7);continue
-   q,l=qty_lev(BAL);set_lev(l);print(f"[ENTER] {mode} {enter} Cert {s['cert']}% Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Qty {q} Lev {l}x @ {price:.0f}")
-   order("Buy" if enter=="LONG" else "Sell",q);ENTRY=price;MODE=mode;BE_DONE=False
-  else:print(f"[SKIP] Dir {s['direction']} Cert {s['cert']}% {s['agree']}/{s['total']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Pile {s['pile_up']}/{s['pile_down']} Trap {s['trap_mode']} Sess {s['regions']['SESSION']}")
+  if env("PAUSE_BOT")=="1": time.sleep(7); continue
+  price,candles=get_price_and_candles()
+  if not price: time.sleep(7); continue
+  s=get_signal(candles)
+  vol_ratio,velocity,vol_score=get_vol(candles,price)
+  BAL=bal(); P=pos()
+  today=time.strftime("%Y-%m-%d")
+  if today!=LAST_FLIP_DAY: LAST_FLIP_DAY=today; FLIPS_TODAY=0
+
+  # Thresholds - agreed
+  VOL_HIGH = vol_score>=1.35 and velocity>=0.12
+  VOL_DEAD = vol_score<1.15 and velocity<0.08
+  cert_dir=s.get("direction","")
+  cert=s.get("cert",0)
+  hunt_dir=s.get("hunt_dir","")
+  hunt_score=s.get("hunt_score",0)
+  # Hunter = Session opposite Worldwide
+  IS_HUNTER = hunt_dir!="" and cert_dir!="" and hunt_dir!=cert_dir and hunt_score>=7
+
+  # --- NO POSITION ---
+  if not P:
+   enter=None; why=""
+   # 1. HUNTER ENTER - Session vs Worldwide + Vol
+   if VOL_HIGH and IS_HUNTER:
+    enter=hunt_dir; MODE="HUNTER"; why=f"HUNTER {hunt_dir} {hunt_score}/9 vs Cert {cert_dir} Vol {vol_score} Vel {velocity}%"
+   # 2. CERT FLIP ENTER - Vol Flip sudden (even if cert never reach 70 yet, hunters takeover)
+   elif VOL_HIGH and hunt_score>=7 and hunt_dir in ("LONG","SHORT"):
+    # Vol explode + Hunt strong = hunters don take over, enter with them
+    enter=hunt_dir; MODE="HUNTER"; why=f"VOL-FLIP HUNT {hunt_dir} {hunt_score}/9 Vol {vol_score} Vel {velocity}%"
+   # 3. NORMAL CERT ENTER
+   elif VOL_HIGH and cert>=70 and cert_dir in ("LONG","SHORT"):
+    enter=cert_dir; MODE="NORMAL"; why=f"CERT {cert_dir} {cert:.0f}% Vol {vol_score} Vel {velocity}%"
+   elif env("FORCE_LONG")=="1": enter="LONG"; MODE="FORCE"
+   elif env("FORCE_SHORT")=="1": enter="SHORT"; MODE="FORCE"
+
+   if enter and time.time()-LAST_CLOSE>60:
+    q,l=qty_lev(BAL); set_lev(l); order("Buy" if enter=="LONG" else "Sell",q)
+    ENTRY=price; BE_DONE=False; VOL_DEAD_START=0; LAST_CERT_DIR=cert_dir
+    log(f"[ENTER] {enter} {MODE} @ {price:.0f} {why}")
+   else:
+    if not VOL_HIGH:
+     log(f"[WAIT-VOL] Bal ${BAL:.2f} Price {price:.0f} Cert {cert_dir} {cert:.0f}% Hunt {hunt_dir} {hunt_score}/9 Hunter? {IS_HUNTER} Vol {vol_score} Vel {velocity}% - Dead, no trade")
+    else:
+     log(f"[STATS] Bal ${BAL:.2f} NoPos Price {price:.0f} Cert {cert_dir} {cert:.0f}% Hunt {hunt_dir} {hunt_score}/9 Hunter? {IS_HUNTER} Vol {vol_score} Vel {velocity}%")
+   time.sleep(7); continue
+
+  # --- HAVE POSITION ---
+  if ENTRY==0: ENTRY=float(P["avgPrice"])
+  cur="LONG" if P["side"]=="Buy" else "SHORT"; opp="SHORT" if cur=="LONG" else "LONG"
+  run=(price-ENTRY) if cur=="LONG" else (ENTRY-price)
+
+  # BE / SL / TP2 - still dey, but Vol-Dead TP go cut am before SL most times
+  be_need=500 if MODE=="HUNTER" else 800
+  if not BE_DONE and run>=be_need:
+   close_all(); time.sleep(1); q,l=qty_lev(BAL); set_lev(l); order("Buy" if cur=="LONG" else "Sell",q)
+   ENTRY=price; BE_DONE=True; log(f"[BE] {cur} @ {price:.0f} Run ${run:.0f}")
+  sl_need=800 if MODE=="HUNTER" else 1800
+  if run<=-sl_need:
+   log(f"[SL] {cur} @ {price:.0f} Run ${run:.0f}"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
+  if run>=2000:
+   log(f"[TP2] {cur} @ {price:.0f} Run ${run:.0f}"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
+
+  # --- FLIP CHECK - ONLY IF VOL HIGH ---
+  flip=False; why=""
+  if VOL_HIGH and run<200 and time.time()-LAST_CLOSE>600 and FLIPS_TODAY<3:
+   # A. CERT FLIP: Worldwide itself flip to opposite 80%+
+   if cert_dir==opp and cert>=80:
+    flip=True; why=f"CERT-FLIP Worldwide {opp} {cert:.0f}% Vol {vol_score}"
+   # B. HUNTER FLIP: Session opposite Worldwide + Hunt 7/9 + Vol, and hunter direction na opp
+   elif IS_HUNTER and hunt_dir==opp:
+    flip=True; why=f"HUNTER-FLIP Session {opp} {hunt_score}/9 vs Worldwide {cert_dir} Vol {vol_score} Vel {velocity}%"
+   # C. VOL-FLIP: Hunters takeover, hunt opp strong, even if cert never flip yet
+   elif hunt_dir==opp and hunt_score>=7:
+    flip=True; why=f"VOL-FLIP Hunt {opp} {hunt_score}/9 Vol {vol_score} Vel {velocity}%"
+  if flip:
+   log(f"[FLIP] {cur}->{opp} {why} @ {price:.0f} Run ${run:.0f}"); close_all(); time.sleep(1); q,l=qty_lev(BAL); set_lev(l); order("Buy" if opp=="LONG" else "Sell",q)
+   ENTRY=price; MODE="HUNTER"; BE_DONE=False; LAST_CLOSE=time.time(); FLIPS_TODAY+=1; VOL_DEAD_START=0; LAST_CERT_DIR=cert_dir
+   time.sleep(7); continue
+
+  # --- VOL DEAD LOGIC ---
+  if VOL_DEAD:
+   if VOL_DEAD_START==0:
+    VOL_DEAD_START=time.time(); log(f"[VOL-DIE] Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Vol {vol_score} Vel {velocity}% - Hold 2 min, dey watch flip or continue")
+   elif time.time()-VOL_DEAD_START>=120:
+    # 2 min pass, no flip, no vol come back = TP where e is
+    log(f"[TP-DEAD-VOL] {cur} @ {price:.0f} Run ${run:.0f} Vol dead 2min, no flip - TP here, wait for good vol"); close_all(); LAST_CLOSE=time.time(); ENTRY=0; VOL_DEAD_START=0; time.sleep(7); continue
+   else:
+    left=int(120-(time.time()-VOL_DEAD_START))
+    log(f"[HOLD-NO-VOL] Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Vol {vol_score} Vel {velocity}% - {left}s to TP if no vol/flip")
+   time.sleep(7); continue
+  else:
+   # Vol don come back, reset dead timer
+   if VOL_DEAD_START!=0: log(f"[VOL-BACK] Pos {cur} Vol {vol_score} Vel {velocity}% - Vol continue, hold")
+   VOL_DEAD_START=0
+   log(f"[STATS] Bal ${BAL:.2f} Pos {cur} @{ENTRY:.0f} Run ${run:.0f} Price {price:.0f} Cert {cert_dir} {cert:.0f}% Hunt {hunt_dir} {hunt_score}/9 Hunter? {IS_HUNTER} Vol {vol_score} Vel {velocity}% Flips {FLIPS_TODAY}/3")
   time.sleep(7)
- except Exception as e:print("[ERR loop]",e);time.sleep(7)
+ except Exception as e:
+  log(f"[ERR] {e}"); time.sleep(7)
