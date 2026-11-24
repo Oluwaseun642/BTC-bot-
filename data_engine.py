@@ -1,5 +1,5 @@
-# DATA ENGINE V17.1 - ONE FILE - ALL FETCHERS + FALLBACK
-import time,requests,csv,io
+# DATA ENGINE V17.2 FINAL - SESSION-AWARE CERT+HUNT, PILE FREE
+import time,requests,csv,io,datetime
 try:
  from bybit_client import bybit_get
 except: bybit_get=None
@@ -41,7 +41,20 @@ def world_one(y,s):
  except:pass
  return 0
 def world():
- return {"DXY":world_one("DX-Y.NYB","dx.f"),"NQ":world_one("NQ=F","nq.f"),"SPX":world_one("ES=F","es.f"),"GOLD":world_one("GC=F","gc.f"),"JPY":world_one("USDJPY=X","usdjpy"),"US10Y":world_one("^TNX","10y.y")}
+ return {"DXY":world_one("DX-Y.NYB","dx.f"),"NQ":world_one("NQ=F","nq.f"),"SPX":world_one("ES=F","es.f"),"GOLD":world_one("GC=F","gc.f"),"JPY":world_one("USDJPY=X","usdjpy"),"US10Y":world_one("^TNX","10y.y"),"DOW":world_one("YM=F","dj.f"),"VIX":world_one("^VIX","vix"),"OIL":world_one("CL=F","cl.f"),"SILVER":world_one("SI=F","si.f"),"NIKKEI":world_one("^N225","nk.f"),"HS":world_one("^HSI","hs.f"),"ASX":world_one("^AXJO","ax.f"),"KOSPI":world_one("^KS11","ks.f"),"AUDUSD":world_one("AUDUSD=X","audusd"),"FTSE":world_one("^FTSE","ftse.f"),"DAX":world_one("^GDAXI","dax.f"),"CAC":world_one("^FCHI","cac.f"),"EURUSD":world_one("EURUSD=X","eurusd"),"GBPUSD":world_one("GBPUSD=X","gbpusd")}
+def session_now():
+ h=datetime.datetime.now(datetime.timezone.utc).hour+1
+ if 0<=h<8:return "ASIA"
+ elif 8<=h<14:return "LONDON"
+ elif 14<=h<22:return "NY"
+ else:return "ASIA"
+def regions(w):
+ a=(w["NIKKEI"]+w["HS"]+w["ASX"]+w["KOSPI"]+w["AUDUSD"]-w["JPY"])/6
+ e=(w["FTSE"]+w["DAX"]+w["CAC"]+w["EURUSD"]+w["GBPUSD"])/5
+ u=(w["NQ"]+w["SPX"]+w["DOW"]-w["VIX"]-w["OIL"]+w["SILVER"])/6
+ s=session_now();wk=datetime.datetime.now(datetime.timezone.utc).weekday()>=5
+ act=[] if wk else ["ASIA"] if s=="ASIA" else ["EUROPE"] if s=="LONDON" else ["USX","EUROPE"]
+ return {"ASIA":round(a,3),"EUROPE":round(e,3),"USX":round(u,3),"ASIA_DIR":"LONG" if a>0.05 else "SHORT" if a<-0.05 else "NEUTRAL","EUROPE_DIR":"LONG" if e>0.05 else "SHORT" if e<-0.05 else "NEUTRAL","USX_DIR":"LONG" if u>0.05 else "SHORT" if u<-0.05 else "NEUTRAL","SESSION":s,"WEEKEND":wk,"ACTIVE":act}
 def fear():
  d=_get("https://api.alternative.me/fng/")
  if d:
@@ -52,17 +65,14 @@ def news_live():
  d=_get("https://cryptopanic.com/api/v1/posts/?auth_token=public&currencies=BTC&kind=news&filter=hot")
  if d and d.get("results"):
   t=" ".join([x["title"] for x in d["results"][:6]]).lower()
-  bear=("outflow" in t or "hack" in t or "hike" in t or "crash" in t)
-  bull=("inflow" in t or "buy" in t or "etf inflow" in t or "nvidia" in t)
-  dir="SHORT" if bear and not bull else "LONG" if bull and not bear else "NEUTRAL"
-  return {"dir":dir,"txt":t[:180],"n":len(d["results"])}
+  bear=("outflow" in t or "hack" in t or "hike" in t or "crash" in t);bull=("inflow" in t or "buy" in t or "etf inflow" in t or "nvidia" in t)
+  return {"dir":"SHORT" if bear and not bull else "LONG" if bull and not bear else "NEUTRAL","txt":t[:180],"n":len(d["results"])}
  return {"dir":"NEUTRAL","txt":"news fallback","n":0}
 def liq_map(price):
  d=_get("https://fapi.binance.com/fapi/v1/allForceOrders?symbol=BTCUSDT&limit=100",t=5)
  if d:
   try:
-   lo=sum(float(x["origQty"]) for x in d if x["side"]=="SELL");sh=sum(float(x["origQty"]) for x in d if x["side"]=="BUY")
-   tot=(lo+sh)*price
+   lo=sum(float(x["origQty"]) for x in d if x["side"]=="SELL");sh=sum(float(x["origQty"]) for x in d if x["side"]=="BUY");tot=(lo+sh)*price
    if tot>100000:return {"long":lo*price,"short":sh*price,"total":tot,"src":"binance","dom":"HUNT_LONGS_FIRST" if lo>sh else "HUNT_SHORTS_FIRST"}
   except:pass
  return {"long":8500000,"short":6200000,"total":14700000,"src":"ob-proxy","dom":"HUNT_LONGS_FIRST"}
@@ -72,10 +82,10 @@ def past_future():
   ks=[float(x[4]) for x in r["result"]["list"]];trend=round((ks[0]/ks[-1]-1)*100,2) if ks else 0
  except:trend=0
  return {"trend_24h":trend,"next_event":"FOMC Dec 9 hike 93%","etf_1d":-645000000}
-def spot_premium():
+def spot_premium(price):
  try:
-  c=_get("https://api.coinbase.com/v2/prices/BTC-USD/spot");b=price_live()
-  if c and b:return round((float(c["data"]["amount"])/b-1)*100,3)
+  c=_get("https://api.coinbase.com/v2/prices/BTC-USD/spot")
+  if c and price:return round((float(c["data"]["amount"])/price-1)*100,3)
  except:pass
  return 0
 def rsi(cs,per=14):
@@ -120,7 +130,7 @@ def gold_boss(gold_chg,btc_chg):
  div=gold_chg-btc_chg
  if abs(div)>1.5:return {"dir":"LONG" if div>0 else "SHORT","boost":5}
  return {"dir":"NONE","boost":0}
-def hunt(price,L,O,C,al,ah):
+def hunt(price,L,O,C,al,ah,R=None):
  sc=0;rs=[];dom=L["dom"];hd="SHORT" if dom=="HUNT_LONGS_FIRST" else "LONG" if dom=="HUNT_SHORTS_FIRST" else "NONE"
  if dom!="NONE":sc+=2;rs.append(f"Liq {dom} +2")
  if L["total"]>5000000:sc+=2;rs.append(f"Liq ${L['total']/1e6:.1f}M +2")
@@ -132,10 +142,16 @@ def hunt(price,L,O,C,al,ah):
  tgt=al if hd=="SHORT" else ah if hd=="LONG" else 0;dist=abs(price-tgt) if tgt else 9999
  if tgt and dist<=300:sc+=2;rs.append(f"${dist:.0f} to tgt +2")
  elif tgt and dist<=800:sc+=1;rs.append(f"${dist:.0f} to tgt +1")
+ if R and R["ACTIVE"]:
+  # SESSION-AWARE HUNT: only active session regions boost hunt
+  act=R["ACTIVE"];agree=sum(1 for k in act if R[f"{k}_DIR"]==hd);dis=sum(1 for k in act if R[f"{k}_DIR"] not in (hd,"NEUTRAL"))
+  if agree>=len(act) and agree>0:sc+=1;rs.append(f"Session {R['SESSION']} {hd} hunt +1")
+  elif dis>=len(act) and dis>0:sc-=1;rs.append(f"Session {R['SESSION']} vs hunt -1")
  lab="CERTAIN" if sc>=6 else "TIER2" if sc>=4 else "MAYBE" if sc>=3 else "NO_HUNT"
- return {"score":sc,"label":lab,"dir":hd,"target":tgt,"dist":round(dist),"rs":rs}
+ return {"score":max(0,min(9,sc)),"label":lab,"dir":hd,"target":tgt,"dist":round(dist),"rs":rs}
 PILE={"up":0,"down":0,"last":0}
 def pile_upd(h):
+ # PILE = SESSION-FREE - can happen anytime, weekend, midnight, no session
  if h["score"]>=3 and h["dist"]>300 and time.time()-PILE["last"]>300:
   if h["dir"]=="SHORT":PILE["down"]=min(3,PILE["down"]+1)
   elif h["dir"]=="LONG":PILE["up"]=min(3,PILE["up"]+1)
@@ -148,8 +164,8 @@ def get_signal(price=0,candles=None):
  price=price or price_live()
  if not price:return {"cert":0,"direction":"NONE","agree":0,"price":0,"reasons":["No price"]}
  k1=candles or klines("1",20);k15=klines("15",200)
- w=world();fng=fear();fund,oi=funding_oi();rsi_v=rsi(k15);al,ah=asia(k15)
- O=ob();C=cvd();L=liq_map(price);M=macro(w,fund,rsi_v,fng);N=news_live();PF=past_future();SP=spot_premium()
+ w=world();R=regions(w);fng=fear();fund,oi=funding_oi();rsi_v=rsi(k15);al,ah=asia(k15)
+ O=ob();C=cvd();L=liq_map(price);M=macro(w,fund,rsi_v,fng);N=news_live();PF=past_future();SP=spot_premium(price)
  lv=sv=0;rs=[]
  for k in ["DXY","NQ","SPX","GOLD"]:
   v=w[k]
@@ -170,9 +186,15 @@ def get_signal(price=0,candles=None):
  chg5=(k1[-1]["c"]-k1[-6]["c"])/k1[-6]["c"]*100 if len(k1)>=6 and k1[-6]["c"] else 0
  if chg5>0:lv+=1;rs.append("Price up LONG")
  elif chg5<0:sv+=1;rs.append("Price down SHORT")
+ total=8
+ for k,dk in [("ASIA","ASIA_DIR"),("EUROPE","EUROPE_DIR"),("USX","USX_DIR")]:
+  if k not in R["ACTIVE"]:continue
+  total+=1
+  if R[dk]=="LONG":lv+=1;rs.append(f"{k} {R[k]}% LONG [{R['SESSION']}]")
+  elif R[dk]=="SHORT":sv+=1;rs.append(f"{k} {R[k]}% SHORT [{R['SESSION']}]")
  direction="LONG" if lv>sv else "SHORT" if sv>lv else "NONE";agree=max(lv,sv) if direction!="NONE" else lv
- cert=round(agree/8*100,1)
- H=hunt(price,L,O,C,al,ah);P=pile_upd(H)
+ cert=round(agree/total*100,1)
+ H=hunt(price,L,O,C,al,ah,R);P=pile_upd(H)
  sweep="NONE";sweep_done=False
  if k1 and al and ah:
   last=k1[-1]
@@ -197,9 +219,9 @@ def get_signal(price=0,candles=None):
   if P["up"]>=3:trap_dir="LONG";trap_mode="PILE"
   elif P["down"]>=3:trap_dir="SHORT";trap_mode="PILE"
  flip_allowed=(H["label"] in ("TIER2","CERTAIN") and cert>=60 and H["dir"]!=direction and H["dir"]!="NONE")
- out={"cert":cert,"direction":direction,"agree":agree,"wide_cert":cert>=90 and agree>=7,"grounded":75<=cert<90 and agree>=6,"hunt_score":H["score"],"hunt_label":H["label"],"hunt_dir":H["dir"],"hunt_target":H["target"],"hunt_dist":H["dist"],"flip_allowed":flip_allowed,"flip_dir":H["dir"],"flip_reason":f"Hunt {H['score']}/9 {H['dir']} vs Cert {direction}" if flip_allowed else "","sweep_done":sweep_done,"sweep_dir":sweep,"trap_dir":trap_dir,"trap_mode":trap_mode,"pile_up":P["up"],"pile_down":P["down"],"cvd_buy_pct":C["pct"],"price":price,"asia_low":al,"asia_high":ah,"macro_bias":M["bias"],"fng":fng,"rsi":rsi_v,"world":w,"news":N,"liq_src":L["src"],"past":PF,"spot_prem":SP,"reasons":rs,"hunt_reasons":H["rs"],"k1_norm":k1}
+ out={"cert":cert,"direction":direction,"agree":agree,"total":total,"wide_cert":cert>=90 and agree>=total-2,"grounded":75<=cert<90 and agree>=total-3,"hunt_score":H["score"],"hunt_label":H["label"],"hunt_dir":H["dir"],"hunt_target":H["target"],"hunt_dist":H["dist"],"flip_allowed":flip_allowed,"flip_dir":H["dir"],"flip_reason":f"Hunt {H['score']}/9 {H['dir']} vs Cert {direction}" if flip_allowed else "","sweep_done":sweep_done,"sweep_dir":sweep,"trap_dir":trap_dir,"trap_mode":trap_mode,"pile_up":P["up"],"pile_down":P["down"],"cvd_buy_pct":C["pct"],"price":price,"asia_low":al,"asia_high":ah,"macro_bias":M["bias"],"fng":fng,"rsi":rsi_v,"world":w,"regions":R,"news":N,"liq_src":L["src"],"past":PF,"spot_prem":SP,"reasons":rs,"hunt_reasons":H["rs"],"k1_norm":k1}
  CACHE["t"]=time.time();CACHE["d"]=out;return out
 def get_price_and_candles():
  return price_live(),klines("1",20)
 if __name__=="__main__":
- p=price_live();s=get_signal(p);print(f"${p:.0f} {s['direction']} {s['cert']}% Hunt {s['hunt_dir']} {s['hunt_score']}/9 Trap {s['trap_mode']} {s['trap_dir']} Pile {s['pile_up']}/{s['pile_down']} News {s['news']['dir']} Liq {s['liq_src']} Past {s['past']['trend_24h']}%")
+ p=price_live();s=get_signal(p);print(f"${p:.0f} {s['direction']} {s['cert']}% {s['agree']}/{s['total']} Sess {s['regions']['SESSION']} Act {s['regions']['ACTIVE']} Hunt {s['hunt_dir']} {s['hunt_score']}/9 Trap {s['trap_mode']} Pile {s['pile_up']}/{s['pile_down']}")
